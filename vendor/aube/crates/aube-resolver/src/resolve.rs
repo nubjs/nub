@@ -188,7 +188,7 @@ impl Resolver {
         // level of `node_modules/`. Skipped entirely when the setting is
         // off — matches pnpm, which leaves the importer's `dependencies`
         // untouched in that mode.
-        let (hoisted, auto_installed_peers) = if self.auto_install_peers {
+        let (hoisted, mut auto_installed_peers) = if self.auto_install_peers {
             hoist_auto_installed_peers(canonical)
         } else {
             (canonical, crate::AutoInstalledPeers::new())
@@ -204,8 +204,25 @@ impl Resolver {
         };
         let _diag_peer =
             aube_util::diag::Span::new(aube_util::diag::Category::Resolver, "peer_context_apply");
+        let database_peers = crate::peer_context::database_peer_targets(
+            &hoisted,
+            &self.dependency_policy.package_extensions,
+            &peer_options,
+        );
+        // Gated as pnpm gates it (`hoistPeers`): either setting asks for it.
+        let hoisted = if self.auto_install_peers || self.dedupe_peer_dependents {
+            crate::hoist_missing_peers(
+                hoisted,
+                &mut auto_installed_peers,
+                &peer_options,
+                self.auto_install_peers,
+            )
+        } else {
+            hoisted
+        };
         let mut contextualized = apply_peer_contexts(hoisted, &peer_options)?;
         crate::remove_auto_installed_peers(&mut contextualized, &auto_installed_peers);
+        crate::peer_context::bind_database_peers(&mut contextualized, &database_peers);
         drop(_diag_peer);
         tracing::debug!(
             "peer-context pass produced {} contextualized packages",

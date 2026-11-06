@@ -733,6 +733,7 @@ fn package_extensions_inject_into_flat_dep_map() {
         optional_dependencies: BTreeMap::new(),
         peer_dependencies: BTreeMap::new(),
         peer_dependencies_meta: BTreeMap::new(),
+        ..Default::default()
     };
 
     apply_package_extensions_to_deps("juggler", "0.0.0-git", &mut deps, &[extension]);
@@ -754,6 +755,7 @@ fn package_extensions_skip_flat_dep_map_on_selector_mismatch() {
         optional_dependencies: BTreeMap::new(),
         peer_dependencies: BTreeMap::new(),
         peer_dependencies_meta: BTreeMap::new(),
+        ..Default::default()
     };
     apply_package_extensions_to_deps("juggler", "1.0.0", &mut deps, &[extension]);
     assert!(deps.is_empty());
@@ -777,6 +779,7 @@ fn package_extensions_merge_dependency_maps() {
         )]
         .into_iter()
         .collect(),
+        ..Default::default()
     };
 
     apply_package_extensions(&mut pkg, &[extension]);
@@ -832,6 +835,7 @@ fn package_extensions_do_not_overwrite_existing_dependency_maps() {
         ]
         .into_iter()
         .collect(),
+        ..Default::default()
     };
 
     apply_package_extensions(&mut pkg, &[extension]);
@@ -7893,27 +7897,12 @@ fn peer_suffix_stops_at_supplier_of_the_peer() {
     );
 }
 
-// A META-ONLY optional peer (declared in `peerDependenciesMeta` but absent
-// from `peerDependencies`, exactly how `follow-redirects` declares `debug`)
-// must NOT be eagerly bound from a distant ancestor's *regular* dependency.
-// pnpm treats such a peer as resolvable but then collapses the binding back
-// out via `dedupe-peer-dependents` whenever a peer-free path exists, so the
-// realistic lockfile keeps the whole chain bare:
-//   provider        (carries debug@3.2.7 as a plain dep)
-//     mid_a          (bare)
-//       mid_b        (bare)
-//         mid_c      (bare)
-//           axios    (bare)
-//             fr     (bare — follow-redirects; debug stays a transitive peer)
-// Binding `(debug@3.2.7)` onto that chain (as a since-reverted experiment did)
-// produced suffixed variants that aube's dedupe pass — which only collapses
-// *declared*-peer variants — never merged. The same subtree then hashed
-// differently per install scope (whole-workspace vs single-member), splitting
-// a shared global-virtual-store singleton in two and surfacing at runtime as a
-// duplicate-instance "Cannot find module". This test pins the bare shape so
-// the over-binding can't regress.
+// A name only in `peer_dependencies_meta` is not a peer to this pass: the
+// resolver is what lists a registry package's meta-only name in
+// `peer_dependencies`. A graph that never did stays bare down the whole chain,
+// even with a distant ancestor carrying the name as a plain dependency.
 #[test]
-fn meta_only_optional_peer_stays_bare_to_keep_singleton_shared() {
+fn meta_only_optional_peer_stays_bare_in_a_graph_without_the_peer() {
     // provider carries debug as a plain (regular) dependency.
     let provider = mk_locked(
         "provider",
@@ -7955,9 +7944,6 @@ fn meta_only_optional_peer_stays_bare_to_keep_singleton_shared() {
     let out = apply_peer_contexts(graph, &PeerContextOptions::default()).expect("should converge");
     let mut keys: Vec<&String> = out.packages.keys().collect();
     keys.sort();
-    // Expected: the meta-only optional `debug` peer is NOT folded into any
-    // dep_path, so every node on the chain has a single bare instance and the
-    // subtree hashes identically regardless of install scope.
     for bare in [
         "provider@1.0.0",
         "mid_a@1.0.0",

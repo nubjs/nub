@@ -225,6 +225,11 @@ pub(crate) struct ResolveDriver<'a> {
     /// can't drag a major nothing depends on into the graph (the Expo/RN
     /// `@babel/core` 8-vs-7 break). Full rationale at the drain site.
     deferred_auto_peers: Vec<ResolveTask>,
+    /// A lockfile's optional edges that a database entry names, parked until
+    /// the other versions in the graph are known. A lockfile cannot say whether
+    /// such an edge is that repair, which `database_peer_targets` recomputes, or
+    /// an optional dependency the package declares. Decided at the drain site.
+    deferred_database_edges: Vec<ResolveTask>,
 
     /// ISO-8601 UTC cutoff string used by the version picker. Seeded
     /// from `minimum_release_age` for supply-chain mitigation;
@@ -405,6 +410,7 @@ impl<'a> ResolveDriver<'a> {
             catalog_picks: BTreeMap::new(),
             deferred_transitives: Vec::new(),
             deferred_auto_peers: Vec::new(),
+            deferred_database_edges: Vec::new(),
             published_by,
             time_cutoff: None,
             age_gate_cutoff,
@@ -649,6 +655,20 @@ impl<'a> ResolveDriver<'a> {
                     }
                     continue;
                 }
+                // The edge stays while its target does. Otherwise it may be the
+                // repair going stale, for `database_peer_targets` to rebind, or a
+                // dependency the package declares, which takes its manifest to
+                // tell. Asking only here keeps an unchanged graph from fetching.
+                if let Some(edge) = self.deferred_database_edges.pop() {
+                    let target_stays = self
+                        .resolved_versions
+                        .get(&edge.name)
+                        .is_some_and(|versions| versions.contains(&edge.range));
+                    if target_stays || self.parent_declares(&edge).await? {
+                        self.queue.push_back(edge);
+                    }
+                    continue;
+                }
                 return Ok(());
             };
 
@@ -658,6 +678,86 @@ impl<'a> ResolveDriver<'a> {
 }
 
 impl<'a> ResolveDriver<'a> {
+    /// Wait for one in-flight packument fetch and record what came back.
+    async fn record_next_fetch(&mut self, fetch_name: &str) -> Result<(), Error> {
+        match self.fetcher.join_next().await {
+            Some(Ok((key, Ok((name, packument, source, trust_history))))) => {
+                if let FetchKey::Exact(exact_name, _) = &key {
+                    self.failed_fetches
+                        .remove(&FetchKey::Full(exact_name.clone()));
+                }
+                if let super::fetch::FetchSource::Primer { sparse } = source {
+                    self.fetcher
+                        .note_primer_seeded(name.clone(), super::fetch::PrimerSeed { sparse });
+                }
+                self.record_fetch_result(name, packument, trust_history);
+                self.packument_fetch_count += 1;
+            }
+            Some(Ok((key, Err(e)))) => {
+                // Store failed fetches in the side table instead
+                // of propagating immediately. pnpm parity.
+                match &e {
+                    crate::Error::Registry(_, _) => {}
+                    _ => return Err(e),
+                }
+                self.failed_fetches.insert(key, e);
+            }
+            Some(Err(join_err)) => {
+                return Err(Error::Registry("(join)".to_string(), join_err.to_string()));
+            }
+            None => {
+                // join_next returns None only when the JoinSet is
+                // empty. ensure_fetch above guarantees at least one
+                // task is in flight if the cache still doesn't
+                // hold this name, so None means the spawn failed
+                // silently. Surface it.
+                return Err(Error::Registry(
+                    fetch_name.to_string(),
+                    "packument fetch disappeared before completing".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `edge`'s package declares it, going by the published manifest after
+    /// package extensions and `readPackage`, as a fresh resolve sees it. A manifest
+    /// that cannot be read keeps the edge: a stale repair costs one package, a lost
+    /// dependency breaks one.
+    async fn parent_declares(&mut self, edge: &ResolveTask) -> Result<bool, Error> {
+        let Some(parent) = edge.parent.as_ref().and_then(|p| self.resolved.get(p)) else {
+            return Ok(true);
+        };
+        let name = parent.registry_name().to_string();
+        let version = parent.version.clone();
+        let key = FetchKey::Full(name.clone());
+        while !self.resolver.cache.contains_key(&name) && !self.failed_fetches.contains_key(&key) {
+            self.ensure_fetch(&name);
+            self.record_next_fetch(&name).await?;
+        }
+        let Some(mut manifest) = self
+            .resolver
+            .cache
+            .get(&name)
+            .and_then(|packument| packument.versions.get(&version))
+            .cloned()
+        else {
+            return Ok(true);
+        };
+        apply_package_extensions(
+            &mut manifest,
+            &self.resolver.dependency_policy.package_extensions,
+        );
+        if let Some(hook) = self.resolver.read_package_hook.as_mut() {
+            manifest = hook
+                .read_package(manifest)
+                .await
+                .map_err(|e| Error::Registry(name.clone(), format!("readPackage hook: {e}")))?;
+        }
+        Ok(manifest.dependencies.contains_key(&edge.name)
+            || manifest.optional_dependencies.contains_key(&edge.name))
+    }
+
     /// Decide whether a primer-seeded `Found` pick must be refetched
     /// live before we trust it (the always-on pick-site freshness gate).
     /// Only consulted when the pick came from the bundled primer (checked
@@ -843,43 +943,7 @@ impl<'a> ResolveDriver<'a> {
             } else {
                 self.ensure_fetch(&fetch_name);
             }
-            match self.fetcher.join_next().await {
-                Some(Ok((key, Ok((name, packument, source, trust_history))))) => {
-                    if let FetchKey::Exact(exact_name, _) = &key {
-                        self.failed_fetches
-                            .remove(&FetchKey::Full(exact_name.clone()));
-                    }
-                    if let super::fetch::FetchSource::Primer { sparse } = source {
-                        self.fetcher
-                            .note_primer_seeded(name.clone(), super::fetch::PrimerSeed { sparse });
-                    }
-                    self.record_fetch_result(name, packument, trust_history);
-                    self.packument_fetch_count += 1;
-                }
-                Some(Ok((key, Err(e)))) => {
-                    // Store failed fetches in the side table instead
-                    // of propagating immediately. pnpm parity.
-                    match &e {
-                        crate::Error::Registry(_, _) => {}
-                        _ => return Err(e),
-                    }
-                    self.failed_fetches.insert(key, e);
-                }
-                Some(Err(join_err)) => {
-                    return Err(Error::Registry("(join)".to_string(), join_err.to_string()));
-                }
-                None => {
-                    // join_next returns None only when the JoinSet is
-                    // empty. ensure_fetch above guarantees at least one
-                    // task is in flight if the cache still doesn't
-                    // hold this name, so None means the spawn failed
-                    // silently. Surface it.
-                    return Err(Error::Registry(
-                        fetch_name.clone(),
-                        "packument fetch disappeared before completing".to_string(),
-                    ));
-                }
-            }
+            self.record_next_fetch(&fetch_name).await?;
         }
         self.packument_fetch_time += wait_start.elapsed();
 
@@ -1692,11 +1756,10 @@ impl<'a> ResolveDriver<'a> {
         // optional `typescript`, …). Synthesize the same `*` so peer
         // context resolves these exactly like pnpm: an optional peer that
         // a real ancestor / the workspace root provides (typescript) gets
-        // a dep-path suffix, while one nothing on the path provides
-        // (supports-color) is left unresolved and surfaces under
-        // `transitivePeerDependencies`. The optional-peer branch in
-        // `visit_peer_context` is what keeps the graph-wide scan from
-        // binding the latter to an unrelated copy in the tree.
+        // a dep-path suffix, as does one `hoist_missing_peers` can supply
+        // from elsewhere in the graph, while one the graph does not hold
+        // (supports-color, usually) is left unresolved and surfaces under
+        // `transitivePeerDependencies`.
         let mut peer_deps = version_meta.peer_dependencies.clone();
         for name in version_meta.peer_dependencies_meta.keys() {
             peer_deps
@@ -3173,14 +3236,26 @@ impl<'a> ResolveDriver<'a> {
                 } else {
                     DepType::Production
                 };
-                self.queue.push_back(ResolveTask::transitive(
+                let edge = ResolveTask::transitive(
                     dep_name.clone(),
                     canonical_version,
                     dep_type,
                     dep_path.clone(),
                     task.importer.clone(),
                     child_ancestors.clone(),
-                ));
+                );
+                if locked_pkg.optional_dependencies.contains_key(dep_name)
+                    && crate::package_ext::is_database_peer(
+                        &self.resolver.dependency_policy.package_extensions,
+                        locked_pkg.registry_name(),
+                        &version,
+                        dep_name,
+                    )
+                {
+                    self.deferred_database_edges.push(edge);
+                } else {
+                    self.queue.push_back(edge);
+                }
             }
         }
         self.lockfile_reuse_count += 1;

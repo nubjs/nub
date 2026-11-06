@@ -1,6 +1,6 @@
 //! Peer-dependency post-processing over an already-resolved graph.
 //!
-//! Two user-visible passes live here:
+//! The user-visible passes that live here:
 //!
 //! * [`hoist_auto_installed_peers`] — temporarily promotes peers declared
 //!   by direct dependencies up to importer direct deps so the passes that
@@ -12,21 +12,29 @@
 //!   into the lockfile's `importers:` section or links them into the
 //!   project's top-level `node_modules/`. Idempotent on graphs that
 //!   already ship with those hoists (npm v7+ output).
+//! * [`hoist_missing_peers`] — the same for peers any of an importer's packages
+//!   miss, from the versions the graph already holds.
+//! * [`bind_database_peers`] — wires an embedder database's optional peers as
+//!   plain optional edges, after the passes they must not reach.
 //! * [`apply_peer_contexts`] — computes pnpm-style `(peer@ver)` suffixes
 //!   on contextualized `dep_path`s. Drives the sibling-symlink wiring in
 //!   `aube-linker` so each subtree that pins different peer versions gets
 //!   its own virtual-store entry.
 //!
-//! [`detect_unmet_peers`] reports what the two passes above couldn't wire
+//! [`detect_unmet_peers`] reports what the passes above couldn't wire
 //! up, so the CLI can surface warnings.
 //!
 //! Call order from `Resolver::resolve`: `hoist_auto_installed_peers`
-//! (fresh resolves only) → `apply_peer_contexts` →
-//! `remove_auto_installed_peers` → `detect_unmet_peers`.
+//! (fresh resolves only) → `database_peer_targets` → `hoist_missing_peers` →
+//! `apply_peer_contexts` → `remove_auto_installed_peers` →
+//! `bind_database_peers` → `detect_unmet_peers`.
 
+use crate::package_ext::database_peers_by_package;
 use crate::version_satisfies;
-use crate::{FxHashMap, FxHashSet};
-use aube_lockfile::{DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph, LockfileKind};
+use crate::{FxHashMap, FxHashSet, PackageExtension};
+use aube_lockfile::{
+    DepType, DirectDep, LocalSource, LockedPackage, LockfileGraph, LockfileKind, PeerDepMeta,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A peer dependency whose declared range doesn't match the version the
@@ -115,10 +123,10 @@ pub type AutoInstalledPeers = BTreeMap<String, BTreeSet<String>>;
 /// declare that isn't already a direct dep of the importer into a synthetic
 /// importer entry — mirroring how pnpm's `auto-install-peers=true`
 /// resolution treats a missing REQUIRED peer as if the root had requested
-/// it. An optional peer (`peerDependenciesMeta.optional`) is never
-/// promoted; the synthetic entry inherits the requiring package's
-/// dependency kind so section-filtered installs retain it only when they
-/// retain the package that needs it.
+/// it. An optional peer (`peerDependenciesMeta.optional`) is
+/// [`hoist_missing_peers`]'s to promote; the synthetic entry inherits the
+/// requiring package's dependency kind so section-filtered installs retain
+/// it only when they retain the package that needs it.
 ///
 /// The hoisted entries exist so that [`apply_peer_contexts`] can resolve
 /// peers from the importer scope and so reachability-based passes
@@ -182,10 +190,9 @@ pub fn hoist_auto_installed_peers(mut graph: LockfileGraph) -> (LockfileGraph, A
                 }
                 // Optional peers (`peerDependenciesMeta.optional = true`)
                 // are opt-in integrations — pnpm's `auto-install-peers`
-                // only fills in *required* peers and never promotes an
-                // optional one to the importer, even when another
-                // dependency already pulled a matching version into the
-                // graph. Mirrors the enqueue-side skip in
+                // only installs *required* peers, and an optional one is
+                // promoted only by `hoist_missing_peers`, from what the
+                // graph already holds. Mirrors the enqueue-side skip in
                 // `resolve/driver.rs`. Skipped before the dep_type
                 // reconciliation below so an optional declaration can't
                 // reclassify an entry hoisted for a required peer.
@@ -283,6 +290,392 @@ pub fn hoist_auto_installed_peers(mut graph: LockfileGraph) -> (LockfileGraph, A
     (graph, hoisted_names)
 }
 
+/// What each package's `database_peers` point at: `package key -> peer -> target
+/// key`, all canonical. See [`database_peer_targets`].
+pub(crate) type DatabasePeerTargets = BTreeMap<String, BTreeMap<String, String>>;
+
+/// The highest version of each `database_peers` target any context of the package
+/// holds on its path. A context is what the peer-context pass visits, so this
+/// finds what an optional peer would, from the same places: a target nothing on
+/// the path provides stays unbound, and the package's phantom eject still decides
+/// how its import resolves.
+///
+/// One target per package, whatever its consumers depend on, is what keeps a
+/// database entry from splitting the package. As a peer it gives two workspace
+/// members on different versions of the target two copies where pnpm, which has
+/// no such entry, installs one. pnpm's answer to the same import is likewise one
+/// copy resolving one hoisted target.
+pub(crate) fn database_peer_targets(
+    graph: &LockfileGraph,
+    extensions: &[PackageExtension],
+    options: &PeerContextOptions,
+) -> DatabasePeerTargets {
+    let declared = database_peers_by_package(graph, extensions);
+    if declared.is_empty() {
+        return DatabasePeerTargets::new();
+    }
+    let bound = probe_peer_pass(graph, options, |probe| {
+        for (key, peers) in &declared {
+            let Some(pkg) = probe.packages.get_mut(key) else {
+                continue;
+            };
+            for (peer, range) in peers {
+                pkg.peer_dependencies.insert(peer.clone(), range.clone());
+                pkg.peer_dependencies_meta
+                    .insert(peer.clone(), PeerDepMeta { optional: true });
+            }
+        }
+    });
+
+    let mut candidates: BTreeMap<(&str, &str), Vec<&LockedPackage>> = BTreeMap::new();
+    for (variant, pkg) in &bound.packages {
+        let Some((key, peers)) = declared.get_key_value(canonical_tail(variant)) else {
+            continue;
+        };
+        for peer in peers.keys() {
+            let target = pkg.dependencies.get(peer).and_then(|tail| {
+                graph
+                    .packages
+                    .get(&format!("{peer}@{}", canonical_tail(tail)))
+            });
+            if let Some(target) = target {
+                candidates
+                    .entry((key.as_str(), peer.as_str()))
+                    .or_default()
+                    .push(target);
+            }
+        }
+    }
+    let mut targets = DatabasePeerTargets::new();
+    for ((key, peer), bucket) in candidates {
+        if let Some(target) = highest_version(bucket.into_iter(), |_| true) {
+            targets
+                .entry(key.to_string())
+                .or_default()
+                .insert(peer.to_string(), target.dep_path.clone());
+        }
+    }
+    targets
+}
+
+/// Wire each package's [`database_peer_targets`] as an optional edge, once the
+/// peer-context pass is over. An edge in that pass would be a path pnpm does not
+/// have, carrying the package's dependencies into its target's subtree as peer
+/// providers and the target's peers back into the package's own key.
+///
+/// A target with several variants offers its largest, ties going to the greater
+/// key, the variant [`absorb_peer_subsets`] would keep.
+pub(crate) fn bind_database_peers(graph: &mut LockfileGraph, targets: &DatabasePeerTargets) {
+    if targets.is_empty() {
+        return;
+    }
+    let mut largest: BTreeMap<&str, &LockedPackage> = BTreeMap::new();
+    for (key, pkg) in &graph.packages {
+        // Ascending key order makes the later of two equal sizes the greater key.
+        let canonical = canonical_tail(key);
+        if largest
+            .get(canonical)
+            .is_none_or(|other| pkg.dependencies.len() >= other.dependencies.len())
+        {
+            largest.insert(canonical, pkg);
+        }
+    }
+    let mut edges: Vec<(String, String, String)> = Vec::new();
+    for key in graph.packages.keys() {
+        let Some(peers) = targets.get(canonical_tail(key)) else {
+            continue;
+        };
+        for (peer, target) in peers {
+            if let Some(variant) = largest.get(target.as_str()) {
+                let tail = variant
+                    .dep_path
+                    .strip_prefix(&format!("{peer}@"))
+                    .unwrap_or(&variant.version);
+                edges.push((key.clone(), peer.clone(), tail.to_string()));
+            }
+        }
+    }
+    for (key, peer, tail) in edges {
+        if let Some(pkg) = graph.packages.get_mut(&key) {
+            pkg.optional_dependencies.insert(peer.clone(), tail.clone());
+            pkg.dependencies.insert(peer, tail);
+        }
+    }
+}
+
+/// One run of the peer-context pass over a copy of `graph` that `edit` changed.
+fn probe_peer_pass(
+    graph: &LockfileGraph,
+    options: &PeerContextOptions,
+    edit: impl FnOnce(&mut LockfileGraph),
+) -> LockfileGraph {
+    let mut probe = LockfileGraph {
+        importers: graph.importers.clone(),
+        packages: graph.packages.clone(),
+        ..Default::default()
+    };
+    edit(&mut probe);
+    apply_peer_contexts_once(probe, options)
+}
+
+/// The highest semver version among `packages` that `qualifies`. An unparseable
+/// version never wins.
+fn highest_version<'g>(
+    packages: impl Iterator<Item = &'g LockedPackage>,
+    qualifies: impl Fn(&LockedPackage) -> bool,
+) -> Option<&'g LockedPackage> {
+    packages
+        .filter(|p| qualifies(p))
+        .filter_map(|p| {
+            node_semver::Version::parse(&p.version)
+                .ok()
+                .map(|version| (version, p))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, p)| p)
+}
+
+/// Temporarily promote the peers an importer's packages miss to the importer's
+/// direct deps, from the versions the graph already holds. pnpm's `hoistPeers`,
+/// `addResolvedPeerProviders` and `getHoistableOptionalPeers`, in pnpm's order:
+/// required peers until none can be hoisted, then the providers of peers that
+/// packages bound from a parent, then one round of optional ones.
+///
+/// This is why pnpm installs `my-bad@0.2.11(vite@7.3.7)` once where a provider on
+/// only some paths would otherwise leave a bare copy beside the bound one: a
+/// package that misses the peer binds it here too. The order decides the version:
+/// with `@babel/core` 8 in the graph through `@angular/compiler-cli`, `styled-jsx`'s
+/// optional `@babel/core` takes 7 if a package elsewhere requires `^7` with nothing
+/// providing it, or binds 7 from a parent. Otherwise it takes the highest version
+/// its range accepts. Nothing new is installed, since a peer with no version in the
+/// graph stays missing.
+///
+/// A peer is missing when the peer-context pass finds no provider on the package's
+/// path, so that pass decides it. Each round can expose more: a hoisted provider's
+/// own peers are visited for the first time from the importer. Every round hoists a
+/// new name or ends the loop, so it ends.
+///
+/// An optional candidate whose own peers the importer provides at versions outside
+/// their ranges is passed over (pnpm's `peersAcceptProvidedVersions`): hoisting it
+/// would create a peer conflict the importer never asked for. A workspace root's
+/// own dependency needs no bound, since the pass already resolves a missing peer
+/// from the root (`resolve_from_workspace_root`). Additions are recorded in
+/// `hoisted` for [`remove_auto_installed_peers`].
+pub fn hoist_missing_peers(
+    mut graph: LockfileGraph,
+    hoisted: &mut AutoInstalledPeers,
+    options: &PeerContextOptions,
+    auto_install_peers: bool,
+) -> LockfileGraph {
+    loop {
+        let path_only = probe_peer_pass(&graph, options, require_providers_on_path);
+        let mut additions = hoistable_peers(&graph, &path_only, false);
+        if additions.is_empty() && auto_install_peers {
+            additions = parent_provided_peers(&graph, &path_only);
+        }
+        if additions.is_empty() {
+            let bound = probe_peer_pass(&graph, options, |_| {});
+            additions = hoistable_peers(&graph, &bound, true);
+        }
+        if additions.is_empty() {
+            return graph;
+        }
+        for (importer_path, deps) in additions {
+            let names = hoisted.entry(importer_path.clone()).or_default();
+            names.extend(deps.iter().map(|d| d.name.clone()));
+            if let Some(direct_deps) = graph.importers.get_mut(&importer_path) {
+                direct_deps.extend(deps);
+                direct_deps.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+        }
+    }
+}
+
+/// Leave a required peer nothing but its path to bind from, the way an optional
+/// one has: without the copy the resolver auto-installed beside the package, or
+/// the pass's graph-wide scan. What is then unbound is what pnpm finds missing.
+fn require_providers_on_path(probe: &mut LockfileGraph) {
+    for pkg in probe.packages.values_mut() {
+        let required: Vec<String> = pkg
+            .peer_dependencies
+            .keys()
+            .filter(|peer| {
+                !pkg.peer_dependencies_meta
+                    .get(*peer)
+                    .is_some_and(|meta| meta.optional)
+            })
+            .cloned()
+            .collect();
+        for peer in required {
+            pkg.dependencies.remove(&peer);
+            pkg.peer_dependencies_meta
+                .insert(peer, PeerDepMeta { optional: true });
+        }
+    }
+}
+
+/// One round of [`hoist_missing_peers`]: what each importer can hoist of the peers
+/// that are `optional` or else required in `graph`, given `bound`, the outcome of a
+/// peer-context pass over it.
+fn hoistable_peers(
+    graph: &LockfileGraph,
+    bound: &LockfileGraph,
+    optional: bool,
+) -> BTreeMap<String, Vec<DirectDep>> {
+    let mut providers: FxHashMap<&str, Vec<&LockedPackage>> = FxHashMap::default();
+    for pkg in graph.packages.values() {
+        providers.entry(pkg.name.as_str()).or_default().push(pkg);
+    }
+    let direct_versions = |deps: &[DirectDep]| -> FxHashMap<String, String> {
+        deps.iter()
+            .filter_map(|d| {
+                let pkg = graph.packages.get(&d.dep_path)?;
+                Some((d.name.clone(), pkg.version.clone()))
+            })
+            .collect()
+    };
+    let root_versions = graph
+        .importers
+        .get(".")
+        .map(|deps| direct_versions(deps))
+        .unwrap_or_default();
+
+    let mut additions: BTreeMap<String, Vec<DirectDep>> = BTreeMap::new();
+    for (importer_path, deps) in &bound.importers {
+        let direct_deps = graph.importers.get(importer_path);
+        let mut provided = root_versions.clone();
+        provided.extend(direct_versions(
+            direct_deps.map(Vec::as_slice).unwrap_or_default(),
+        ));
+        for (peer, ranges) in missing_peers(graph, bound, deps, optional) {
+            if direct_deps.is_some_and(|deps| deps.iter().any(|d| d.name == peer)) {
+                continue;
+            }
+            let provider = providers.get(peer.as_str()).and_then(|bucket| {
+                highest_version(bucket.iter().copied(), |candidate| {
+                    ranges
+                        .iter()
+                        .all(|range| version_satisfies(&candidate.version, range))
+                        && (!optional
+                            || candidate.peer_dependencies.iter().all(|(name, range)| {
+                                provided
+                                    .get(name)
+                                    .is_none_or(|version| version_satisfies(version, range))
+                            }))
+                })
+            });
+            if let Some(provider) = provider {
+                additions
+                    .entry(importer_path.clone())
+                    .or_default()
+                    .push(DirectDep {
+                        name: peer,
+                        dep_path: provider.dep_path.clone(),
+                        dep_type: DepType::Optional,
+                        specifier: None,
+                    });
+            }
+        }
+    }
+    additions
+}
+
+/// What each importer can hoist of the peers its packages bound from a parent in
+/// `path_only`, where nothing but the path provides a required peer. A package
+/// elsewhere under the importer that misses one takes that version ahead of the
+/// highest in the graph. pnpm keeps whichever parent it reached last, which depends
+/// on its traversal; several versions here give the highest.
+fn parent_provided_peers(
+    graph: &LockfileGraph,
+    path_only: &LockfileGraph,
+) -> BTreeMap<String, Vec<DirectDep>> {
+    let mut additions: BTreeMap<String, Vec<DirectDep>> = BTreeMap::new();
+    for (importer_path, roots) in &path_only.importers {
+        let mut bound: BTreeMap<&str, Vec<&LockedPackage>> = BTreeMap::new();
+        for pkg in reachable(path_only, roots) {
+            for peer in pkg.peer_dependencies.keys() {
+                let provider = pkg.dependencies.get(peer).and_then(|tail| {
+                    graph
+                        .packages
+                        .get(&format!("{peer}@{}", canonical_tail(tail)))
+                });
+                if let Some(provider) = provider {
+                    bound.entry(peer).or_default().push(provider);
+                }
+            }
+        }
+        for (peer, bucket) in bound {
+            if roots.iter().any(|d| d.name == peer) {
+                continue;
+            }
+            if let Some(provider) = highest_version(bucket.into_iter(), |_| true) {
+                additions
+                    .entry(importer_path.clone())
+                    .or_default()
+                    .push(DirectDep {
+                        name: peer.to_string(),
+                        dep_path: provider.dep_path.clone(),
+                        dep_type: DepType::Optional,
+                        specifier: None,
+                    });
+            }
+        }
+    }
+    additions
+}
+
+/// The peers with no provider on the path of a package reachable from `roots`,
+/// that `graph` declares `optional` or else required, with the ranges declared for
+/// each. `bound` records a resolved peer as an edge in `dependencies`, so a missing
+/// one has none.
+fn missing_peers(
+    graph: &LockfileGraph,
+    bound: &LockfileGraph,
+    roots: &[DirectDep],
+    optional: bool,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut missing: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for pkg in reachable(bound, roots) {
+        let declared = graph.packages.get(canonical_tail(&pkg.dep_path));
+        for (peer, range) in &pkg.peer_dependencies {
+            let declared_optional = declared.map(|pkg| {
+                pkg.peer_dependencies_meta
+                    .get(peer)
+                    .is_some_and(|meta| meta.optional)
+            });
+            if declared_optional == Some(optional) && !pkg.dependencies.contains_key(peer) {
+                missing
+                    .entry(peer.clone())
+                    .or_default()
+                    .insert(range.clone());
+            }
+        }
+    }
+    missing
+}
+
+/// The packages of `graph` reachable from `roots`, following its dependency edges.
+fn reachable<'g>(graph: &'g LockfileGraph, roots: &[DirectDep]) -> Vec<&'g LockedPackage> {
+    let mut packages = Vec::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
+    let mut stack: Vec<String> = roots.iter().map(|d| d.dep_path.clone()).collect();
+    while let Some(key) = stack.pop() {
+        let Some(pkg) = graph.packages.get(&key) else {
+            continue;
+        };
+        if !seen.insert(key) {
+            continue;
+        }
+        packages.push(pkg);
+        stack.extend(
+            pkg.dependencies
+                .iter()
+                .map(|(name, tail)| format!("{name}@{tail}")),
+        );
+    }
+    packages
+}
+
 /// Strip the importer entries [`hoist_auto_installed_peers`] synthesized,
 /// once the peer-context and graph-filter passes that needed them have
 /// run.
@@ -298,6 +691,12 @@ pub fn remove_auto_installed_peers(graph: &mut LockfileGraph, hoisted: &AutoInst
         if let Some(deps) = graph.importers.get_mut(importer_path) {
             deps.retain(|d| !names.contains(&d.name));
         }
+    }
+    // A hoisted provider was also visited from the importer, and its peers may
+    // bind differently there than under the packages that use it. Nothing
+    // reaches that variant once the importer entry is gone.
+    if !hoisted.is_empty() {
+        crate::platform::prune_unreachable(graph);
     }
 }
 
@@ -551,31 +950,28 @@ pub fn peer_pass_for_import(
     ) {
         return Ok(graph);
     }
-    let (hoisted, auto_installed) = hoist_auto_installed_peers(graph);
-    let mut graph = apply_peer_contexts(hoisted, &PeerContextOptions::default())?;
+    let options = PeerContextOptions::default();
+    let (hoisted, mut auto_installed) = hoist_auto_installed_peers(graph);
+    let hoisted = hoist_missing_peers(hoisted, &mut auto_installed, &options, true);
+    let mut graph = apply_peer_contexts(hoisted, &options)?;
     remove_auto_installed_peers(&mut graph, &auto_installed);
     Ok(graph)
 }
 
 /// Cross-subtree peer-variant dedupe. When `dedupe-peer-dependents` is
 /// on, packages that landed at different contextualized dep_paths but
-/// resolved every declared peer to the *same* version (ignoring the
-/// nested peer suffix on each peer tail) collapse into a single
+/// resolved every declared peer to the *same* copy collapse into a single
 /// canonical variant — chosen as the lexicographically smallest key in
-/// the equivalence class. References in every surviving
-/// `LockedPackage.dependencies` map and every `importers[*]` direct
-/// dep get rewritten through the old→canonical map, and the
-/// non-canonical entries are dropped from `packages`.
+/// the equivalence class — and a variant missing peers another one
+/// resolved collapses into that one ([`absorb_peer_subsets`]). References
+/// in every surviving `LockedPackage.dependencies` map and every
+/// `importers[*]` direct dep get rewritten through the old→canonical map,
+/// and the non-canonical entries are dropped from `packages`.
 ///
 /// Packages whose `peer_dependencies` map is empty — i.e. the canonical
 /// base already has only one variant — are skipped.
 pub(crate) fn dedupe_peer_variants(graph: LockfileGraph) -> LockfileGraph {
     let canonical_base = |key: &str| -> String { canonical_tail(key).to_string() };
-    // Only the peer-bearing part of the resolved peer tail is
-    // comparable across subtrees — the nested suffix could differ even
-    // for peer-equivalent variants on mid-iterations of the outer
-    // fixed-point loop.
-    let peer_base = |tail: &str| -> String { canonical_tail(tail).to_string() };
 
     // Group dep_paths by their peer-free base name.
     let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -595,7 +991,11 @@ pub(crate) fn dedupe_peer_variants(graph: LockfileGraph) -> LockfileGraph {
         keys.sort();
         // Union-find over equivalence classes. Two variants are
         // equivalent when each declared peer name resolves to the same
-        // peer base in both (or is missing from both).
+        // copy in both (or is missing from both). The whole tail decides:
+        // `plugin(vite@7(terser@5.30))` must not stand in for
+        // `plugin(vite@7(terser@5.31))`, which would hand one workspace
+        // member's plugin the other member's `vite`. A nested suffix that
+        // is only a subset is `absorb_peer_subsets`' to collapse.
         let mut parent: Vec<usize> = (0..keys.len()).collect();
         fn find(parent: &mut [usize], i: usize) -> usize {
             if parent[i] == i {
@@ -628,7 +1028,7 @@ pub(crate) fn dedupe_peer_variants(graph: LockfileGraph) -> LockfileGraph {
                         pa.dependencies.get(name.as_str()),
                         pb.dependencies.get(name.as_str()),
                     ) {
-                        (Some(va), Some(vb)) => peer_base(va) == peer_base(vb),
+                        (Some(va), Some(vb)) => va == vb,
                         (None, None) => true,
                         _ => false,
                     }
@@ -667,6 +1067,13 @@ pub(crate) fn dedupe_peer_variants(graph: LockfileGraph) -> LockfileGraph {
                     rewrite.insert(keys[i].clone(), canonical);
                 }
             }
+            let absorbed = absorb_peer_subsets(class_rep.into_values().collect(), &graph);
+            for canonical in rewrite.values_mut() {
+                if let Some(larger) = absorbed.get(canonical) {
+                    *canonical = larger.clone();
+                }
+            }
+            rewrite.extend(absorbed);
         }
     }
 
@@ -744,6 +1151,68 @@ pub(crate) fn dedupe_peer_variants(graph: LockfileGraph) -> LockfileGraph {
         extra_fields,
         workspace_extra_fields,
     }
+}
+
+/// The rest of pnpm's `dedupePeerDependents`: a variant whose dependencies and
+/// resolved peers are all present in a larger variant of the same package
+/// collapses into it. `variants` are mutually inequivalent; returns `smaller ->
+/// larger`.
+///
+/// A larger variant is taken first, ties going to the greater key
+/// (`createDepCountSorter`), so a variant that fits two incompatible larger ones
+/// lands on a choice no iteration order can change. A variant is removed before
+/// it can absorb anything else, so a target is never itself absorbed.
+fn absorb_peer_subsets(
+    mut variants: Vec<String>,
+    graph: &LockfileGraph,
+) -> BTreeMap<String, String> {
+    let deps = |key: &str| &graph.packages[key].dependencies;
+    variants.sort_by(|a, b| deps(a).len().cmp(&deps(b).len()).then_with(|| a.cmp(b)));
+    let mut absorbed = BTreeMap::new();
+    while let Some(larger) = variants.pop() {
+        variants.retain(|smaller| {
+            let fits = variant_fits(graph, smaller, &larger);
+            if fits {
+                absorbed.insert(smaller.clone(), larger.clone());
+            }
+            !fits
+        });
+    }
+    absorbed
+}
+
+/// Whether every dependency and resolved peer of `smaller` is in `larger`, as the
+/// same package or as a variant of it that itself fits (pnpm's
+/// `isCompatibleAndHasMoreDeps`). That recursion lets a package whose child carries
+/// a peer suffix absorb the variant whose child does not, while a child bound to
+/// another version of a peer keeps the two apart. A pair reached twice counts as
+/// fitting, which ends a dependency cycle.
+fn variant_fits(graph: &LockfileGraph, smaller: &str, larger: &str) -> bool {
+    let mut seen: FxHashSet<(String, String)> = FxHashSet::default();
+    let mut pending = vec![(smaller.to_string(), larger.to_string())];
+    while let Some((smaller, larger)) = pending.pop() {
+        let (Some(smaller), Some(larger)) =
+            (graph.packages.get(&smaller), graph.packages.get(&larger))
+        else {
+            return false;
+        };
+        for (name, tail) in &smaller.dependencies {
+            let Some(other) = larger.dependencies.get(name) else {
+                return false;
+            };
+            if other == tail {
+                continue;
+            }
+            if canonical_tail(other) != canonical_tail(tail) {
+                return false;
+            }
+            let pair = (format!("{name}@{tail}"), format!("{name}@{other}"));
+            if seen.insert(pair.clone()) {
+                pending.push(pair);
+            }
+        }
+    }
+    true
 }
 
 /// Single pass of the peer-context computation. See `apply_peer_contexts`
@@ -1828,22 +2297,10 @@ fn visit_peer_context<'g>(
     // it's left out of the context entirely — `detect_unmet_peers`
     // will surface it as a warning after the pass.
     //
-    // Only peers the package actually *declares* in `peerDependencies`
-    // build a dep_path suffix here. A name present solely in
-    // `peerDependenciesMeta` (a meta-only optional peer — the way
-    // `follow-redirects` declares `debug`, for instance) is deliberately
-    // NOT folded in: pnpm treats such a peer as resolvable but then
-    // collapses the binding back out via `dedupe-peer-dependents`
-    // whenever a peer-free path exists, so the realistic lockfile leaves
-    // the whole chain bare even when a distant ancestor carries that peer
-    // as a plain dependency. Eagerly binding the meta-only peer from that
-    // ancestor scope produced `(peer@ver)`-suffixed variants that aube's
-    // dedupe pass (which only collapses *declared*-peer variants) never
-    // merged, so the same subtree hashed differently per install scope
-    // (whole-workspace vs single-member), splitting a shared
-    // global-virtual-store singleton in two and surfacing at runtime as a
-    // duplicate-instance "Cannot find module". Matching pnpm's *deduped*
-    // output — bare — keeps the singleton intact.
+    // Only names in `peer_dependencies` build a dep_path suffix here. The
+    // resolver records a registry package's `peerDependenciesMeta`-only name
+    // there as `*` (`follow-redirects`' `debug`), as pnpm 11 and later do, so a
+    // name is left out only when the graph never recorded it as a peer.
     let mut peer_context: Vec<(String, PeerProvider)> = Vec::new();
     for (peer_name, declared_range) in &pkg.peer_dependencies {
         let satisfies_declared = |provider: &PeerProvider| -> bool {
@@ -1925,11 +2382,10 @@ fn visit_peer_context<'g>(
         // `peerDependenciesMeta.optional`) only from the resolution path it
         // is actually on — the nearest ancestor, the package's own deps, or
         // the workspace root — and otherwise leaves it unresolved so it
-        // surfaces under `transitivePeerDependencies`. It never scans the
-        // whole graph for an unrelated copy. Mirroring that is what lets
-        // `typescript` (an optional peer the root provides) take a dep-path
-        // suffix while debug's optional `supports-color` (which nothing on
-        // the path provides) bubbles up instead of binding to a cousin.
+        // surfaces under `transitivePeerDependencies`. A cousin's copy reaches
+        // it only by `hoist_missing_peers` putting that copy on the path,
+        // which weighs every package missing the peer against one version; a
+        // per-package scan here would bind each to its own pick.
         //
         // A provider on the path binds even when its version is outside
         // the declared range: pnpm's `resolvePeersFromParents` takes the

@@ -813,6 +813,13 @@ pub(super) fn apply_lockfile_graph_platform_rules(
         };
         let pkgs_before = graph.packages.len();
         let apply_start = std::time::Instant::now();
+        // After `filter_graph`, so it cannot hoist a package filtering dropped.
+        graph = aube_resolver::hoist_missing_peers(
+            graph,
+            &mut auto_installed_peers,
+            &peer_options,
+            super::settings::resolve_auto_install_peers(settings_ctx),
+        );
         graph = aube_resolver::apply_peer_contexts(graph, &peer_options)
             .map_err(|e| miette!("peer-context pass failed: {e}"))?;
         // The hoisted importer entries were scaffolding for the two

@@ -329,6 +329,13 @@ pub fn filter_graph(
 
     // 3. Garbage-collect unreachable packages by walking from the
     //    surviving roots.
+    prune_unreachable(graph);
+}
+
+/// Drop every package no importer reaches.
+pub(crate) fn prune_unreachable(graph: &mut aube_lockfile::LockfileGraph) {
+    use crate::FxHashSet;
+
     let mut reachable: FxHashSet<String> = FxHashSet::default();
     let mut stack: Vec<String> = Vec::new();
     for deps in graph.importers.values() {
