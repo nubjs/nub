@@ -98,7 +98,7 @@ void test(`${MECHANISM}: scopes itself to the two request labels without gating 
 for (const file of prTriggered.filter((f) => f !== MECHANISM)) {
   void test(`${file}: a label it ignores cannot cancel its running jobs`, () => {
     const lines = readFileSync(`${DIR}/${file}`, "utf8").split("\n");
-    const start = lines.findIndex((l) => /^concurrency:/.test(l));
+    const start = lines.findIndex((l) => l.startsWith("concurrency:"));
     if (start < 0) return;
     const block = [];
     for (let i = start + 1; i < lines.length && /^\s/.test(lines[i]); i++) block.push(lines[i]);
