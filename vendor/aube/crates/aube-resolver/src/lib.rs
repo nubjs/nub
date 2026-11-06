@@ -195,6 +195,10 @@ pub struct Resolver {
     /// `--ignore-pnpmfile` was not set.
     read_package_hook: Option<Box<dyn ReadPackageHook>>,
     dependency_policy: DependencyPolicy,
+    /// Bind each importer's direct dependency to the version the existing
+    /// lockfile records for that importer whenever it still satisfies the
+    /// range. See [`Resolver::with_keep_importer_pins`].
+    keep_importer_pins: bool,
     /// Advisory ranges to avoid when resolving audit fixes. The map is
     /// keyed by registry package name and values are npm semver ranges
     /// from `vulnerable_versions`. When a clean satisfying version

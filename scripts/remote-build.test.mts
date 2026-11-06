@@ -1,6 +1,6 @@
 // Tests for scripts/remote-build.ts — the two contracts that fail SILENTLY if broken,
 // plus arg handling. Pure functions only (no gcloud, no ssh, no VM).
-// Run: node --test scripts/remote-build.test.mjs
+// Run: node --test scripts/remote-build.test.mts
 //
 // The silent-failure modes these exist to pin:
 //   1. A builder without `node`, or without a staged addon placeholder, produces a
@@ -11,12 +11,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand, sshArgs, sshCommand, vmKeyPath, bootReason } from "./remote-build.ts";
+import { parseArgs, jobScript as rawJobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand, sshArgs, sshCommand, vmKeyPath, bootReason } from "./remote-build.ts";
+
+function jobScript(...args: Parameters<typeof rawJobScript>): string {
+  const script = rawJobScript(...args);
+  assert.ok(typeof script === "string");
+  return script;
+}
 
 // GCE returns ZONE_RESOURCE_POOL_EXHAUSTED for a specific shape in a specific zone, and it
 // took out the first image bake. A 10-way fanout requests ten instances at once, so a
 // single (zone, machine) pair is not a viable placement strategy.
-test("placement tries the preferred machine first, then falls back across zones and shapes", () => {
+void test("placement tries the preferred machine first, then falls back across zones and shapes", () => {
   const c = placementCandidates("c3-standard-8");
   assert.equal(c[0].machine, "c3-standard-8", "preferred machine must be tried first");
   assert.ok(new Set(c.map((x) => x.zone)).size > 1, "must span multiple zones");
@@ -25,7 +31,7 @@ test("placement tries the preferred machine first, then falls back across zones 
   assert.equal(new Set(seen).size, seen.length, "candidates must not repeat");
 });
 
-test("placement does not duplicate the preferred machine when it is also a fallback", () => {
+void test("placement does not duplicate the preferred machine when it is also a fallback", () => {
   const c = placementCandidates("n2-standard-8");
   const n2 = c.filter((x) => x.machine === "n2-standard-8");
   assert.equal(n2.length, new Set(n2.map((x) => x.zone)).size, "one entry per zone, no dupes");
@@ -33,7 +39,7 @@ test("placement does not duplicate the preferred machine when it is also a fallb
 
 // macOS ships openrsync (2.6.9-compatible). An rsync-3.x-only flag fails the entire sync,
 // and it cost a full image bake to find. This pins the flag set to what 2.6.9 accepts.
-test("rsync push uses no rsync-3.x-only flags (macOS ships openrsync 2.6.9)", () => {
+void test("rsync push uses no rsync-3.x-only flags (macOS ships openrsync 2.6.9)", () => {
   const args = rsyncPushArgs("/tmp/list.txt", "/src", "1.2.3.4", "ssh -i k");
   for (const banned of ["--delete-missing-args", "--info", "--outbuf", "--mkpath", "--atimes"]) {
     assert.ok(!args.includes(banned), `${banned} is rsync 3.x only and breaks on macOS`);
@@ -42,7 +48,7 @@ test("rsync push uses no rsync-3.x-only flags (macOS ships openrsync 2.6.9)", ()
   assert.ok(!args.some((a) => a.startsWith("--exclude")), "a blocklist makes rsync walk ~99 GB of gitignored tree and time out");
 });
 
-test("parseArgs defaults to a spot clippy run with fanout 1", () => {
+void test("parseArgs defaults to a spot clippy run with fanout 1", () => {
   const a = parseArgs([]);
   assert.equal(a.job, "clippy");
   assert.equal(a.fanout, 1);
@@ -50,13 +56,13 @@ test("parseArgs defaults to a spot clippy run with fanout 1", () => {
   assert.equal(a.keep, false);
 });
 
-test("parseArgs reads job and fanout", () => {
+void test("parseArgs reads job and fanout", () => {
   const a = parseArgs(["--job", "test", "--fanout", "10"]);
   assert.equal(a.job, "test");
   assert.equal(a.fanout, 10);
 });
 
-test("parseArgs reads the adhoc job and its script path", () => {
+void test("parseArgs reads the adhoc job and its script path", () => {
   const a = parseArgs(["--job", "adhoc", "--script", "/tmp/probe.sh"]);
   assert.equal(a.job, "adhoc");
   assert.equal(a.script, "/tmp/probe.sh");
@@ -66,7 +72,7 @@ test("parseArgs reads the adhoc job and its script path", () => {
 // that drops the node guard from ONE job type would produce a silently degraded binary
 // from that path only — which is exactly the kind of bug that survives a smoke test.
 for (const job of ["clippy", "test", "adhoc"]) {
-  test(`jobScript(${job}) guards the prerequisites a fresh clone lacks`, () => {
+  void test(`jobScript(${job}) guards the prerequisites a fresh clone lacks`, () => {
     const s = jobScript(job, "fast");
     assert.match(s, /command -v node/, "must fail loudly without node (else the primer silently empties)");
     assert.match(s, /runtime\/addons\/nub-native\.node/, "must stage the addon placeholder (nub-core/build.rs panics without it)");
@@ -89,7 +95,7 @@ for (const job of ["clippy", "test", "adhoc"]) {
 // ci.yml also runs `cd crates/nub-launcher && cargo clippy --locked --all-targets -- -D warnings
 // && cargo build --locked && cargo test --locked` — its own workspace, invisible to the root gate, and the half
 // that ships inside every compiled artifact. Count the legs in ci.yml, do not trust this name.
-test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
+void test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
   const s = jobScript("clippy", "fast");
   assert.match(s, /cargo clippy --all-targets --all-features --profile fast -- -D warnings/);
   assert.match(s, /crates\/nub-native && cargo clippy --all-features --profile fast -- -D warnings/, "root clippy does NOT cover nub-native");
@@ -105,7 +111,7 @@ test("jobScript(clippy) reproduces every leg of the CI clippy gate", () => {
 // CI runs the WHOLE workspace (`cargo test`, not `-p nub-cli`) and builds the REAL addon
 // first, because the data-format loader tests dlopen it — the 11-byte placeholder would
 // make them fail on a malformed library rather than skip.
-test("jobScript(test) matches CI: whole workspace, real addon staged over the placeholder", () => {
+void test("jobScript(test) matches CI: whole workspace, real addon staged over the placeholder", () => {
   const s = jobScript("test", "fast");
   // Its own line, not the end of the script: the compile-feature line legitimately
   // follows it. The claim being pinned is still that the whole workspace runs here,
@@ -126,7 +132,7 @@ test("jobScript(test) matches CI: whole workspace, real addon staged over the pl
 // the payload must land on disk rather than arrive via stdin (the truncation trap
 // remoteJobCommand documents), and NUB_ALLOW_INCOMPLETE_RUNTIME must be unset before it
 // runs, or every nub the payload spawns sees a NUB_* var a user's never would.
-test("jobScript(adhoc) builds the real binary and runs the payload from a file with NUB_BIN", () => {
+void test("jobScript(adhoc) builds the real binary and runs the payload from a file with NUB_BIN", () => {
   const b64 = Buffer.from("echo probe").toString("base64");
   const s = jobScript("adhoc", "fast", b64);
   assert.match(s, /crates\/nub-native && cargo build/, "the placeholder addon would be dlopen'd for real");
@@ -146,7 +152,7 @@ test("jobScript(adhoc) builds the real binary and runs the payload from a file w
 // The bake compiles the dependency graph then `rm -rf ~/src`. A target dir inside ~/src
 // would be destroyed with it, so every builder would pay a full cold compile while the
 // image claimed to carry warm artifacts. Both sides must agree on the path.
-test("every job uses a target dir that survives the bake's cleanup of ~/src", () => {
+void test("every job uses a target dir that survives the bake's cleanup of ~/src", () => {
   for (const job of ["clippy", "test", "adhoc"]) {
     const s = jobScript(job, "fast");
     assert.match(s, /export CARGO_TARGET_DIR="\$HOME\/\.cargo-shared-target"/, `${job} must reuse the baked artifacts`);
@@ -156,7 +162,7 @@ test("every job uses a target dir that survives the bake's cleanup of ~/src", ()
 
 // sshd runs `bash -s` non-interactively; Ubuntu's .bashrc returns before any appended
 // PATH line, so rustup's env is never applied and cargo dies with 127.
-test("every job sources cargo's env, since a non-interactive ssh shell never does", () => {
+void test("every job sources cargo's env, since a non-interactive ssh shell never does", () => {
   for (const job of ["clippy", "test", "adhoc"]) {
     assert.match(jobScript(job, "fast"), /\. "\$HOME\/\.cargo\/env"/, `${job} would die with cargo: command not found`);
   }
@@ -167,7 +173,7 @@ test("every job sources cargo's env, since a non-interactive ssh shell never doe
 // (npm, cargo) swallows the rest of the un-executed script. bash then hits EOF and exits 0.
 // A real bake stopped after `cargo fetch`, skipped the whole warm compile, and still
 // published a golden image. The script must therefore never arrive via stdin.
-test("the remote job runs from a FILE, never from stdin", () => {
+void test("the remote job runs from a FILE, never from stdin", () => {
   const cmd = remoteJobCommand("echo hi", Buffer.from("echo hi").toString("base64"));
   assert.doesNotMatch(cmd, /bash\s+-s/, "bash -s reads the script from stdin and can be truncated by it");
   assert.match(cmd, /base64 -d > "\$f"/, "script must be landed on disk");
@@ -176,7 +182,7 @@ test("the remote job runs from a FILE, never from stdin", () => {
   assert.match(cmd, /rm -f "\$f"/, "must not litter /tmp on the builder");
 });
 
-test("filterSourceFiles drops entries missing from the worktree and de-dupes the union", () => {
+void test("filterSourceFiles drops entries missing from the worktree and de-dupes the union", () => {
   const listed = ["a.rs", "gone.rs", "a.rs", "tests/node-suite/x.js", "b.rs"].join("\n");
   const out = filterSourceFiles(listed, (f) => f !== "gone.rs");
   assert.deepEqual(out, ["a.rs", "b.rs"], "a deleted-but-tracked file aborts the whole rsync");
@@ -185,8 +191,8 @@ test("filterSourceFiles drops entries missing from the worktree and de-dupes the
 // Layer 2 is the ONLY orphan-proofing a SIGKILL cannot defeat, so it must cover EVERY
 // instance the tool creates — there is no exception to maintain. `--instance-termination-action`
 // applies to `--max-run-duration`, not only spot preemption, which is what makes this possible.
-for (const [label, terminate, spot] of [["builder", "DELETE", true], ["image bake", "STOP", false]]) {
-  test(`the ${label} VM terminates server-side, so a SIGKILLed launcher cannot orphan it`, () => {
+for (const [label, terminate, spot] of [["builder", "DELETE", true], ["image bake", "STOP", false]] as const) {
+  void test(`the ${label} VM terminates server-side, so a SIGKILLed launcher cannot orphan it`, () => {
     const args = instanceCreateArgs("v1", "ssh-ed25519 KEY", {
       machine: "c3-standard-8", zone: "us-central1-a", onDemand: !spot, fromImage: spot, terminate,
     });
@@ -204,7 +210,7 @@ for (const [label, terminate, spot] of [["builder", "DELETE", true], ["image bak
 
 // A builder must DELETE (a merely-stopped VM still bills its disk); the bake must STOP,
 // because the very next thing it does is image that disk.
-test("a builder deletes itself but the bake only stops, so its disk survives imaging", () => {
+void test("a builder deletes itself but the bake only stops, so its disk survives imaging", () => {
   const b = instanceCreateArgs("b", "K", { machine: "c3-standard-8", zone: "z", onDemand: false, fromImage: true, terminate: "DELETE" });
   const k = instanceCreateArgs("k", "K", { machine: "c3-standard-8", zone: "z", onDemand: true, fromImage: false, terminate: "STOP" });
   assert.equal(b[b.indexOf("--instance-termination-action") + 1], "DELETE");
@@ -218,14 +224,14 @@ test("a builder deletes itself but the bake only stops, so its disk survives ima
 
 // --reap is layer 3, the safety net. With ~20 agents sharing one GCP project, a reap with no
 // age gate destroys a sibling's in-flight build — the net becoming the hazard.
-test("reap treats only VMs older than the bake TTL as stray", () => {
+void test("reap treats only VMs older than the bake TTL as stray", () => {
   const now = Date.parse("2026-07-28T12:00:00Z");
   assert.equal(isStray("2026-07-28T11:59:00Z", now, 90 * 60_000), false, "a 1-minute-old VM is someone's live build");
   assert.equal(isStray("2026-07-28T10:00:00Z", now, 90 * 60_000), true, "2h old is past every TTL");
   assert.equal(isStray("not-a-timestamp", now, 90 * 60_000), false, "unparseable age must never read as abandoned");
 });
 
-test("filterSourceFiles drops the node-suite submodule and keeps everything else", () => {
+void test("filterSourceFiles drops the node-suite submodule and keeps everything else", () => {
   const out = filterSourceFiles(
     ["Cargo.toml", "crates/nub-cli/src/main.rs", "tests/node-suite/test/x.js", "tests/pnp/run.sh", ""].join("\n"),
   );
@@ -246,14 +252,14 @@ test("filterSourceFiles drops the node-suite submodule and keeps everything else
 // re-emitting a body that contains escaped backticks — which silently truncated it when tried.
 // Prefix matching, not equality: the bake may warm MORE than the job runs, and `cargo test` is
 // deliberately warmed as `cargo test --workspace --no-run`, which stops at link.
-test("the bake warms every cargo invocation the jobs actually run", () => {
+void test("the bake warms every cargo invocation the jobs actually run", () => {
   const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
   const from = src.indexOf("const warm = `set -euxo pipefail");
   const to = src.indexOf('echo "warm target dir', from);
   assert.ok(from > 0 && to > from, "could not locate the bake's warm block in the source");
   const bake = src.slice(from, to);
 
-  const cargoLines = (script) =>
+  const cargoLines = (script: string) =>
     script
       .split("\n")
       .map((l) => l.trim())
@@ -270,7 +276,7 @@ test("the bake warms every cargo invocation the jobs actually run", () => {
   // The tails matter: two of the four bake legs are subshells, so a flag can be followed by
   // `)` rather than whitespace or end-of-string. A `(\s|$)` probe reads
   // `(cd crates/nub-native && cargo build --release)` as profile "dev" and waves it through.
-  const profileOf = (cmd) =>
+  const profileOf = (cmd: string) =>
     /(^|\s)--release([\s)]|$)/.test(cmd) ? "release" : (cmd.match(/--profile\s+([^\s)]+)/)?.[1] ?? "dev");
 
   for (const job of ["clippy", "test", "adhoc"]) {
@@ -297,7 +303,7 @@ test("the bake warms every cargo invocation the jobs actually run", () => {
 // silently ships only the prefix — cargo fetch ran, no warm-up compiled, and the bake would
 // have imaged a cold builder as warm. Found live 2026-09-01: a comment's || true in raw
 // backticks truncated the block at the exact line that says "must not be SILENT".
-test("the bake's warm block contains no raw backtick to truncate the shipped script", () => {
+void test("the bake's warm block contains no raw backtick to truncate the shipped script", () => {
   const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
   const opener = "const warm = `set -euxo pipefail";
   const from = src.indexOf(opener);
@@ -313,7 +319,7 @@ test("the bake's warm block contains no raw backtick to truncate the shipped scr
 // `embed-runtime`, whose build.rs rejects a runtime staged without the vendored node_modules,
 // so a grant present in one prep and absent from the other fails the bake's warm-up legs —
 // which are deliberately best-effort, so the bake would publish a silently COLD image.
-test("the bake and the job prep both grant the vendored-runtime opt-out", () => {
+void test("the bake and the job prep both grant the vendored-runtime opt-out", () => {
   const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
   const from = src.indexOf("const warm = `set -euxo pipefail");
   const to = src.indexOf('echo "warm target dir', from);
@@ -337,7 +343,7 @@ test("the bake and the job prep both grant the vendored-runtime opt-out", () => 
 // raise a Touch ID sheet. A builder has its own throwaway key, so no connection to one may
 // consult that agent: `IdentitiesOnly` alone does not stop ssh asking it, `IdentityAgent=none`
 // does. rsync's `-e` is a separate string and is checked separately.
-test("every connection to a VM offers only that VM's key and never asks the SSH agent", () => {
+void test("every connection to a VM offers only that VM's key and never asks the SSH agent", () => {
   const key = vmKeyPath("nub-builder-x-1-abcd");
   const args = sshArgs(key);
   assert.equal(args[args.indexOf("-i") + 1], key);
@@ -354,7 +360,7 @@ test("every connection to a VM offers only that VM's key and never asks the SSH 
 // The pure helpers above say nothing about the call sites. Every place the script spawns ssh
 // (or hands rsync an ssh command) must build it from sshArgs/sshCommand, and gcloud must only
 // ever run as an argument to keyward, never as a spawned command of its own.
-test("every ssh spawn uses sshArgs, and gcloud only ever runs through keyward", () => {
+void test("every ssh spawn uses sshArgs, and gcloud only ever runs through keyward", () => {
   const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
   const spawns = [...src.matchAll(/execFile(?:Async)?\(\s*"ssh",\s*\[([^\]]*)\]/g)];
   assert.ok(spawns.length >= 3, `found only ${spawns.length} ssh spawns — the parse broke`);
@@ -365,7 +371,7 @@ test("every ssh spawn uses sshArgs, and gcloud only ever runs through keyward", 
   assert.match(src, /execFileAsync\("keyward", full/);
 });
 
-test("the boot reason names the provisioning model and the job", () => {
+void test("the boot reason names the provisioning model and the job", () => {
   assert.equal(bootReason({ job: "clippy", onDemand: false }), "boot a spot VM for the clippy job");
   assert.equal(bootReason({ job: "test", onDemand: true }), "boot an on-demand VM for the test job");
 });

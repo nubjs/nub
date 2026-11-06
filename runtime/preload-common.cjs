@@ -15,7 +15,34 @@
 // on the fast tier; the compat entry passes its already-imported core bindings in
 // (it imported them as ESM), so this module never require()s the core there.
 
-const compileBootstrap = process[Symbol.for("nub.compile.bootstrap")];
+const {
+  ArrayIsArray,
+  ArrayPrototypeIncludes,
+  ArrayPrototypeSome,
+  ArrayPrototypePush,
+  ArrayPrototypeSplice,
+  Boolean,
+  Date,
+  JSONParse,
+  Number,
+  ObjectDefineProperty,
+  ObjectGetOwnPropertyNames,
+  ObjectGetOwnPropertySymbols,
+  ObjectHasOwn,
+  ObjectKeys,
+  Promise,
+  PromisePrototypeThen,
+  PromiseResolve,
+  ReflectApply,
+  Set,
+  SetPrototypeAdd,
+  SetPrototypeHas,
+  String,
+  SymbolFor,
+  SymbolToStringTag,
+} = require("./primordials.cjs");
+
+const compileBootstrap = process[SymbolFor("nub.compile.bootstrap")];
 const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
   ? compileBootstrap.getBuiltin
   : require;
@@ -75,7 +102,7 @@ try {
       workerThreads?.setEnvironmentData(ARGV_ONLY_FLAGS_KEY, fromEnv);
     }
     const injected = new Set(String(injectedArgvFlags).split(" ").filter(Boolean));
-    if (Array.isArray(process.execArgv)) {
+    if (ArrayIsArray(process.execArgv)) {
       process.execArgv = process.execArgv.filter((arg) => !injected.has(arg));
     }
   }
@@ -186,13 +213,13 @@ function installWatchReporting(core) {
   function flushWatchDeps() {
     watchFlushScheduled = false;
     if (watchPending.length === 0) return;
-    const batch = watchPending.splice(0, watchPending.length);
+    const batch = ArrayPrototypeSplice(watchPending, 0, watchPending.length);
     try { process.send({ "watch:require": batch }); } catch {}
   }
   function reportWatchDep(path) {
-    if (!WATCH_REPORTING || !path || watchReported.has(path)) return;
-    watchReported.add(path);
-    watchPending.push(path);
+    if (!WATCH_REPORTING || !path || SetPrototypeHas(watchReported, path)) return;
+    SetPrototypeAdd(watchReported, path);
+    ArrayPrototypePush(watchPending, path);
     if (!watchFlushScheduled) {
       watchFlushScheduled = true;
       // A scheduled immediate is drained before the loop would exit, so even a
@@ -205,8 +232,8 @@ function installWatchReporting(core) {
   // per directory, lazily.
   const watchEnvScannedDirs = new Set();
   function reportEnvFilesIn(dir) {
-    if (!WATCH_REPORTING || watchEnvScannedDirs.has(dir)) return;
-    watchEnvScannedDirs.add(dir);
+    if (!WATCH_REPORTING || SetPrototypeHas(watchEnvScannedDirs, dir)) return;
+    SetPrototypeAdd(watchEnvScannedDirs, dir);
     let entries;
     try { entries = readdirSync(dir); } catch { return; }
     for (const name of entries) {
@@ -247,7 +274,7 @@ function installUserHookDetector() {
       if (args[0] && typeof args[0].load === "function") __userLoadHookRegistered = true;
     }
     seen += 1;
-    return orig.apply(this, args);
+    return ReflectApply(orig, this, args);
   };
   wrapped.__nubWrapped = true;
   try { module_.registerHooks = wrapped; } catch {}
@@ -270,7 +297,7 @@ function installUserAsyncLoaderDetector() {
     // require(esm)-off path, which does not run the fast-tier sync load hook that
     // performs the commonjs-sync relabel, so a false positive there is harmless.)
     __userAsyncLoaderRegistered = true;
-    return orig.apply(this, args);
+    return ReflectApply(orig, this, args);
   };
   wrapped.__nubAsyncWrapped = true;
   try { module_.register = wrapped; } catch {}
@@ -294,7 +321,7 @@ function cliAsyncLoaderPresent() {
   let present = false;
   try {
     const argv = process.execArgv;
-    if (Array.isArray(argv)) {
+    if (ArrayIsArray(argv)) {
       for (const a of argv) {
         if (typeof a !== "string") continue;
         if (
@@ -506,7 +533,7 @@ function registerLoaderWorker(specifier, parentURL, options) {
       // else (including any non-DEP0205 deprecation) straight through.
       const code = typeof rest[0] === "object" && rest[0] !== null ? rest[0].code : rest[1];
       if (code === "DEP0205") return;
-      return realEmitWarning.call(this, warning, ...rest);
+      return ReflectApply(realEmitWarning, this, [warning, ...rest]);
     };
     return module_.register(specifier, parentURL, options);
   } finally {
@@ -659,7 +686,7 @@ function phantomDepHint(specifier, fromPath) {
 function annotateError(err, hint) {
   try {
     if (!err || typeof err !== "object" || err.__nubPhantomHinted) return;
-    Object.defineProperty(err, "__nubPhantomHinted", { value: true, configurable: true });
+    ObjectDefineProperty(err, "__nubPhantomHinted", { value: true, configurable: true });
     const oldStack = typeof err.stack === "string" ? err.stack : null;
     const oldMsg = err.message;
     err.message = oldMsg + hint;
@@ -775,13 +802,13 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
   function loadViaDisk(url, ext) {
     try {
       const path = fileURLToPath(url);
-      if (core.TRANSPILE_EXTS.has(ext) && !core.isDependency(url)) {
+      if (SetPrototypeHas(core.TRANSPILE_EXTS, ext) && !core.isDependency(url)) {
         return core.loadTranspile(url, ext);
       }
       // Plain JS: transpile only when transformable; else fall through to the raw-
       // source path below (which hands CJS back as `source:null` → Node's native
       // CJS loader), byte-identical to a non-intercepted file.
-      if (core.PLAIN_JS_EXTS.has(ext) && !core.isDependency(url)) {
+      if (SetPrototypeHas(core.PLAIN_JS_EXTS, ext) && !core.isDependency(url)) {
         const r = core.maybeTranspilePlainJs(url, ext);
         if (r) return r;
       }
@@ -893,7 +920,7 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // handling (and its error) applies. (The TS-parent extensionless resolution in
     // the resolve hook is intended and stays — only this load-time transpile is
     // gated.)
-    if (core.TRANSPILE_EXTS.has(ext) && !core.isDependency(url)) {
+    if (SetPrototypeHas(core.TRANSPILE_EXTS, ext) && !core.isDependency(url)) {
       return core.loadTranspile(url, ext);
     }
     // Project-source plain JS (`.js`/`.mjs`/`.cjs`): transpile ONLY when it carries
@@ -901,7 +928,7 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // to Node's native loader (the `nextLoad`/relabel path below) BYTE-FOR-BYTE — it
     // is never intercepted, so native CJS/ESM behavior (the relabel, require.cache,
     // the require-of-ESM-syntax-`.cjs` error) is preserved. node_modules excluded.
-    if (core.PLAIN_JS_EXTS.has(ext) && !core.isDependency(url)) {
+    if (SetPrototypeHas(core.PLAIN_JS_EXTS, ext) && !core.isDependency(url)) {
       const r = core.maybeTranspilePlainJs(url, ext);
       if (r) return r;
     }
@@ -1004,8 +1031,8 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     if (
       r && r.format === "commonjs" && r.source != null &&
       typeof url === "string" && url.startsWith("file:") &&
-      Array.isArray(context && context.conditions) &&
-      context.conditions.includes("import") &&
+      ArrayIsArray(context && context.conditions) &&
+      ArrayPrototypeIncludes(context.conditions, "import") &&
       !__userHooksRegistered && !userAsyncLoaderActive(foreignLoaderFlagPresent)
     ) {
       return { ...r, format: "commonjs-sync" };
@@ -1067,7 +1094,7 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
 // whole trace.
 function nameInternalFrame(fn, name) {
   try {
-    Object.defineProperty(fn, "name", { value: name, configurable: true });
+    ObjectDefineProperty(fn, "name", { value: name, configurable: true });
   } catch { /* frozen/exotic: leave verbatim */ }
   return fn;
 }
@@ -1150,7 +1177,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // keys here.
   const foreignExts = new Set(
     [...core.TRANSPILE_EXTS, ...core.allDataExts(), ...NUB_ADDED_EXTS].filter((ext) =>
-      ext !== ".js" && ext !== ".json" && ext !== ".node" && Object.hasOwn(module_._extensions, ext)),
+      ext !== ".js" && ext !== ".json" && ext !== ".node" && ObjectHasOwn(module_._extensions, ext)),
   );
   // Ownership of a key is decided per lookup, never frozen at start-up: user code
   // may install or replace a handler after nub's preload (`--import tsx` runs
@@ -1162,19 +1189,23 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // counts as theirs) and it still holds a function nub registered below
   // (`nubHandlers`). Anything else is not nub's to strip, nor to pre-judge.
   const nubHandlers = new Set();
-  const nubOwnsExt = (ext) => !foreignExts.has(ext) && nubHandlers.has(module_._extensions[ext]);
+  const nubOwnsExt = (ext) => !SetPrototypeHas(foreignExts, ext) && SetPrototypeHas(nubHandlers, module_._extensions[ext]);
   const withoutNubAddedExtensions = (fn) => {
     const saved = [];
-    for (const ext of NUB_ADDED_EXTS) {
+    for (let i = 0; i < NUB_ADDED_EXTS.length; i++) {
+      const ext = NUB_ADDED_EXTS[i];
       if (nubOwnsExt(ext)) {
-        saved.push([ext, module_._extensions[ext]]);
+        ArrayPrototypePush(saved, [ext, module_._extensions[ext]]);
         delete module_._extensions[ext];
       }
     }
     try {
       return fn();
     } finally {
-      for (const [ext, handler] of saved) module_._extensions[ext] = handler;
+      for (let i = 0; i < saved.length; i++) {
+        const pair = saved[i];
+        module_._extensions[pair[0]] = pair[1];
+      }
     }
   };
   const isDepAddedExtHit = (filename) =>
@@ -1229,18 +1260,20 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       delete options.conditions;
     }
     try {
-      const byNode = origResolveFilename.call(this, request, parent, isMain, options);
+      const byNode = ReflectApply(origResolveFilename, this, [request, parent, isMain, options]);
       if (withClassicTranspile && isDepAddedExtHit(byNode)) {
         // `_findPath` memoizes into `Module._pathCache` and returns that entry before
         // it ever consults the extension list, so the retry would be handed the same
         // TS hit and the removal below would look like a no-op. Drop the memo first.
         // Purging by VALUE rather than rebuilding the cache key keeps this off Node's
         // internal key format, which differs across the supported range.
-        for (const key of Object.keys(module_._pathCache)) {
+        const keys = ObjectKeys(module_._pathCache);
+        for (let i = 0; i < keys.length; i++) {
+          const key = keys[i];
           if (module_._pathCache[key] === byNode) delete module_._pathCache[key];
         }
         return withoutNubAddedExtensions(() =>
-          origResolveFilename.call(this, request, parent, isMain, options),
+          ReflectApply(origResolveFilename, this, [request, parent, isMain, options]),
         );
       }
       return byNode;
@@ -1283,7 +1316,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   const nativeJs = module_._extensions[".js"];
   const transpileExtension = (mod, filename) => {
     if (core.isDependency(pathToFileURL(filename).href)) {
-      return nativeJs.call(module_._extensions, mod, filename);
+      return ReflectApply(nativeJs, module_._extensions, [mod, filename]);
     }
     const { source, format } = core.loadTranspile(pathToFileURL(filename).href, pathExtname(filename));
     if (format === "module") throw requireEsmError(filename);
@@ -1318,10 +1351,10 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     const url = pathToFileURL(filename).href;
     const ext = pathExtname(filename);
     if (ext in core.dataExtsFor(url)) return dataExtension(mod, filename, url, ext);
-    if (core.TRANSPILE_EXTS.has(ext)) return transpileExtension(mod, filename);
-    return nativeJs.call(module_._extensions, mod, filename);
+    if (SetPrototypeHas(core.TRANSPILE_EXTS, ext)) return transpileExtension(mod, filename);
+    return ReflectApply(nativeJs, module_._extensions, [mod, filename]);
   };
-  nubHandlers.add(nubExtension);
+  SetPrototypeAdd(nubHandlers, nubExtension);
 
   // Registered for every extension either path may claim, so the dispatcher is
   // reached at all; `nubExtension` then decides. Node's own `.js`/`.json`/`.node`
@@ -1342,10 +1375,10 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // resolution identical across tiers.
   const CODE_EXTS = new Set([".ts", ".cts", ".mts", ".tsx", ".jsx"]);
   for (const ext of new Set([...core.TRANSPILE_EXTS, ...core.allDataExts()])) {
-    if (ext === ".js" || ext === ".json" || ext === ".node" || foreignExts.has(ext)) continue;
-    Object.defineProperty(module_._extensions, ext, {
+    if (ext === ".js" || ext === ".json" || ext === ".node" || SetPrototypeHas(foreignExts, ext)) continue;
+    ObjectDefineProperty(module_._extensions, ext, {
       value: nubExtension,
-      enumerable: CODE_EXTS.has(ext),
+      enumerable: SetPrototypeHas(CODE_EXTS, ext),
       configurable: true,
       writable: true,
     });
@@ -1383,7 +1416,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
         return dataExtension(mod, filename, url, fileExt);
       }
       if (core.isDependency(url)) {
-        return origExtension.call(module_._extensions, mod, filename); // (1)
+        return ReflectApply(origExtension, module_._extensions, [mod, filename]); // (1)
       }
       const r = core.maybeTranspilePlainJs(pathToFileURL(filename).href, pathExtname(filename));
       if (r) {
@@ -1391,10 +1424,10 @@ function installCjsRequireHooks(core, withClassicTranspile) {
         mod._compile(r.source, filename);
         return;
       }
-      return origExtension.call(module_._extensions, mod, filename); // (3)
+      return ReflectApply(origExtension, module_._extensions, [mod, filename]); // (3)
     };
     module_._extensions[ext] = plainJsExtension;
-    nubHandlers.add(plainJsExtension);
+    SetPrototypeAdd(nubHandlers, plainJsExtension);
   }
 }
 
@@ -1429,7 +1462,7 @@ function preloadPolyfillPackages(reqFromRuntime) {
 // path (test-startup-empty-regexp-statics). Deferring the resolve keeps `RegExp.$_`
 // empty at user-code start; the cost is paid only by a program that touches Temporal.
 const defineTemporal = (value) =>
-  Object.defineProperty(globalThis, "Temporal", {
+  ObjectDefineProperty(globalThis, "Temporal", {
     value,
     configurable: true,
     writable: true,
@@ -1447,7 +1480,7 @@ function installTemporalValue(polyfill) {
     typeof Date.prototype.toTemporalInstant !== "function" &&
     typeof polyfill.toTemporalInstant === "function"
   ) {
-    Object.defineProperty(Date.prototype, "toTemporalInstant", {
+    ObjectDefineProperty(Date.prototype, "toTemporalInstant", {
       value: polyfill.toTemporalInstant,
       configurable: true,
       writable: true,
@@ -1457,15 +1490,15 @@ function installTemporalValue(polyfill) {
   // The library exports a frozen module namespace; the global needs the
   // ordinary Temporal object's built-in property attributes and prototype.
   const T = {};
-  for (const name of Object.getOwnPropertyNames(polyfill.Temporal)) {
-    Object.defineProperty(T, name, {
+  for (const name of ObjectGetOwnPropertyNames(polyfill.Temporal)) {
+    ObjectDefineProperty(T, name, {
       value: polyfill.Temporal[name],
       writable: true,
       enumerable: false,
       configurable: true,
     });
   }
-  Object.defineProperty(T, Symbol.toStringTag, {
+  ObjectDefineProperty(T, SymbolToStringTag, {
     value: "Temporal",
     writable: false,
     enumerable: false,
@@ -1482,7 +1515,7 @@ function installTemporalGlobal(polyfill) {
 
 function installTemporalLazyGlobal(reqFromRuntime) {
   if (typeof globalThis.Temporal !== "undefined") return;
-  Object.defineProperty(globalThis, "Temporal", {
+  ObjectDefineProperty(globalThis, "Temporal", {
     configurable: true,
     enumerable: false,
     get() {
@@ -1604,7 +1637,7 @@ function armChildProcessCompileCacheWrap() {
   if (typeof module_._load !== "function") return;
   const origLoad = nameInternalFrame(module_._load, "_load");
   module_._load = function (request, parent, isMain) {
-    const exports = origLoad.call(this, request, parent, isMain);
+    const exports = ReflectApply(origLoad, this, [request, parent, isMain]);
     if (request === "child_process" || request === "node:child_process") {
       module_._load = origLoad; // restore: one-shot, no steady-state overhead
       try { wrapChildProcessCompileCache(exports); } catch {}
@@ -1646,7 +1679,7 @@ function wrapChildProcessCompileCache(cp) {
   const CCACHE_MARKER = "__NUB_AUGMENTED_NODE_COMPILE_CACHE";
   const CCACHE_PRESENT_MARKER = `${CCACHE_MARKER}_PRESENT`;
   const markCompileCacheAbsent = (env) => {
-    if (!Object.hasOwn(env, CCACHE_MARKER) && !Object.hasOwn(env, CCACHE_PRESENT_MARKER)) return;
+    if (!ObjectHasOwn(env, CCACHE_MARKER) && !ObjectHasOwn(env, CCACHE_PRESENT_MARKER)) return;
     env[CCACHE_MARKER] = "";
     env[CCACHE_PRESENT_MARKER] = "0";
   };
@@ -1703,7 +1736,7 @@ function wrapChildProcessCompileCache(cp) {
   // result shape (broke test-child-process-promisified / -abortController /
   // util-promisify-custom-names / sync-io-option / test-output-abort).
   const preserveSymbols = (wrapped, orig) => {
-    for (const s of Object.getOwnPropertySymbols(orig)) {
+    for (const s of ObjectGetOwnPropertySymbols(orig)) {
       try { wrapped[s] = orig[s]; } catch { /* read-only symbol: skip */ }
     }
     return wrapped;
@@ -1713,13 +1746,13 @@ function wrapChildProcessCompileCache(cp) {
       let optIdx = -1;
       for (let i = rest.length - 1; i >= 0; i--) {
         const a = rest[i];
-        if (a && typeof a === "object" && !Array.isArray(a)) { optIdx = i; break; }
+        if (a && typeof a === "object" && !ArrayIsArray(a)) { optIdx = i; break; }
         if (typeof a === "function") continue; // execFile callback
-        if (Array.isArray(a)) break; // args array — no options object present
+        if (ArrayIsArray(a)) break; // args array — no options object present
       }
       if (optIdx >= 0) rest[optIdx] = stripFromOptions(rest[optIdx]);
     }
-    return orig.call(this, command, ...rest);
+    return ReflectApply(orig, this, [command, ...rest]);
   }, orig);
 
   cp.spawn = wrapSpawnLike(cp.spawn);
@@ -1737,18 +1770,18 @@ function wrapChildProcessCompileCache(cp) {
     let optIdx = -1;
     if (rest.length === 1) {
       const [arg] = rest;
-      if (arg !== null && typeof arg === "object" && !Array.isArray(arg)) optIdx = 0;
+      if (arg !== null && typeof arg === "object" && !ArrayIsArray(arg)) optIdx = 0;
     } else if (rest.length === 2) {
       const [args, options] = rest;
-      if ((Array.isArray(args) || args == null) &&
-          options !== null && typeof options === "object" && !Array.isArray(options)) {
+      if ((ArrayIsArray(args) || args == null) &&
+          options !== null && typeof options === "object" && !ArrayIsArray(options)) {
         optIdx = 1;
       }
     }
     if (__compiledArtifact && optIdx >= 0) {
       rest[optIdx] = stripFromOptions(rest[optIdx]);
     }
-    return origFork.call(this, modulePath, ...rest);
+    return ReflectApply(origFork, this, [modulePath, ...rest]);
   };
 }
 
@@ -1770,7 +1803,7 @@ function coverageActiveInProcess() {
   const hasCovFlag = (a) =>
     typeof a === "string" &&
     (a === "--experimental-test-coverage" || a.startsWith("--test-coverage"));
-  return (process.execArgv || []).some(hasCovFlag) || (process.argv || []).some(hasCovFlag);
+  return ArrayPrototypeSome(process.execArgv || [], hasCovFlag) || ArrayPrototypeSome(process.argv || [], hasCovFlag);
 }
 
 function reenableUserCompileCache() {
@@ -1841,7 +1874,7 @@ function installVersionMarker() {
   const v = process.env[VERSION_ENV];
   if (!v) return;
   try {
-    Object.defineProperty(process.versions, "nub", {
+    ObjectDefineProperty(process.versions, "nub", {
       value: v,
       writable: false,
       enumerable: true,
@@ -1915,7 +1948,7 @@ const COMPAT_PRESENT_ENV = "__NUB_COMPAT_PRESENT";
 const THREADPOOL_PRESENT_BIT = 1 << 5;
 const THREADPOOL_NODE_DEFAULT = 4;
 const THREADPOOL_EXTRA_NICE = 10;
-const THREADPOOL_WORKERS = Symbol.for("nub.threadpool.workers");
+const THREADPOOL_WORKERS = SymbolFor("nub.threadpool.workers");
 
 // The addon that owns the submit, or null where it cannot be loaded. It is the
 // sibling transform-core loads moments later, through the same filename, so Node's
@@ -2004,7 +2037,7 @@ function releaseThreadpool(addon, workers) {
     const before = linux ? new Set(tids()) : null;
     buildThreadpool(addon);
     const isWorker = (t) => {
-      if (!before.has(t)) return true;
+      if (!SetPrototypeHas(before, t)) return true;
       try {
         return fs.readFileSync(`/proc/self/task/${t}/comm`, "latin1").trim() === "libuv-worker";
       } catch {
@@ -2171,7 +2204,7 @@ function installServeEntry(beforeMain) {
   // every ordinary run carried.
   module_.runMain = function (...args) {
     module_.runMain = runMain;
-    const result = runMain.apply(this, args);
+    const result = ReflectApply(runMain, this, args);
     let served;
     try {
       served = serveMainModuleIfHandler(entry);
@@ -2180,7 +2213,7 @@ function installServeEntry(beforeMain) {
       return result;
     }
     if (served) closeEntryChannel(entry);
-    else Promise.resolve().then(pass);
+    else PromisePrototypeThen(ReflectApply(PromiseResolve, Promise, []), pass);
     return result;
   };
 }
@@ -2193,9 +2226,10 @@ function installServeEntry(beforeMain) {
 // one that points the entry at another file has made it a different module, and
 // no URL of ours will ever name it.
 function entryUrls(file) {
-  const urls = new Set([pathToFileURL(file).href]);
+  const urls = new Set();
+  SetPrototypeAdd(urls, pathToFileURL(file).href);
   try {
-    urls.add(pathToFileURL(getBuiltin("node:fs").realpathSync(file)).href);
+    SetPrototypeAdd(urls, pathToFileURL(getBuiltin("node:fs").realpathSync(file)).href);
   } catch { /* unreadable — the unresolved spelling still matches Node's own */ }
   return urls;
 }
@@ -2210,7 +2244,7 @@ function entryUrls(file) {
 function noteEntryResolve(specifier, context) {
   const entry = serveEntry;
   if (entry === null || entry.mainResolved || context.parentURL !== undefined) return;
-  if (entry.urls.has(withoutQuery(String(specifier)))) entry.mainResolved = true;
+  if (SetPrototypeHas(entry.urls, withoutQuery(String(specifier)))) entry.mainResolved = true;
 }
 
 // A load hook saw Node start loading `url`. Called from the fast tier's synchronous
@@ -2219,7 +2253,7 @@ function noteEntryResolve(specifier, context) {
 function noteEntryLoad(url) {
   const entry = serveEntry;
   if (entry === null || !entry.mainResolved || entry.loadSeen) return;
-  if (!entry.urls.has(withoutQuery(url))) return;
+  if (!SetPrototypeHas(entry.urls, withoutQuery(url))) return;
   entry.loadSeen = true;
   entry.loadUrl = url;
   fireEntryLoad(entry);
@@ -2240,7 +2274,7 @@ function fireEntryLoad(entry) {
   // `import()` joins it, and this is only ever reached after the first pass declined
   // to import — an entry on the ES-module loader's path, which Node's own loader
   // already leaves promise reactions of its own behind on.
-  Promise.resolve().then(onLoad);
+  PromisePrototypeThen(ReflectApply(PromiseResolve, Promise, []), onLoad);
 }
 
 // For `registerLoaderWorker`, on the tiers whose hooks run in a loader worker: the
@@ -2323,11 +2357,11 @@ function markedLaunchFlags(marker) {
 function markerTokens(marker) {
   let tokens;
   try {
-    tokens = JSON.parse(marker);
+    tokens = JSONParse(marker);
   } catch {
     return null;
   }
-  return Array.isArray(tokens) && tokens.every((token) => typeof token === "string")
+  return ArrayIsArray(tokens) && tokens.every((token) => typeof token === "string")
     ? tokens
     : null;
 }
@@ -2344,7 +2378,7 @@ function anotherPreloadMayFollow() {
   const ourDir = dirname(__filename);
   let tokens = "";
   try {
-    if (Array.isArray(process.execArgv)) tokens += process.execArgv.join(" ");
+    if (ArrayIsArray(process.execArgv)) tokens += process.execArgv.join(" ");
   } catch { /* execArgv unavailable — the NODE_OPTIONS channel still answers */ }
   const opts = process.env.NODE_OPTIONS;
   if (typeof opts === "string") tokens += ` ${opts}`;
@@ -2435,7 +2469,7 @@ function serveIfHandler(exported) {
 // handler was served there and the run never ended. Either way the marker is
 // consumed before this is asked, so nothing the claimant spawns inherits it.
 function nodeRunsArgvAsProgram(launchFlags) {
-  const own = Array.isArray(process.execArgv) ? process.execArgv : [];
+  const own = ArrayIsArray(process.execArgv) ? process.execArgv : [];
   return modeRunsArgvAsProgram(own) && modeRunsArgvAsProgram(launchFlags);
 }
 
@@ -2456,7 +2490,7 @@ function modeRunsArgvAsProgram(flags) {
   let tests = false;
   for (const token of flags) {
     const flag = optionName(token);
-    if (EVAL_FLAGS.has(flag)) evaluates = true;
+    if (SetPrototypeHas(EVAL_FLAGS, flag)) evaluates = true;
     else if (flag === "-i" || flag === "--interactive") interactive = true;
     else if (flag === "--no-interactive") interactive = false;
     else if (flag === "-c" || flag === "--check") checks = true;
@@ -2536,7 +2570,7 @@ function isPlainish(value) {
 // user's entries twice.
 function userPreloadChain() {
   try {
-    const chain = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}").preloadChain;
+    const chain = JSONParse(process.env.__NUB_RUNTIME_CONFIG || "{}").preloadChain;
     return typeof chain === "string" && chain.length > 0 ? chain : null;
   } catch {
     return null;

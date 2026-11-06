@@ -5,15 +5,19 @@
 // package is bundled into the artifact but must not be evaluated at start.
 "use strict";
 
+const {
+  ObjectDefineProperty,
+} = require("./primordials.cjs");
+
 function defineLazy(target, name, load, enumerable = true) {
   const settle = (value) =>
-    Object.defineProperty(target, name, {
+    ObjectDefineProperty(target, name, {
       value,
       writable: true,
       enumerable,
       configurable: true,
     });
-  Object.defineProperty(target, name, {
+  ObjectDefineProperty(target, name, {
     configurable: true,
     enumerable,
     get() {

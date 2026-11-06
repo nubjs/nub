@@ -128,6 +128,30 @@ pub fn write_lockfile_as(
     manifest: &aube_manifest::PackageJson,
     kind: LockfileKind,
 ) -> Result<PathBuf, Error> {
+    let no_churn = aube_util::embedder().no_churn_lockfile_write;
+    write_lockfile_with(project_dir, graph, manifest, kind, no_churn)
+}
+
+/// [`write_lockfile_as`] without the embedder's no-churn guard, for an explicit
+/// request to rewrite the file. The guard compares resolved graphs, and a graph
+/// does not carry everything a lockfile records (npm's `dev` / `optional` flags
+/// are derived on write), so a graph-equal file can still be wrong on disk.
+pub fn rewrite_lockfile_as(
+    project_dir: &Path,
+    graph: &LockfileGraph,
+    manifest: &aube_manifest::PackageJson,
+    kind: LockfileKind,
+) -> Result<PathBuf, Error> {
+    write_lockfile_with(project_dir, graph, manifest, kind, false)
+}
+
+fn write_lockfile_with(
+    project_dir: &Path,
+    graph: &LockfileGraph,
+    manifest: &aube_manifest::PackageJson,
+    kind: LockfileKind,
+    no_churn: bool,
+) -> Result<PathBuf, Error> {
     let _diag = aube_util::diag::Span::new(aube_util::diag::Category::Lockfile, "write")
         .with_meta_fn(|| {
             format!(
@@ -177,7 +201,7 @@ pub fn write_lockfile_as(
     // a not-yet-migrated project from writing anything: a graph-equal install /
     // `--force` re-resolve leaves the old lockfile exactly as-is (no rename, no
     // new file). The rename rides ONLY a real change (the write below).
-    if aube_util::embedder().no_churn_lockfile_write {
+    if no_churn {
         let compare_against = if path.exists() {
             Some(path.clone())
         } else {

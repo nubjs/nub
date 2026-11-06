@@ -168,7 +168,7 @@ export function installCompilePreamble() {
   // #endregion
   if (bootstrap.needsWorker) {
     installWorkerPolyfill();
-  } else {
+  } else if (typeof globalThis.Worker === "undefined") {
     // `globalThis.Worker` belongs to every compiled artifact's global surface, not
     // only to artifacts whose source happens to spell it — computed access such as
     // `globalThis["Work" + "er"]` must still find it. So the NAME goes on globalThis

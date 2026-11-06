@@ -726,10 +726,10 @@ JSON
 	assert_file_exists node_modules/isexe/package.json
 }
 
-@test "aube install --fix-lockfile --lockfile-only is a no-op on a fresh lockfile" {
-	# Combined with --lockfile-only, a fresh lockfile should short-circuit
-	# on the "lockfile already up to date" fast path, without re-writing
-	# aube-lock.yaml or touching node_modules.
+@test "aube install --fix-lockfile --lockfile-only round-trips a fresh lockfile" {
+	# With --lockfile-only, a fresh lockfile is still re-resolved from its
+	# own pins, so the writer's output matches byte-for-byte and node_modules
+	# stays untouched.
 	_setup_basic_fixture
 	run aube install --no-frozen-lockfile
 	assert_success
@@ -737,7 +737,6 @@ JSON
 	cp aube-lock.yaml aube-lock.yaml.before
 	run aube install --fix-lockfile --lockfile-only
 	assert_success
-	assert_output --partial "up to date"
 	run cmp aube-lock.yaml aube-lock.yaml.before
 	assert_success
 	assert [ ! -d node_modules ]
