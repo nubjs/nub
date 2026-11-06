@@ -87,6 +87,13 @@ pub struct PackageExtension {
     pub optional_dependencies: BTreeMap<String, String>,
     pub peer_dependencies: BTreeMap<String, String>,
     pub peer_dependencies_meta: BTreeMap<String, aube_registry::PeerDepMeta>,
+    /// Optional peers from an embedder's compatibility database, `name ->
+    /// range`. They repair a package's undeclared import, which the package
+    /// manager being mirrored does not know about, so they must not change how
+    /// many copies of the package get installed: unlike `peer_dependencies`
+    /// they never reach the peer-context pass.
+    /// See `peer_context::database_peer_targets`.
+    pub database_peers: BTreeMap<String, String>,
 }
 
 /// Default is `NoDowngrade` to match the user-facing default in
