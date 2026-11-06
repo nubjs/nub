@@ -3051,6 +3051,7 @@ impl<'a> ResolveDriver<'a> {
                 &task.name,
                 &task.range,
                 task.registry_name(),
+                task.is_root || task.real_name.is_some(),
                 &self.resolver.vulnerable_ranges,
             )
         }) else {
