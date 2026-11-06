@@ -2303,8 +2303,21 @@ jobs:
             nub-launcher-win32-x64.exe nub-launcher-win32-x64.exe.sha256
             nub-launcher-win32-arm64.exe nub-launcher-win32-arm64.exe.sha256
           )
+          # A run reads all 32 assets at least twice, and one HTTP 500 under `set -e`
+          # lost a nightly at this step (#1094). Only reads need this, because the next
+          # pass already retries a failed upload. A real outage still fails the step.
+          retry_read() {
+            local attempt
+            for attempt in 1 2 3 4; do
+              "$@" && return 0
+              echo "  ($1 $2 $3 failed on attempt $attempt of 4)" >&2
+              [ "$attempt" -eq 4 ] || sleep $((attempt * 15))
+            done
+            return 1
+          }
+
           asset_names() {
-            gh release view "$TAG" --json assets --jq '.assets[].name'
+            retry_read gh release view "$TAG" --json assets --jq '.assets[].name'
           }
 
           missing_assets() {
@@ -2333,7 +2346,8 @@ jobs:
               if grep -qxF "$a" <<<"$present"; then
                 remote="remote-assets/$a"
                 rm -f "$remote"
-                gh release download "$TAG" --pattern "$a" --dir remote-assets
+                # --clobber: gh leaves a partial file behind when a download dies midway.
+                retry_read gh release download "$TAG" --pattern "$a" --dir remote-assets --clobber
                 test -f "$remote" \
                   || { echo "::error::release $TAG listed $a but gh did not download it"; exit 1; }
                 if ! cmp -s "$f" "$remote"; then
@@ -2788,8 +2802,21 @@ jobs:
           )
           TAG="v$VERSION"
 
+          # A run reads all 32 assets at least twice, and one HTTP 500 under `set -e`
+          # lost a nightly at this step (#1094). Only reads need this, because the next
+          # pass already retries a failed upload. A real outage still fails the step.
+          retry_read() {
+            local attempt
+            for attempt in 1 2 3 4; do
+              "$@" && return 0
+              echo "  ($1 $2 $3 failed on attempt $attempt of 4)" >&2
+              [ "$attempt" -eq 4 ] || sleep $((attempt * 15))
+            done
+            return 1
+          }
+
           asset_names() {
-            gh release view "$TAG" --json assets --jq '.assets[].name'
+            retry_read gh release view "$TAG" --json assets --jq '.assets[].name'
           }
 
           missing_assets() {
@@ -2818,7 +2845,8 @@ jobs:
               if grep -qxF "$a" <<<"$present"; then
                 remote="remote-assets/$a"
                 rm -f "$remote"
-                gh release download "$TAG" --pattern "$a" --dir remote-assets
+                # --clobber: gh leaves a partial file behind when a download dies midway.
+                retry_read gh release download "$TAG" --pattern "$a" --dir remote-assets --clobber
                 test -f "$remote" \
                   || { echo "::error::release $TAG listed $a but gh did not download it"; exit 1; }
                 if ! cmp -s "$f" "$remote"; then
