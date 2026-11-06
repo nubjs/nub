@@ -209,6 +209,7 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
                     DriftStatus::Fresh,
                 )
                     && matches!(g.check_catalogs_drift(workspace_catalogs), DriftStatus::Fresh)
+                    && matches!(g.check_required_entries(k), DriftStatus::Fresh)
                     && matches!(
                         g.check_patched_dependencies_drift(
                             k,
@@ -611,6 +612,13 @@ pub(super) fn select_lockfile_result(
                         aube_util::cmd("install")
                     ));
                 }
+                if let DriftStatus::Stale { reason } = graph.check_required_entries(kind) {
+                    return Err(miette!(
+                        code = aube_codes::errors::ERR_AUBE_OUTDATED_LOCKFILE,
+                        "lockfile is broken: {reason}\n\
+                         help: run without --frozen-lockfile to repair it"
+                    ));
+                }
                 // Same hard-fail for patch-config drift — pnpm rejects
                 // this as ERR_PNPM_LOCKFILE_CONFIG_MISMATCH.
                 let (effective_patch_paths, effective_patch_hashes) =
@@ -675,15 +683,18 @@ pub(super) fn select_lockfile_result(
                             is_workspace_project,
                             *kind,
                         ) {
-                            DriftStatus::Fresh => match graph.check_patched_dependencies_drift(
-                                *kind,
-                                &effective_patch_paths,
-                                &effective_patch_hashes,
-                            ) {
-                                DriftStatus::Fresh => package_extensions_drift(
-                                    graph,
-                                    effective_package_extensions_checksum.as_deref(),
-                                ),
+                            DriftStatus::Fresh => match graph.check_required_entries(*kind) {
+                                DriftStatus::Fresh => match graph.check_patched_dependencies_drift(
+                                    *kind,
+                                    &effective_patch_paths,
+                                    &effective_patch_hashes,
+                                ) {
+                                    DriftStatus::Fresh => package_extensions_drift(
+                                        graph,
+                                        effective_package_extensions_checksum.as_deref(),
+                                    ),
+                                    stale => stale,
+                                },
                                 stale => stale,
                             },
                             stale => stale,
