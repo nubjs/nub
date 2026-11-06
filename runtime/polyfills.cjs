@@ -79,6 +79,7 @@ const {
   ArrayPrototypeSlice,
   ArrayPrototypeEvery,
   StringPrototypeSplit,
+  StringPrototypeToLowerCase,
   RegExpPrototypeExec,
   PromiseResolve,
   ReferenceError,
@@ -1377,7 +1378,8 @@ function installLocaleVariants() {
   const Locale = new Proxy(NativeLocale, {
     __proto__: null,
     construct(target, args, newTarget) {
-      const [tag, options] = args;
+      const tag = args[0];
+      const options = args[1];
       if (options === undefined || options === null) {
         return ReflectConstruct(target, args, newTarget);
       }
@@ -1393,9 +1395,10 @@ function installLocaleVariants() {
               if (RegExpPrototypeExec(variantList, variants) === null) {
                 throw new RangeError(`Invalid variants: ${variants}`);
               }
-              const parts = StringPrototypeSplit(variants.toLowerCase(), "-");
+              const parts = StringPrototypeSplit(StringPrototypeToLowerCase(variants), "-");
               const seen = new Set();
-              for (const part of parts) {
+              for (let i = 0; i < parts.length; i++) {
+                const part = parts[i];
                 if (SetPrototypeHas(seen, part)) throw new RangeError(`Duplicate variants: ${variants}`);
                 SetPrototypeAdd(seen, part);
               }
@@ -1417,7 +1420,7 @@ function installLocaleVariants() {
       const selectedPrototype = ObjectGetPrototypeOf(locale);
       const surrogate = function LocaleWithVariants() {};
       ObjectDefineProperty(surrogate, "prototype", { value: selectedPrototype });
-      return ReflectConstruct(target, [`${id}-${variants.toLowerCase()}${StringPrototypeSlice(text, base.length)}`], surrogate);
+      return ReflectConstruct(target, [`${id}-${StringPrototypeToLowerCase(variants)}${StringPrototypeSlice(text, base.length)}`], surrogate);
     },
   });
   ObjectDefineProperty(proto, "constructor", { value: Locale });

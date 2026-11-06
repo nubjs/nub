@@ -56,6 +56,23 @@ void test("precise sums and locale variants survive poisoned implementation prim
   assert.equal(result[1], "biske-rozaj");
 });
 
+void test("Locale construction survives poisoned array iteration and lowercase methods", () => {
+  const { run } = realm();
+  const result = run<string[]>(`
+    const poison = () => { throw new Error("poisoned internal operation"); };
+    Array.prototype[Symbol.iterator] = poison;
+    String.prototype.toLowerCase = () => "biske";
+    [
+      new Intl.Locale("sl").toString(),
+      new Intl.Locale("sl", { region: "IT" }).toString(),
+      new Intl.Locale("sl-rozaj", { variants: "rozaj" }).toString(),
+    ];
+  `);
+  assert.equal(result[0], "sl");
+  assert.equal(result[1], "sl-IT");
+  assert.equal(result[2], "sl-rozaj");
+});
+
 void test("joint iterator state and private arrays survive poisoning while user reads remain observable", () => {
   const { run } = realm();
   const result = run<unknown[]>(`
