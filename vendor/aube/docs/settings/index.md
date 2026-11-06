@@ -2006,11 +2006,12 @@ Deduplicate packages that have peer dependencies.
 
 When true (the default), aube collapses packages that landed at
 different peer-suffixed dep_paths but resolved every declared peer to
-the same version into a single canonical variant. Ancestor dedupe
-happens inside the per-package DFS; this flag additionally controls
-the cross-subtree intersection pass that runs inside the fixed-point
-loop. Set to `false` to keep every distinct peer-suffixed variant
-(matching pnpm's opt-out).
+the same copy into a single canonical variant, and collapses a
+variant missing peers another variant resolved into that variant.
+Ancestor dedupe happens inside the per-package DFS; this flag
+additionally controls the cross-subtree intersection pass that runs
+inside the fixed-point loop. Set to `false` to keep every distinct
+peer-suffixed variant (matching pnpm's opt-out).
 
 ### `dedupePeers` {#setting-dedupepeers}
 

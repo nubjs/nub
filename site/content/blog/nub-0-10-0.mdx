@@ -1,0 +1,164 @@
+---
+title: "Nub 0.10.0"
+description: Dependency build scripts and workspace filters follow pnpm 12, Nub writes pnpm lockfiles that pnpm accepts in more layouts, and util.debounce, util.throttle and the JSON.parse options proposal are backfilled.
+author: The Nub Team
+date: 2026-11-06
+---
+
+Nub 0.10.0 brings dependency build scripts and `--filter` in line with pnpm 12, writes pnpm lockfiles that pnpm accepts in more layouts, and backfills `util.debounce`, `util.throttle` and the `JSON.parse` options proposal.
+
+<NubIntro />
+
+## Dependency build scripts
+
+An install that meets a build script nobody has approved now fails, as under pnpm 12. It fails last, once `node_modules` is linked and the approved builds and the project's own scripts have run. Global installs and `nubx` stay non-strict.
+
+```console
+$ nub install
+dependencies:
++ core-js@3.40.0
+
+ERR_NUB_IGNORED_BUILDS
+
+  × Ignored build scripts: core-js@3.40.0
+  help: Run `nub approve-builds` to pick which dependencies may run their
+        build scripts, or set `strictDepBuilds=false` to install without them.
+```
+
+| PR | What changed |
+| --- | --- |
+| [#1050](https://github.com/nubjs/nub/pull/1050) | **Denials.** `nub approve-builds '!pkg'` and `--allow-build='!pkg'` record a denial, and `--allow-build=pkg` refuses a package the project denies. An explicit `false` outranks `dangerouslyAllowAllBuilds`. |
+| [#1050](https://github.com/nubjs/nub/pull/1050) | **Settings.** `dangerouslyAllowAllBuilds` and `strictDepBuilds` are read from `.npmrc`, the environment and, in a pnpm project, `pnpm-workspace.yaml`. |
+| [#1050](https://github.com/nubjs/nub/pull/1050) | **`nub rebuild`.** Reports unapproved packages instead of passing over them. A filtered rebuild works in a shared-lockfile workspace, where it did nothing. |
+| [#1050](https://github.com/nubjs/nub/pull/1050) | **Member approvals.** `nub rebuild`, `nub ignored-builds` and `nub approve-builds` read the same approvals as `nub install`, workspace members' included. |
+| [#1045](https://github.com/nubjs/nub/pull/1045) | **Git dependency approval.** Approved by `<name>@git+<repository>` or the same key with `#<commit>`. A bare name, `name@version` or `*` does not approve one, and a denial installs it unbuilt. |
+| [#1045](https://github.com/nubjs/nub/pull/1045) | **Git dependency builds.** A hosted dependency such as `rimraf@github:isaacs/rimraf#v6.1.3` is now built. It linked with no `dist/`. The build no longer needs `cp`, which stock Windows lacks. |
+| [#1052](https://github.com/nubjs/nub/pull/1052) | **Project lifecycle stages.** Project scripts follow pnpm 12's stage lists in every project: `install` adds `preprepare` and `postprepare`, `remove` runs the uninstall stages, and `--prod` skips the `prepare` family. |
+
+## Workspace filters
+
+Nub now uses pnpm 12's selector grammar and directory globs on every workspace command, including `nub run` ([#1056](https://github.com/nubjs/nub/pull/1056)).
+
+```diff
+- nub run --filter ./packages build
++ nub run --filter './packages/*' build
+```
+
+| PR | What changed |
+| --- | --- |
+| [#1064](https://github.com/nubjs/nub/pull/1064) | **Empty selection.** Does nothing and exits 0. `install`, `remove` and `update` print `Scope: 0 of N workspace projects`, and `nub ci` still cleans `node_modules` first, as pnpm's does. |
+| [#1056](https://github.com/nubjs/nub/pull/1056) | **Workspace root.** `run`, `exec`, `add` and `test` drop the root from a selection that names no project. Other commands keep it. |
+| [#1055](https://github.com/nubjs/nub/pull/1055) | **Repeated filtered install.** Reports up to date. It reinstalled and reran lifecycle scripts. |
+| [#1055](https://github.com/nubjs/nub/pull/1055) | **`recursiveInstall`.** Read from `pnpm-workspace.yaml` in a pnpm project. |
+| [#1064](https://github.com/nubjs/nub/pull/1064) | **Flags before the verb.** `--filter-prod`, `-C` and `--dir` work there. |
+| [#1064](https://github.com/nubjs/nub/pull/1064) | **`nub ls` in a member.** Lists that member. |
+
+## Runtime APIs
+
+`JSON.parse()` takes the options object from the Stage 2.7 proposal ([#992](https://github.com/nubjs/nub/pull/992)). The `freeze` option deep-freezes every object and array in the result, and `preferNullPrototype` gives each object a null prototype.
+
+```ts
+const config = JSON.parse(text, { freeze: true });
+Object.isFrozen(config.servers[0]); // true
+Object.getPrototypeOf(config); // null
+```
+
+`util.debounce()` and `util.throttle()` are backfilled from Node 26.10 on older supported versions ([#974](https://github.com/nubjs/nub/pull/974)).
+
+```ts
+import { debounce, throttle } from "node:util";
+
+const save = debounce((value: string) => value, 100);
+const send = throttle((value: string) => value, 2, 1000);
+await Promise.all([save("draft"), send("event")]);
+```
+
+Both are typed in `@nubjs/types`.
+
+## Distribution
+
+| PR | What changed |
+| --- | --- |
+| [#571](https://github.com/nubjs/nub/pull/571) | **`nub upgrade` under mise.** Detects a mise install and runs `mise upgrade --bump nub`. It took the npm channel, which planted a second global copy. |
+| [#982](https://github.com/nubjs/nub/pull/982) | **Release assets.** Each stable release carries `packslip.sigstore.json`, a signed manifest of its archives, so mise can install Nub straight from the release. |
+
+## Breaking changes
+
+- **An unapproved dependency build script fails the install** with `ERR_NUB_IGNORED_BUILDS` and exit 1. `strictDepBuilds=false` restores the warning ([#1050](https://github.com/nubjs/nub/pull/1050))
+- **A git dependency with a `prepare` script builds only when approved**, and otherwise fails with `ERR_NUB_GIT_DEP_PREPARE_NOT_ALLOWED` ([#1045](https://github.com/nubjs/nub/pull/1045))
+- **`--filter ./packages` selects only a project whose directory is `packages`**. Use `./packages/*` or `./packages/**` for the projects under it ([#1056](https://github.com/nubjs/nub/pull/1056))
+- **A `--filter` that selects no project exits 0**, and `--fail-if-no-match` exits 1 ([#1064](https://github.com/nubjs/nub/pull/1064))
+- **`nub rebuild <pkg>` no longer approves the package it names** ([#1050](https://github.com/nubjs/nub/pull/1050))
+
+## Bug fixes
+
+### Lockfile compatibility
+
+| PR | What changed |
+| --- | --- |
+| [#1060](https://github.com/nubjs/nub/pull/1060) | **Per-project pnpm lockfiles.** Under `shared-workspace-lockfile=false`, a member's lockfile matches pnpm 10's bytes on the tested workspaces. pnpm's `--frozen-lockfile` rejected the old form. |
+| [#1062](https://github.com/nubjs/nub/pull/1062) | **Frozen installs of those trees.** `nub install --frozen-lockfile` passes on a tree Nub or pnpm 10 wrote, and a plain install keeps a member's locked versions. It failed on the first and re-resolved on the second. |
+| [#1058](https://github.com/nubjs/nub/pull/1058) | **Rebuild in those trees.** `nub rebuild` finds a member's packages in the root store. It built nothing and exited 0. |
+| [#1054](https://github.com/nubjs/nub/pull/1054) | **pnpm's env document.** `pnpm-lock.yaml` records a pinned pnpm in its leading document, so pnpm 11 and 12 accept Nub's lockfile under `--frozen-lockfile`, including after `nub pm use pnpm`. |
+| [#1079](https://github.com/nubjs/nub/pull/1079) | **Local paths in `pnpm-lock.yaml`.** `link:./x` is written `link:x` and `file:./x` is written `file:x`, and empty `packages:` and `snapshots:` are omitted. A package spelled with `./` relinks on its first install after upgrading. |
+| [#1004](https://github.com/nubjs/nub/pull/1004) | **A `file:` dependency outside the workspace.** A member's `file:` directory above the workspace root installs under `nub ci` and `--frozen-lockfile`. It failed with `is not a directory`. |
+| [#1088](https://github.com/nubjs/nub/pull/1088) | **`package-lock.json`.** An optional dependency of a dev dependency is flagged `dev` and `optional`. It was `devOptional`. |
+| [#1040](https://github.com/nubjs/nub/pull/1040) | **Optional peers.** Every resolved optional peer is linked next to its package, a plain install repairs an existing `nub.lock`, and `bun.lock` records peers as bun writes them. |
+| [#1057](https://github.com/nubjs/nub/pull/1057) | **Catalog updates.** `nub update -r` raises a `^` or `~` catalog entry to the version it resolved, and a catalog-only lockfile change is written instead of skipped. |
+| [#1039](https://github.com/nubjs/nub/pull/1039) | **Overrides on `catalog:`.** A range-keyed override matches a `catalog:` dependency by its reference, as under pnpm. |
+
+### Package manager
+
+| PR | What changed |
+| --- | --- |
+| [#1036](https://github.com/nubjs/nub/pull/1036) | **`nub pack` and `nub publish`.** Never pack a file from outside the package. A symlinked or absolute `main`, or a symlinked README, put that file in the tarball. |
+| [#1036](https://github.com/nubjs/nub/pull/1036) | **`workspace:` specs.** Both commands resolve `workspace:` and `catalog:` specs and apply `publishConfig`. The specs shipped verbatim, which made the package uninstallable. |
+| [#1043](https://github.com/nubjs/nub/pull/1043) | **`nub update` at a workspace root.** Keeps members' locked versions. It re-resolved every member and bumped packages nobody named. |
+| [#1037](https://github.com/nubjs/nub/pull/1037) | **`patchedDependencies`.** Git renames, header-only deletions, empty new files and mode changes apply as under pnpm 11. A patched executable keeps its mode. |
+| [#1010](https://github.com/nubjs/nub/pull/1010) | **`nub patch-commit`.** Replaces the patch file with one consolidated patch instead of appending a section per round. `nub patch` resolves its target through the lockfile. |
+| [#1051](https://github.com/nubjs/nub/pull/1051) | **Workspace `.npmrc`.** A command run in a member reads the root's registry and auth. The member's file layers on top under pnpm 10, Yarn 1 and a Nub project, and is not read under pnpm 11, npm or Bun. |
+| [#953](https://github.com/nubjs/nub/pull/953) | **DNS.** Hosts resolve through the OS with an in-process cache, so VPN-scoped DNS, `/etc/resolver/*` and Windows NRPT apply. |
+| [#1078](https://github.com/nubjs/nub/pull/1078) | **Broken downloads.** A tarball whose connection breaks off mid-body is downloaded again. It failed the install. |
+| [#1035](https://github.com/nubjs/nub/pull/1035) | **Failed installs.** An install that fails after a virtual-store mode change keeps `node_modules`. It removed the tree before resolving. |
+| [#1059](https://github.com/nubjs/nub/pull/1059) | **`--offline`.** Refuses an uncached full packument fetch, which went to the network. |
+| [#995](https://github.com/nubjs/nub/pull/995) | **`file:` dependencies on macOS.** Two projects with a `file:` dependency at the same relative path get their own files. They shared whichever installed first, and a tarball rebuilt in place stayed stale. |
+| [#1080](https://github.com/nubjs/nub/pull/1080) | **Overrides to a local copy.** A registry package whose dependency is overridden to a `file:` path is ejected into the project. The link dangled and `require` failed with `Cannot find module`. |
+| [#1046](https://github.com/nubjs/nub/pull/1046) | **Store locks on NFS.** Prune, maintenance and GC lock files open readable, so shared locks work on Linux NFS. They failed with `EBADF`. |
+| [#1074](https://github.com/nubjs/nub/pull/1074) | **Add-time refusals.** `--allow-similar-name` and `--allow-new-name` each clear their own check, and every refusal names its flag and `allowedUnpopularPackages`. |
+| [#1074](https://github.com/nubjs/nub/pull/1074) | **Aliases and bins.** A dependency under its own name keeps its bin over an alias of the same package, so `tsc` stays with `typescript` when `typescript5` is also installed. |
+| [#1042](https://github.com/nubjs/nub/pull/1042) | **Remix 3.** `^3.0.0`, `3.1.0` and `>=2` keep the shared store. Only a spec that may select a 3.0.0 prerelease gets a project-local store. |
+| [#983](https://github.com/nubjs/nub/pull/983) | **pnpm 12 through `nub pm shim`.** The `pnpm` and `pnpx` shims run pnpm 12. They failed with `SyntaxError: Unexpected identifier 'is'`. |
+| [#1021](https://github.com/nubjs/nub/pull/1021) | **Mismatched `nub pm shim` projects.** Registry and account commands such as `npm login` pass through to the system manager instead of being refused. |
+| [#1034](https://github.com/nubjs/nub/pull/1034) | **`nub pm use nub`.** The Turborepo heads-up says which versions recognize Nub. |
+| [#984](https://github.com/nubjs/nub/pull/984) | **Peer placements.** A package with peer-dependent copies reuses its file index and verified store read. Remapping across eight peer contexts went from 1.647 ms to 1.411 ms in a stage benchmark on Linux x86-64. |
+
+### Runtime
+
+| PR | What changed |
+| --- | --- |
+| [#1067](https://github.com/nubjs/nub/pull/1067) | **YAML and TOML imports.** Values keep `NaN`, `-0`, dates and own `__proto__` keys. A TOML date is a `Date`, and a TOML integer past 2^53 is a `BigInt`. It threw on import. |
+| [#1013](https://github.com/nubjs/nub/pull/1013) | **`UV_THREADPOOL_SIZE`.** Assigning it in `process.env` before the first pool use sizes the pool, as under Node. Nub's preload had already built the pool. |
+| [#1015](https://github.com/nubjs/nub/pull/1015) | **Temporal.** The polyfilled global has the spec's property attributes. It was a frozen module namespace. |
+| [#1061](https://github.com/nubjs/nub/pull/1061) | **`require()` of a replaced package.** `@js-temporal/polyfill`, `urlpattern-polyfill` and `abort-controller` load the installed package. They failed with `ENOENT` on Node 22.15+. |
+| [#796](https://github.com/nubjs/nub/pull/796) | **Decorated files.** 400 decorated ESM files on Node 26.11 start in 0.18s, down from 0.99s, on macOS arm64 with a warm transpile cache. |
+| [#556](https://github.com/nubjs/nub/pull/556) | **Startup.** Augmented startup no longer loads `internal/file` on Node 20+. |
+| [#1041](https://github.com/nubjs/nub/pull/1041) | **Entry tsconfig check.** The check follows the entry's real path and skips a dependency's own config. A workspace bin run through its `node_modules` link failed before starting. |
+| [#899](https://github.com/nubjs/nub/pull/899) | **Unreadable tsconfig.** The diagnostic names the OS error. It read the same as a missing file. |
+| [#724](https://github.com/nubjs/nub/pull/724) | **Varlock.** Nub stands down when Varlock already resolved the schema or is the program being launched. `varlock run --path ./config` exited 1. |
+| [#998](https://github.com/nubjs/nub/pull/998) | **Terminal jobs.** A child that stops on its first terminal read resumes after the foreground handoff. It stayed stopped. |
+| [#1075](https://github.com/nubjs/nub/pull/1075), [#1086](https://github.com/nubjs/nub/pull/1086) | **Test and watch modes.** `--test=<value>`, `--watch=<value>`, `--watch_path` and a watch flag in `NODE_OPTIONS` stay out of the children they start, which could recurse without end. `nodeOptions` in `nub.jsonc` refuses a watch flag. |
+
+### Node discovery and provisioning
+
+| PR | What changed |
+| --- | --- |
+| [#1033](https://github.com/nubjs/nub/pull/1033) | **`latest` and other aliases.** Aliases and partial pins select releases only. A `.nvmrc` of `latest` failed with a 404 once nodejs.org listed a 27.0.0 alpha. |
+| [#1049](https://github.com/nubjs/nub/pull/1049) | **Version-manager shims.** The version behind a mise, asdf, nodenv or Volta shim is read on every launch. A cached version passed Node 26 flags to Node 24, which exited 9. |
+| [#1044](https://github.com/nubjs/nub/pull/1044), [#1063](https://github.com/nubjs/nub/pull/1063), [#1073](https://github.com/nubjs/nub/pull/1073) | **Launch loops.** A PATH `node` that hands the launch back to Nub, or links back to it, is skipped. Any chain of Nub processes stops at 64 with `ERR_NUB_LAUNCH_LOOP`. |
+| [#1047](https://github.com/nubjs/nub/pull/1047) | **Windows runtime cache.** Validates the cache directory rather than every ancestor. A broad grant on the user's profile made each command print warnings and run without the runtime. |
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.10.0) list every change in this release.
+
+## Get started
+
+<GetStarted />

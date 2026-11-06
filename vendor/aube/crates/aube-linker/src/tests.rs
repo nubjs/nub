@@ -967,6 +967,116 @@ fn selected_package_materializes_locally_while_dependencies_keep_using_gvs() {
     assert_eq!(second.packages_cached, 2);
 }
 
+/// `foo@1.0.0`, keyed the same whatever its edge to `bar` is, and both `bar`s.
+fn graph_with_foo_edge(bar: Option<&str>) -> LockfileGraph {
+    let package = |name: &str, version: &str, dependencies| {
+        (
+            format!("{name}@{version}"),
+            LockedPackage {
+                name: name.to_string(),
+                version: version.to_string(),
+                dependencies,
+                dep_path: format!("{name}@{version}"),
+                ..Default::default()
+            },
+        )
+    };
+    let foo_deps = bar
+        .map(|version| ("bar".to_string(), version.to_string()))
+        .into_iter()
+        .collect();
+    let direct = |name: &str, dep_path: &str| DirectDep {
+        name: name.to_string(),
+        dep_path: dep_path.to_string(),
+        dep_type: DepType::Production,
+        specifier: None,
+    };
+    let mut roots = vec![direct("foo", "foo@1.0.0")];
+    roots.extend(bar.map(|version| direct("bar", &format!("bar@{version}"))));
+    LockfileGraph {
+        importers: BTreeMap::from([(".".to_string(), roots)]),
+        packages: BTreeMap::from([
+            package("foo", "1.0.0", foo_deps),
+            package("bar", "1.0.0", BTreeMap::new()),
+            package("bar", "2.0.0", BTreeMap::new()),
+        ]),
+        ..Default::default()
+    }
+}
+
+/// Moves and then drops `foo`'s edge across installs into one project, and
+/// checks what `foo`'s own `require('bar')` finds each time.
+fn assert_a_reused_entry_follows_its_edges(linker: &Linker, store: &Store, dir: &Path) {
+    let project_dir = dir.join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let foo_index = package_index(store, r#"{"name":"foo"}"#, "module.exports = 'foo';");
+    let indices = BTreeMap::from([
+        ("foo@1.0.0".to_string(), foo_index),
+        (
+            "bar@1.0.0".to_string(),
+            package_index(store, r#"{"name":"bar"}"#, "module.exports = 'bar 1';"),
+        ),
+        (
+            "bar@2.0.0".to_string(),
+            package_index(store, r#"{"name":"bar"}"#, "module.exports = 'bar 2';"),
+        ),
+    ]);
+    let foo_nm = project_dir.join("node_modules/.aube/foo@1.0.0/node_modules");
+    let bar_from_foo = foo_nm.join("bar/index.js");
+
+    for (version, expected) in [("1.0.0", "bar 1"), ("2.0.0", "bar 2")] {
+        linker
+            .link_all(&project_dir, &graph_with_foo_edge(Some(version)), &indices)
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(&bar_from_foo)
+                .unwrap()
+                .contains(expected),
+            "foo's edge at {version} must find {expected}"
+        );
+    }
+
+    linker
+        .link_all(&project_dir, &graph_with_foo_edge(None), &indices)
+        .unwrap();
+    assert!(
+        foo_nm.join("bar").symlink_metadata().is_err(),
+        "a dropped edge must not leave its link behind"
+    );
+    assert!(
+        foo_nm.join("foo/index.js").exists(),
+        "the package's own files stay"
+    );
+}
+
+#[test]
+fn a_per_project_entry_follows_its_edges_across_installs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, false).with_hoist(false);
+    assert_a_reused_entry_follows_its_edges(&linker, &store, dir.path());
+}
+
+#[test]
+fn an_ejected_entry_follows_its_edges_across_installs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_disk_materialize(&["foo".to_string()]);
+    assert_a_reused_entry_follows_its_edges(&linker, &store, dir.path());
+}
+
+#[test]
+fn a_selected_local_entry_follows_its_edges_across_installs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::at(dir.path().join("store/files"));
+    let linker = Linker::new_with_gvs(&store, LinkStrategy::Copy, true)
+        .with_hoist(false)
+        .with_project_local_dep_paths(["foo@1.0.0".to_string()]);
+    assert_a_reused_entry_follows_its_edges(&linker, &store, dir.path());
+}
+
 #[test]
 fn workspace_selected_package_materializes_locally_while_dependencies_use_gvs() {
     let dir = tempfile::tempdir().unwrap();

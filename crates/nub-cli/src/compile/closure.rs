@@ -84,9 +84,6 @@ pub struct Plan {
     /// name: a clean install of a package another closure ships verbatim still
     /// bundles, and left to Node it would load the other one.
     pub verbatim: BTreeSet<PathBuf>,
-    /// `--external`, which a chunk leaves to Node like any shipped file does, however
-    /// the package was reached and whether or not it is installed here.
-    pub external: Vec<String>,
     /// The next chunk number. It only ever goes up: entries are filtered and removed
     /// after they are numbered, so counting them hands out a number a live chunk holds.
     pub next_chunk: usize,
@@ -223,19 +220,21 @@ pub fn export_entry(at: &str, entry: &Entry) -> (String, &'static str, String) {
 /// where the chunk landed: an entry chunk from its stub, a shared one from the app
 /// root. Neither is where the importing module sat, so the imports are returned for
 /// the caller to check against the payload.
-pub fn bundle(plan: &Plan, minify: bool, keep_names: bool) -> Result<Bundled> {
+///
+/// `external` is the plugin that gives the main bundle's `--external` imports their
+/// ids. A chunk can inline modules from several packages, and sits apart from all of
+/// them when it is shared, so only the import itself can say which module made it.
+pub fn bundle(
+    plan: &Plan,
+    external: Option<&SharedPluginable>,
+    minify: bool,
+    keep_names: bool,
+) -> Result<Bundled> {
     let mut bundled = Bundled::default();
     for esm in [false, true] {
         let entries: Vec<&Entry> = plan.entries.iter().filter(|e| e.esm == esm).collect();
         if !entries.is_empty() {
-            let built = build(
-                &entries,
-                &plan.verbatim,
-                &plan.external,
-                esm,
-                minify,
-                keep_names,
-            )?;
+            let built = build(&entries, &plan.verbatim, external, esm, minify, keep_names)?;
             bundled.files.extend(built.files);
             bundled.imports.extend(built.imports);
         }
@@ -246,13 +245,12 @@ pub fn bundle(plan: &Plan, minify: bool, keep_names: bool) -> Result<Bundled> {
 fn build(
     plan: &[&Entry],
     verbatim: &BTreeSet<PathBuf>,
-    external: &[String],
+    external: Option<&SharedPluginable>,
     esm: bool,
     minify: bool,
     keep_names: bool,
 ) -> Result<Bundled> {
     let verbatim = verbatim.clone();
-    let left_to_run_time = external.to_vec();
     let synthetic: BTreeSet<String> = plan
         .iter()
         .map(|entry| entry.importer.to_string_lossy().into_owned())
@@ -318,10 +316,7 @@ fn build(
                         verbatim_install(&verbatim, specifier, importer)
                             .map(|install| (importer.to_string(), install))
                     });
-                let external = install.is_some()
-                    || left_to_run_time
-                        .iter()
-                        .any(|package| super::bundle::is_package_specifier(specifier, package));
+                let external = install.is_some();
                 if let (Some((importer, install)), Ok(mut seen)) = (install, recorded.lock()) {
                     seen.insert((importer, package_of(specifier).to_string(), install));
                 }
@@ -337,6 +332,11 @@ fn build(
         }),
         ..Default::default()
     };
+    let plugins: Vec<SharedPluginable> = external
+        .cloned()
+        .into_iter()
+        .chain([entries as SharedPluginable])
+        .collect();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -344,7 +344,7 @@ fn build(
     let output = rt.block_on(async move {
         let mut bundler = BundlerBuilder::default()
             .with_options(options)
-            .with_plugins(vec![entries as SharedPluginable])
+            .with_plugins(plugins)
             .build()
             .map_err(|e| anyhow!("closure bundler init: {e:?}"))?;
         bundler
