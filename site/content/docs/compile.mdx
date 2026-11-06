@@ -272,6 +272,14 @@ const wasm = readFileSync(require.resolve("yoga-wasm-web/dist/yoga.wasm"));
 nub compile app.ts --unbundled yoga-wasm-web
 ```
 
+A package nothing imports ships too, as long as the entry can resolve it. A pino transport is the usual case: pino names it as a string and loads it in a worker, so no import reaches it.
+
+```bash
+nub compile app.ts --unbundled pino-pretty
+```
+
+When the target is a string literal, as in `pino({ transport: { target: "pino-pretty" } })`, Nub ships it without the flag.
+
 The flag also names a dependency of a package that is already shipping unbundled. Nub asks the same question of every package in that dependency's closure and bundles the ones that come back clean, so `--unbundled` is how you overrule it for one of them:
 
 ```bash
@@ -822,7 +830,7 @@ Two cases justify it:
 
 Bundle everything else.
 
-An externalized package must be installed on the machine that runs the binary — the executable is no longer self-contained, and that is the trade. Resolution preserves the lookup base of the source module that imported it, rather than using one launch-directory base for every external. A package that cannot be found there fails at startup, naming it:
+An externalized package must be installed on the machine that runs the binary — the executable is no longer self-contained, and that is the trade. Resolution preserves the lookup base of the source module that imported it, rather than using one launch-directory base for every external. That also applies to a package shipped unbundled, and the binary carries no copy of the external even when one is installed at build time. A package that cannot be found there fails at startup, naming it:
 
 ```console
 $ ./app

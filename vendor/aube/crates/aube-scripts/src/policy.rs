@@ -1,10 +1,12 @@
 //! Allowlist/denylist policy for running dependency lifecycle scripts.
 //!
-//! Mirrors pnpm's `createAllowBuildFunction` — given an `allowBuilds`
-//! map (`Record<string, boolean>`) and a `dangerouslyAllowAllBuilds`
-//! flag, produce a function from `(pkgName, version)` to an allow /
-//! deny / unspecified decision. Unspecified means "fall through to the
-//! caller's default," which for aube is always "deny."
+//! Mirrors pnpm 12's `AllowBuildPolicy` — given an `allowBuilds` map
+//! (`Record<string, boolean>`) and a `dangerouslyAllowAllBuilds` flag,
+//! produce a function from `(pkgName, version)` to an allow / deny /
+//! unspecified decision. Unspecified means "fall through to the
+//! caller's default," which for aube is always "deny." A `false` entry
+//! outranks `dangerouslyAllowAllBuilds` (pnpm 11 let allow-all drop the
+//! whole map; pnpm 12 reversed that).
 //!
 //! ## Entry shapes
 //!
@@ -31,6 +33,7 @@
 //! name can't be used to assert "this exact build was audited."
 
 use aube_manifest::AllowBuildRaw;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 /// The decision for a single `(name, version)` lookup.
@@ -96,15 +99,15 @@ impl BuildPolicy {
     /// map is the superset format. Unrecognized `allowBuilds` value
     /// shapes are collected in the returned `warnings` vec so the
     /// caller can surface them through the progress UI.
+    ///
+    /// `dangerously_allow_all` allows everything the map does not deny:
+    /// `decide` checks every denial before the allow-all answer.
     pub fn from_config(
         allow_builds: &BTreeMap<String, AllowBuildRaw>,
         only_built: &[String],
         never_built: &[String],
         dangerously_allow_all: bool,
     ) -> (Self, Vec<BuildPolicyError>) {
-        if dangerously_allow_all {
-            return (Self::allow_all(), Vec::new());
-        }
         let mut allowed = HashSet::new();
         let mut denied = HashSet::new();
         let mut allowed_sources = HashSet::new();
@@ -192,7 +195,7 @@ impl BuildPolicy {
 
         (
             Self {
-                allow_all: false,
+                allow_all: dangerously_allow_all,
                 allowed,
                 denied,
                 allowed_sources,
@@ -204,23 +207,6 @@ impl BuildPolicy {
             },
             warnings,
         )
-    }
-
-    /// Switch this policy into allow-all mode while keeping its
-    /// explicit deny entries — the same shape [`Self::denylist`]
-    /// builds. `decide` checks denies before the allow-all
-    /// short-circuit, so `false` entries keep winning.
-    ///
-    /// This is the `dangerouslyAllowAllBuilds` composition for callers
-    /// whose documented precedence puts explicit per-package entries
-    /// above the allow-all posture (e.g. the `defaultTrust` floor's
-    /// chain: explicit entry > allow-all > floor > default deny).
-    /// [`Self::from_config`]'s allow-all short-circuit — which drops
-    /// `false` entries to mirror pnpm's `createAllowBuildFunction` —
-    /// stays the default behavior.
-    pub fn allow_all_except_denied(mut self) -> Self {
-        self.allow_all = true;
-        self
     }
 
     /// Build an allow-all policy with explicit package-pattern denies.
@@ -301,6 +287,8 @@ impl BuildPolicy {
         if matches_any_wildcard(name, &self.denied_wildcards) {
             return AllowDecision::Deny;
         }
+        let source_key = source_key.map(normalize_source_key);
+        let source_key = source_key.as_deref();
         if let Some(source_key) = source_key
             && self.denied_sources.contains(source_key)
         {
@@ -365,13 +353,23 @@ impl BuildPolicy {
     /// newly approved unchanged packages still get a chance to run.
     pub fn fingerprint(&self) -> String {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(b"build-policy-v1");
+        hasher.update(b"build-policy-v2");
         hasher.update(if self.allow_all { b"\x01" } else { b"\x00" });
         hash_set(&mut hasher, b"allowed", &self.allowed);
         hash_set(&mut hasher, b"denied", &self.denied);
         hash_set(&mut hasher, b"allowed_sources", &self.allowed_sources);
         hash_set(&mut hasher, b"denied_sources", &self.denied_sources);
         hash_vec(&mut hasher, b"allowed_wildcards", &self.allowed_wildcards);
+        hash_set(
+            &mut hasher,
+            b"allowed_git_repositories",
+            &self.allowed_git_repositories,
+        );
+        hash_set(
+            &mut hasher,
+            b"denied_git_repositories",
+            &self.denied_git_repositories,
+        );
         hash_vec(&mut hasher, b"denied_wildcards", &self.denied_wildcards);
         hasher.finalize().to_hex().to_string()
     }
@@ -547,7 +545,7 @@ fn expand_spec(pattern: &str) -> Result<Vec<String>, BuildPolicyError> {
     for raw in versions_part.split("||") {
         let trimmed = raw.trim();
         if is_source_version(trimmed) && !versions_part.contains("||") {
-            out.push(format!("{name}@{trimmed}"));
+            out.push(normalize_source_key(&format!("{name}@{trimmed}")).into_owned());
             return Ok(out);
         }
         if trimmed.is_empty() || !is_exact_semver(trimmed) {
@@ -556,6 +554,27 @@ fn expand_spec(pattern: &str) -> Result<Vec<String>, BuildPolicyError> {
         out.push(format!("{name}@{trimmed}"));
     }
     Ok(out)
+}
+
+/// One spelling for an exact `file:` / `link:` key, on both sides of a match,
+/// so `dep@file:./dep` and `dep@file:unused/../dep` name the `dep@file:dep` a
+/// lockfile hands back. Dropping a denial on a spelling mismatch would let its
+/// script run, so this has to cover every spelling rather than list some.
+fn normalize_source_key(key: &str) -> Cow<'_, str> {
+    let (name, source) = split_name_and_versions(key);
+    let Some((kind, path)) = source
+        .strip_prefix("file:")
+        .map(|path| ("file", path))
+        .or_else(|| source.strip_prefix("link:").map(|path| ("link", path)))
+    else {
+        return Cow::Borrowed(key);
+    };
+    let normalized = aube_util::path::normalize_dep_path(path);
+    if normalized == path {
+        Cow::Borrowed(key)
+    } else {
+        Cow::Owned(format!("{name}@{kind}:{normalized}"))
+    }
 }
 
 fn is_source_key(key: &str) -> bool {
@@ -643,6 +662,51 @@ mod tests {
         let (p, errs) = BuildPolicy::from_config(&map, &[], &[], false);
         assert!(errs.is_empty(), "unexpected warnings: {errs:?}");
         p
+    }
+
+    /// A lockfile hands a local source back normalized, so every spelling of
+    /// its path has to reach the same decision, an allow-all included: a denial
+    /// that stopped matching would let the script run. A jail exclusion goes
+    /// through the same keys.
+    #[test]
+    fn exact_source_keys_match_across_path_spellings() {
+        for (spelled, read_back) in [
+            ("dep@file:./dep", "dep@file:dep"),
+            ("dep@file:./.deps/dep", "dep@file:.deps/dep"),
+            ("dep@file:./../dep", "dep@file:../dep"),
+            ("dep@file:unused/../dep", "dep@file:dep"),
+            ("dep@link:./dep", "dep@link:dep"),
+        ] {
+            for (config, probe) in [(spelled, read_back), (read_back, spelled)] {
+                let source = Some(probe);
+                assert_eq!(
+                    policy(&[(config, true)]).decide_package("dep", "1.0.0", source),
+                    AllowDecision::Allow,
+                    "{config} allows {probe}"
+                );
+                let map = BTreeMap::from([(config.to_string(), AllowBuildRaw::Bool(false))]);
+                let (denied, _) = BuildPolicy::from_config(&map, &[], &[], true);
+                assert_eq!(
+                    denied.decide_package("dep", "1.0.0", source),
+                    AllowDecision::Deny,
+                    "{config} denies {probe} under allow-all"
+                );
+                let (exclusions, _) = BuildPolicy::denylist(&[config.to_string()]);
+                assert_eq!(
+                    exclusions.decide_package("dep", "1.0.0", source),
+                    AllowDecision::Deny,
+                    "{config} excludes {probe}"
+                );
+            }
+        }
+        assert_eq!(
+            policy(&[("dep@file:other", true)]).decide_package(
+                "dep",
+                "1.0.0",
+                Some("dep@file:dep")
+            ),
+            AllowDecision::Unspecified
+        );
     }
 
     #[test]
@@ -827,28 +891,24 @@ mod tests {
     }
 
     #[test]
-    fn dangerously_allow_all_bypasses_deny_list() {
-        // pnpm's `createAllowBuildFunction` short-circuits to `() => true`
-        // when `dangerouslyAllowAllBuilds` is set, dropping the entire
-        // allowBuilds map — including any `false` entries. Pin that
-        // behavior so a future refactor doesn't accidentally start
-        // honoring deny rules under allow-all.
-        let mut map = BTreeMap::new();
-        map.insert("esbuild".into(), AllowBuildRaw::Bool(false));
+    fn dangerously_allow_all_still_honors_every_denial() {
+        // pnpm 12: "an explicit `false` in `allowBuilds` outranks
+        // `dangerouslyAllowAllBuilds`". pnpm 11 dropped the whole map
+        // under allow-all, so a denial silently stopped protecting.
+        let map: BTreeMap<String, AllowBuildRaw> = [
+            ("esbuild".to_string(), AllowBuildRaw::Bool(false)),
+            ("@babel/*".to_string(), AllowBuildRaw::Bool(false)),
+            ("sharp@0.33.0".to_string(), AllowBuildRaw::Bool(false)),
+        ]
+        .into_iter()
+        .collect();
         let (p, errs) = BuildPolicy::from_config(&map, &[], &[], true);
         assert!(errs.is_empty());
-        assert_eq!(p.decide("esbuild", "0.19.0"), AllowDecision::Allow);
-    }
-
-    #[test]
-    fn allow_all_except_denied_keeps_explicit_false_entries_winning() {
-        // The composition used when the defaultTrust floor is active:
-        // dangerously-allow-all still runs everything *except* what
-        // the user explicitly carved out with `false`.
-        let p = policy(&[("esbuild", false), ("@babel/*", false)]).allow_all_except_denied();
         assert_eq!(p.decide("anything-else", "1.0.0"), AllowDecision::Allow);
         assert_eq!(p.decide("esbuild", "0.19.0"), AllowDecision::Deny);
         assert_eq!(p.decide("@babel/core", "7.0.0"), AllowDecision::Deny);
+        assert_eq!(p.decide("sharp", "0.33.0"), AllowDecision::Deny);
+        assert_eq!(p.decide("sharp", "0.34.0"), AllowDecision::Allow);
     }
 
     #[test]
@@ -1029,10 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_star_matches_everything_and_is_distinct_from_allow_all() {
-        // `*` in the allowlist behaves like "allow every package" but
-        // is still a normal allow rule — deny entries still override
-        // it, unlike `dangerouslyAllowAllBuilds` which short-circuits.
+    fn bare_star_matches_everything_and_deny_entries_still_override_it() {
         let map: BTreeMap<String, AllowBuildRaw> = [
             ("*".to_string(), AllowBuildRaw::Bool(true)),
             ("sketchy-pkg".to_string(), AllowBuildRaw::Bool(false)),

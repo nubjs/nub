@@ -486,6 +486,16 @@ impl LockfileGraph {
         DriftStatus::Fresh
     }
 
+    /// Compare the runtime pins this lockfile records against `manifest`'s
+    /// `devEngines.runtime`. A pin belongs to one project, so a per-project
+    /// lockfile answers to its own manifest rather than the root's.
+    pub fn check_runtimes_drift(&self, manifest: &aube_manifest::PackageJson) -> DriftStatus {
+        match runtime_drift_reason(&self.runtimes, manifest) {
+            Some(reason) => DriftStatus::Stale { reason },
+            None => DriftStatus::Fresh,
+        }
+    }
+
     /// Compare the lockfile's recorded `packageExtensionsChecksum` against the
     /// project's freshly-computed effective checksum. A mismatch means the
     /// packageExtensions config changed since the lockfile was written — the

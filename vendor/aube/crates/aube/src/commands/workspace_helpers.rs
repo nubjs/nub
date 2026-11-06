@@ -40,15 +40,24 @@ pub(crate) fn collect_dep_closure(
     filter: DepFilter,
     no_optional: bool,
 ) -> std::collections::BTreeMap<String, &aube_lockfile::LockedPackage> {
-    let mut out: std::collections::BTreeMap<String, &aube_lockfile::LockedPackage> =
-        std::collections::BTreeMap::new();
-    let mut stack: Vec<String> = graph
+    let roots = graph
         .root_deps()
         .iter()
         .filter(|d| filter.keeps(d.dep_type))
         .filter(|d| !(no_optional && matches!(d.dep_type, aube_lockfile::DepType::Optional)))
         .map(|d| d.dep_path.clone())
         .collect();
+    dep_closure_from(graph, roots, no_optional)
+}
+
+/// The transitive dep-path closure reachable from the dep paths in `stack`.
+pub(crate) fn dep_closure_from(
+    graph: &aube_lockfile::LockfileGraph,
+    mut stack: Vec<String>,
+    no_optional: bool,
+) -> std::collections::BTreeMap<String, &aube_lockfile::LockedPackage> {
+    let mut out: std::collections::BTreeMap<String, &aube_lockfile::LockedPackage> =
+        std::collections::BTreeMap::new();
     while let Some(dep_path) = stack.pop() {
         if out.contains_key(&dep_path) {
             continue;

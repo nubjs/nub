@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand } from "./remote-build.ts";
+import { parseArgs, jobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand, sshArgs, sshCommand, vmKeyPath, bootReason } from "./remote-build.ts";
 
 // GCE returns ZONE_RESOURCE_POOL_EXHAUSTED for a specific shape in a specific zone, and it
 // took out the first image bake. A 10-way fanout requests ten instances at once, so a
@@ -196,6 +196,9 @@ for (const [label, terminate, spot] of [["builder", "DELETE", true], ["image bak
     assert.equal(args[idx + 1], terminate);
     assert.equal(args.includes("SPOT"), spot);
     assert.ok(args.includes("--labels") && args.includes("nub-builder=1"), "must stay reapable");
+    // gcloud refuses --no-service-account without --no-scopes, so both are pinned together.
+    assert.ok(args.includes("--no-service-account") && args.includes("--no-scopes"), "must carry no service account or token");
+    assert.ok(!args.includes("--service-account") && !args.includes("--scopes"), "must not attach an account after all");
   });
 }
 
@@ -328,4 +331,41 @@ test("the bake and the job prep both grant the vendored-runtime opt-out", () => 
     "jobScript(clippy) does not carry NUB_ALLOW_INCOMPLETE_RUNTIME — the remote gate will " +
       "panic in build.rs instead of linting",
   );
+});
+
+// The maintainer's ssh config routes every connection through an agent whose signatures can
+// raise a Touch ID sheet. A builder has its own throwaway key, so no connection to one may
+// consult that agent: `IdentitiesOnly` alone does not stop ssh asking it, `IdentityAgent=none`
+// does. rsync's `-e` is a separate string and is checked separately.
+test("every connection to a VM offers only that VM's key and never asks the SSH agent", () => {
+  const key = vmKeyPath("nub-builder-x-1-abcd");
+  const args = sshArgs(key);
+  assert.equal(args[args.indexOf("-i") + 1], key);
+  assert.ok(args.includes("IdentityAgent=none"), "must not consult the login's SSH agent");
+  assert.ok(args.includes("IdentitiesOnly=yes"), "must offer only the VM's key");
+  assert.ok(args.includes("StrictHostKeyChecking=no"), "host-key handling is unchanged");
+  const e = sshCommand(key);
+  assert.match(e, /^ssh -i \S+ /);
+  assert.match(e, /IdentityAgent=none/);
+  assert.match(e, /IdentitiesOnly=yes/);
+  assert.match(key, /\/nub-builder-x-1-abcd\/id_ed25519$/, "the key is found by VM name on --attach");
+});
+
+// The pure helpers above say nothing about the call sites. Every place the script spawns ssh
+// (or hands rsync an ssh command) must build it from sshArgs/sshCommand, and gcloud must only
+// ever run as an argument to keyward, never as a spawned command of its own.
+test("every ssh spawn uses sshArgs, and gcloud only ever runs through keyward", () => {
+  const src = readFileSync(new URL("./remote-build.ts", import.meta.url), "utf8");
+  const spawns = [...src.matchAll(/execFile(?:Async)?\(\s*"ssh",\s*\[([^\]]*)\]/g)];
+  assert.ok(spawns.length >= 3, `found only ${spawns.length} ssh spawns — the parse broke`);
+  for (const [, argList] of spawns) assert.match(argList, /\.\.\.sshArgs\(key\)/, `ssh spawned without sshArgs: [${argList}]`);
+  assert.match(src, /rsyncPushArgs\([^)]*sshCommand\(key\)\)/, "rsync's -e must come from sshCommand");
+  assert.doesNotMatch(src, /\.\.\.SSH_OPTS,\s*`/, "a bare SSH_OPTS spread skips IdentityAgent=none");
+  assert.doesNotMatch(src, /execFile(?:Async|Sync)?\(\s*"gcloud"/, "gcloud must run as `keyward -- gcloud`");
+  assert.match(src, /execFileAsync\("keyward", full/);
+});
+
+test("the boot reason names the provisioning model and the job", () => {
+  assert.equal(bootReason({ job: "clippy", onDemand: false }), "boot a spot VM for the clippy job");
+  assert.equal(bootReason({ job: "test", onDemand: true }), "boot an on-demand VM for the test job");
 });

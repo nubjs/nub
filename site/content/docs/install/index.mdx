@@ -100,6 +100,7 @@ nub add -g <pkg>               # global install
 nub add -w <pkg>               # write to the workspace root
 nub add --save-catalog <pkg>   # add into the workspace catalog
 nub add --allow-build=<pkg>    # pre-approve its build scripts
+nub add --allow-similar-name <pkg>  # clear the name check for this run
 nub add --no-save <pkg>        # link without persisting to package.json
 nub add <pkg>@<version>        # pin an exact version
 nub add <pkg>@<version> --lockfile-only  # refresh the lockfile only
@@ -378,7 +379,7 @@ Which dependencies may run install scripts — see [lifecycle scripts](#lifecycl
   "allowScripts": {
     "esbuild": true,
     "sharp": false,
-    "buildy@file:./buildy-1.0.0.tgz": true
+    "buildy@file:buildy-1.0.0.tgz": true
   }
 }
 ```
@@ -508,7 +509,28 @@ Permission comes from the [`allowScripts`](#allowscripts) field in any project. 
 - pnpm: `pnpm.onlyBuiltDependencies`, `pnpm.allowBuilds`
 - Bun: `trustedDependencies`
 
-A package with build scripts that is not allowed is skipped. The `WARN_NUB_IGNORED_BUILD_SCRIPTS` warning names it and suggests `nub approve-builds`.
+`dangerouslyAllowAllBuilds=true` runs every build script except the ones denied.
+
+### Unapproved build scripts
+
+An install that meets a build script nobody has approved fails with `ERR_NUB_IGNORED_BUILDS`, as pnpm does. It fails last, once `node_modules` is linked and the approved builds and your project's own scripts have run, so the only step left is the decision:
+
+```console wide
+# captured: nub 0.9.7 dev build, core-js@3.40.0 — no allowScripts entry
+$ nub install
+dependencies:
++ core-js@3.40.0
+
+ERR_NUB_IGNORED_BUILDS
+
+  × Ignored build scripts: core-js@3.40.0
+  help: Run `nub approve-builds` to pick which dependencies may run their
+        build scripts, or set `strictDepBuilds=false` to install without them.
+```
+
+Approve the package with `nub approve-builds`, or deny it to keep it skipped: `nub approve-builds '!<pkg>'` and `nub add --allow-build='!<pkg>'` both record `false`. `--allow-build` will not approve a package the project already denies; change that entry instead. To skip unapproved builds with a warning rather than fail, set `strictDepBuilds=false` in `.npmrc`. Global installs and `nubx` never fail on one.
+
+`nub rebuild <pkg>` re-runs an approved package's build. Naming a package there does not approve it.
 
 ### Git dependencies
 
@@ -570,11 +592,11 @@ A curated set of well-known packages, such as `esbuild`, may build without appro
 |---|---|
 | **Registry provenance** | Resolved from a registry. Git, file, link, tarball, and npm-alias specifiers never qualify. |
 | **Advisory vetting** | The [advisory check](#advisory-gate) ran against this graph, or the graph came from an already-checked lockfile (a frozen install, `nub ci`, a teammate's clone). |
-| **Cooling window** | The version is older than the [cooling window](#cooling-window). An unknown publish time fails the gate. |
+| **Cooling window** | The version is older than the [cooling window](#cooling-window). An unknown publish time fails the gate for a newly resolved version; a version kept from the existing lockfile passes it. |
 
 Explicit decisions outrank the floor: a package you approve always builds, and an explicit denial always wins.
 
-A fresh resolve, or a lockfile Nub wrote, carries the publish times the floor needs:
+A fresh resolve or an existing lockfile gives the floor what it needs:
 
 ```console
 # captured: nub 0.0.44, pnpm, esbuild@0.21.5 — no allowScripts entry
@@ -584,19 +606,21 @@ dependencies:
 + esbuild@0.21.5
 ```
 
-When a gate fails, the package is skipped like any other unapproved build:
+When a gate fails, the package is an [unapproved build](#unapproved-build-scripts) like any other. Exempting `esbuild` from a long cooling window lets it resolve, but the floor still checks the window, so it fails closed:
 
-```console
-# captured: nub 0.0.44, esbuild — minimumReleaseAge set past every release
+```console wide
+# captured: nub 0.9.7 dev build, esbuild@0.21.5, fresh resolve —
+# minimumReleaseAge=2000000, minimumReleaseAgeExclude=esbuild,@esbuild/*
 $ nub install
-WARN ignored build scripts for 1 package(s): esbuild@0.21.5.
-     Run `nub approve-builds` to review and enable them.
-     code=WARN_NUB_IGNORED_BUILD_SCRIPTS   # ❌ cooling gate closed
 dependencies:
-+ esbuild@0.21.5
-```
++ esbuild@0.21.5  latest 0.28.2
 
-A foreign lockfile with no publish times, such as `bun.lock`, fails the cooling gate the same way (see the [Bun page](/docs/install/bun#install-behavior)).
+ERR_NUB_IGNORED_BUILDS
+
+  × Ignored build scripts: esbuild@0.21.5   # ❌ cooling gate closed
+  help: Run `nub approve-builds` to pick which dependencies may run their
+        build scripts, or set `strictDepBuilds=false` to install without them.
+```
 
 ## Supply-chain checks
 
@@ -671,6 +695,26 @@ advisoryCheck=required
 ```
 
 A frozen reinstall (`nub ci`, `--frozen-lockfile`, a teammate's clone) reuses the vetting recorded when the lockfile was written. The cooling and provenance gates still apply on every install.
+
+### New names
+
+`nub add` questions a name you typed before it adds a public npm package. In a terminal it asks you to confirm, and without one it refuses:
+
+| Check | Refuses when | Error | Flag for one run |
+| --- | --- | --- | --- |
+| Similar name | The name resembles one of the 100,000 most-downloaded packages | `ERR_NUB_SIMILAR_PACKAGE_NAME` | `--allow-similar-name` |
+| New name | The name was first published within `minimumPackageAge`, 30 days by default | `ERR_NUB_NEW_PACKAGE_NAME` | `--allow-new-name` |
+| Low downloads | The package has fewer than `lowDownloadThreshold` weekly downloads, 1,000 by default | `ERR_NUB_LOW_DOWNLOAD_PACKAGE` | `--allow-low-downloads` |
+
+`--allow-low-downloads` also clears the other two checks. Packages already in the lockfile are exempt, and `nub install`, `nub ci` and `nubx` skip these checks.
+
+To keep a package allowed, list it in `.npmrc`. Entries are comma-separated globs:
+
+```ini title=".npmrc"
+allowedUnpopularPackages=reylo,@reylosql/*
+```
+
+A project that keeps its pnpm settings in `pnpm-workspace.yaml` can list it there instead. The advisory gate still applies to every package on the list.
 
 ### Trust downgrades
 

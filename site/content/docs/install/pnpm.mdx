@@ -171,7 +171,7 @@ Nub does not read `nodeLinker` or the hoisting keys from `pnpm-workspace.yaml` o
 Read the [full docs](https://pnpm.io/settings/node-modules#nodelinker) on pnpm.io.
 </Callout>
 
-Dependency build scripts are skipped by default, as in pnpm 10. A package builds when it is listed in `pnpm.onlyBuiltDependencies` or `pnpm.allowBuilds`, or when the [default-trust floor](/docs/install#default-trust-floor) admits it. Running `nub approve-builds` adds the entry and builds the package in the same invocation. A package in `pnpm.neverBuiltDependencies` never builds, whatever allows it.
+Dependency build scripts are skipped by default, and an install that skips one fails with [`ERR_NUB_IGNORED_BUILDS`](/docs/install#unapproved-build-scripts), as pnpm 11 and later do (`strictDepBuilds`). A package builds when it is listed in `pnpm.onlyBuiltDependencies` or `pnpm.allowBuilds`, or when the [default-trust floor](/docs/install#default-trust-floor) admits it. Running `nub approve-builds` adds the entry and builds the package in the same invocation. A package in `pnpm.neverBuiltDependencies` never builds, whatever allows it.
 
 ## Gaps
 

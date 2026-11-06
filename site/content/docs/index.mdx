@@ -85,9 +85,11 @@ Upgrade through the channel you installed with. A script install upgrades itself
 ```bash
 npm install -g @nubjs/nub@latest     # npm
 brew update && brew upgrade nub      # Homebrew
-nub upgrade                          # install script
+nub upgrade                          # install script, mise
 nub upgrade --version <version>      # reinstall or pick a version
 ```
+
+On a mise install, `nub upgrade` runs `mise upgrade --bump nub`, which updates the version in the mise config that selects Nub in the current directory: a project's `mise.toml` or your global config.
 
 Nub and Node version independently. Upgrading Nub does not change the Node your project pins.
 
@@ -103,7 +105,7 @@ nub upgrade --canary   # switch; later upgrades stay on canary
 nub upgrade --stable   # switch back
 ```
 
-On Windows, install it with `iex "& { $(irm https://nubjs.com/install.ps1) } canary"`. Canary versions carry a date stamp, such as `v0.5.1-canary.20260724.117`. Homebrew and winget carry only stable releases.
+On Windows, install it with `iex "& { $(irm https://nubjs.com/install.ps1) } canary"`. Canary versions carry a date stamp, such as `v0.5.1-canary.20260724.117`. Homebrew, winget, and mise carry only stable releases.
 
 ## Package management
 

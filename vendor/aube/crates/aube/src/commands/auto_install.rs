@@ -158,9 +158,23 @@ pub(crate) async fn ensure_installed_in(
     // Anchor the auto-install at the resolved tree, not the process cwd,
     // so an embedding host installs the project it asked to run.
     opts.project_dir = Some(cwd);
-    run_with_install_runtime(|| install::run(opts)).await?;
-
-    Ok(())
+    match run_with_install_runtime(|| install::run(opts)).await {
+        // Everything but the unapproved builds is in place, so the script
+        // runs — pnpm's verify-deps gate also only warns when its install
+        // fails. `install` itself still fails, so CI still sees it.
+        Err(err)
+            if err.code().is_some_and(|code| {
+                code.to_string() == aube_codes::errors::ERR_AUBE_IGNORED_BUILDS
+            }) =>
+        {
+            eprintln!(
+                "warn: {err}. Run `{}` to decide them.",
+                aube_util::cmd("approve-builds")
+            );
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

@@ -19,6 +19,8 @@ metadata:
 
 # Watching CI with the GitHub CLI
 
+Watching only reads, so it stays plain `gh`. The one write here, `gh pr edit <n> --add-label ci`, runs as `keyward --reason "<the task>" -- gh pr edit …` on the maintainer's Mac.
+
 ## The pitfall: raw watchers exit early
 
 `gh run watch <id> --exit-status` and `gh pr checks <pr> --watch` are not safe to arm right after a push / tag / PR-open:

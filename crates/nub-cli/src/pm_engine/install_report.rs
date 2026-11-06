@@ -790,6 +790,9 @@ pub(super) enum Reason {
     LegacyVite,
     /// Named by `install.linker.eject`, or by nub's own built-in seed.
     Configured,
+    /// Depends on a package that only materializes per project, so a link from the
+    /// shared store would dangle.
+    LocalDependency(String),
     /// Imports a package that had to move, so it moves too — otherwise it would
     /// keep resolving the store-resident copy and split the singleton.
     ImporterOf(String),
@@ -812,6 +815,7 @@ impl fmt::Display for Reason {
             Reason::ProjectContext => f.write_str("build script reads the project"),
             Reason::LegacyVite => f.write_str("vite below 8.1"),
             Reason::Configured => f.write_str("named by config"),
+            Reason::LocalDependency(name) => write!(f, "depends on local package {name}"),
             Reason::ImporterOf(spec) => write!(f, "imports {spec}"),
             Reason::Closure => f.write_str("pulled in by the materialized set"),
         }

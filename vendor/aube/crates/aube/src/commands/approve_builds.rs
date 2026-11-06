@@ -63,8 +63,8 @@ pub async fn run(args: ApproveBuildsArgs) -> miette::Result<()> {
     }
     // pnpm parity: the same invocation runs the just-approved packages'
     // scripts. The scoped form of rebuild is exactly the right shape —
-    // it runs only the named deps' scripts, skips the root lifecycle
-    // hooks, and treats the explicit names as the policy opt-in.
+    // it runs only the named deps' scripts and skips the root lifecycle
+    // hooks; the approvals just written are what let them run.
     super::rebuild::run(
         super::rebuild::RebuildArgs { packages: approved },
         aube_workspace::selector::EffectiveFilter::default(),
@@ -82,6 +82,49 @@ fn run_project(cwd: &Path, all: bool, packages: Vec<String>) -> miette::Result<V
     if ignored.is_empty() {
         println!("No ignored builds to approve.");
         return Ok(Vec::new());
+    }
+
+    // pnpm's selector: `!pkg` records a denial instead of an approval.
+    let (denials, packages): (Vec<String>, Vec<String>) =
+        packages.into_iter().partition(|p| p.starts_with('!'));
+    let denials: Vec<String> = denials
+        .iter()
+        .map(|p| p.trim_start_matches('!').to_string())
+        .collect();
+    if !denials.is_empty() {
+        if all {
+            return Err(miette!(
+                "`--all` and positional package names are mutually exclusive"
+            ));
+        }
+        let contradicting: Vec<&str> = denials
+            .iter()
+            .filter(|d| packages.contains(d))
+            .map(String::as_str)
+            .collect();
+        if !contradicting.is_empty() {
+            return Err(miette!(
+                "both approved and denied: {}",
+                contradicting.join(", ")
+            ));
+        }
+        let denied = select_project(&ignored, false, denials)?;
+        let entries = selected_entries(&ignored, &denied);
+        let keys = dedupe(entries.iter().map(|e| e.approval_key.clone()).collect());
+        let written = aube_manifest::workspace::set_allow_builds(cwd, &keys, false)
+            .into_diagnostic()
+            .wrap_err("failed to update workspace yaml")?;
+        let rel = written
+            .strip_prefix(cwd)
+            .unwrap_or(written.as_path())
+            .display();
+        println!("Denied {} package(s) in {rel}:", keys.len());
+        for entry in &entries {
+            println!("  {}", entry.display_spec());
+        }
+        if packages.is_empty() {
+            return Ok(Vec::new());
+        }
     }
 
     let interactive = !all && packages.is_empty();

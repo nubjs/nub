@@ -512,7 +512,7 @@ impl EnvOwner {
     /// would wrap again — around a loader invocation the user wrote, with nub's
     /// arguments in place of theirs.
     ///
-    /// Only the ENTRY decides — see [`crate::cli::node_entry_index`]. Its arguments
+    /// Only the ENTRY decides — see [`nub_core::node::argv::entry_index`]. Its arguments
     /// are the program's data: matching them would strip the wrap from
     /// `nub check.js node_modules/varlock/package.json`, and with nub's own cascade
     /// already suppressed that program would run with no environment at all.
@@ -529,7 +529,7 @@ impl EnvOwner {
     ///   `<prefix>/lib/node_modules/<loader>/…`, a pnpm store path, and someone
     ///   running the entry by hand.
     pub(crate) fn launches_loader(&self, args: &[String], cwd: &Path) -> bool {
-        let Some(at) = crate::cli::node_entry_index(args) else {
+        let Some(at) = nub_core::node::argv::entry_index(args) else {
             return false;
         };
         let entry = canonical(&cwd.join(&args[at]));

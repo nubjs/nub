@@ -193,8 +193,12 @@ impl LocalSource {
     /// accepted under pnpm's `<name>@git+<url>#<commit>` spelling, the key
     /// pnpm prints and writes, so a project's existing pnpm approval
     /// matches here too.
+    ///
+    /// A `file:` or `link:` source is named as pnpm names it (`dep@file:dep`),
+    /// which is also how the lockfile hands it back. `BuildPolicy` normalizes
+    /// the keys it is configured with, so any spelling of the path matches.
     pub fn source_approval_keys(&self, name: &str) -> Vec<String> {
-        let specifier = self.specifier();
+        let specifier = self.pnpm_specifier();
         let mut keys = vec![format!("{name}@{specifier}")];
         if matches!(self, LocalSource::Git(_)) && !specifier.starts_with("git+") {
             keys.push(format!("{name}@git+{specifier}"));
@@ -233,6 +237,33 @@ impl LocalSource {
             },
             LocalSource::RemoteTarball(t) => t.url.clone(),
             _ => format!("{}:{}", self.kind_str(), self.path_posix()),
+        }
+    }
+
+    /// A `file:` or `link:` path as pnpm records it: lexically normalized, so
+    /// a manifest's `./llink` is `llink`. The graph keeps the manifest's
+    /// spelling, which hashes to the same package key, and the reader takes
+    /// either form. `portal:` and `exec:`, which pnpm lacks, stay as spelled.
+    pub fn pnpm_path(&self) -> String {
+        let (LocalSource::Directory(path) | LocalSource::Tarball(path) | LocalSource::Link(path)) =
+            self
+        else {
+            return self.path_posix();
+        };
+        aube_util::path::normalize_dep_path(&path.to_string_lossy())
+    }
+
+    /// [`Self::specifier`] with the path as [`Self::pnpm_path`] gives it: how
+    /// a local package is written to a lockfile and named to the user, so a
+    /// fresh resolve and a read of its lockfile agree on its identity.
+    /// `specifier` itself stays as spelled, for looking up the lockfile's own
+    /// keys.
+    pub fn pnpm_specifier(&self) -> String {
+        match self {
+            LocalSource::Directory(_) | LocalSource::Tarball(_) | LocalSource::Link(_) => {
+                format!("{}:{}", self.kind_str(), self.pnpm_path())
+            }
+            _ => self.specifier(),
         }
     }
 

@@ -44,7 +44,7 @@ git merge-base --is-ancestor HEAD origin/main && echo "✓ LANDED" || echo "⛔ 
 The workflow has a **`packages` debug input**. When set, the runner SKIPS the queue entirely — no claim, no completion, no commit of results — and measures exactly those specs with `--force`, publishing only the ARTIFACT. That is what makes it safe to run against a live corpus.
 
 ```sh
-gh workflow run corpus-queue-runner.yml -R nubjs/build-jail-corpus \
+keyward --reason "<the task>" -- gh workflow run corpus-queue-runner.yml -R nubjs/build-jail-corpus \
   -f os=macos \                       # linux | macos | windows
   -f nub_sha=<40-char sha> \
   -f chain=false \                    # ⛔ or it self-dispatches a whole chain

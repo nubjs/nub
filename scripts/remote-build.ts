@@ -51,7 +51,7 @@
 // job cannot outlive it or contend with anything here. See the DETACHED MODE block below.
 
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -88,8 +88,9 @@ const MACHINE_TYPE = "c3-standard-8";
 const DISK_GB = "50";
 const NODE_MAJOR = "26";
 const SSH_USER = "nub";
-const SSH_KEY = join(homedir(), ".ssh", "nub-vm");
-const CRED = join(homedir(), ".config", "pullfrog", "vertex-service-account.json");
+// One throwaway key per VM, made when the VM is created and deleted with it. Nothing else can
+// reach a builder, and no builder connection ever goes through the login's SSH agent.
+const KEY_ROOT = join(homedir(), ".cache", "nub", "remote-build", "keys");
 // Server-side backstop (layer 2). Generous enough for a cold release build (~7 min) plus
 // sync and toolchain, tight enough that a stray cannot bill for hours.
 const MAX_RUN = "45m";
@@ -143,6 +144,10 @@ Driving this from an agent harness? Use --detach/--attach. A foreground run is S
 the harness timeout (10 min max, 2 min default), which no signal handler can catch, so the
 VM leaks and only the server-side TTL reclaims it.
   -h, --help         Show this help.
+
+Auth: every gcloud call runs as \`keyward --reason … -- gcloud …\`, which releases the
+Google Cloud key for that run (one Touch ID covers ten minutes of this repository's runs).
+Each VM gets its own SSH key under ${KEY_ROOT}, deleted with the VM.
 
 Cost: spot c3-standard-8 is a few cents per build. A stray cannot outlive ${MAX_RUN}.
 `;
@@ -234,31 +239,31 @@ export function parseArgs(argv: string[]) {
   return a;
 }
 
-// gcloud always runs under the service-account override. The USER credential's refresh
-// token is revoked periodically by org session policy, so an interactive login is not
-// durable here; the SA key is. Failing loudly on a missing key beats a confusing
-// mid-run reauth prompt that cannot be answered non-interactively.
-function gcloudEnv() {
-  if (!existsSync(CRED)) {
-    throw new Error(
-      `remote-build: service-account key not found at ${CRED}. ` +
-        `VM operations need it (the user credential is not durable).`,
-    );
+// gcloud always runs through Keyward, which holds the service-account key sealed and writes
+// it out for the one run. The USER credential's refresh token is revoked periodically by org
+// session policy, so an interactive login is not durable here; the key is. `reason` is what
+// the Touch ID sheet shows, so it names the job and the VM. Keyward hands gcloud an EMPTY
+// config directory, so nothing saved by `gcloud config set` (account, zone, region) applies:
+// every call names its zone itself, and the project is passed here.
+//
+// A locked screen or a declined sheet fails the call at once with keyward's own message on
+// stderr. Nothing here retries it: the error surfaces through the caller like any other.
+async function gcloud(reason: string, args: string[], timeoutMs = 180_000) {
+  // --quiet: with no terminal to answer it, a yes/no question from gcloud would wait out the timeout.
+  const full = ["--reason", `nub remote-build: ${reason}`, "--", "gcloud", ...args, "--project", PROJECT, "--quiet"];
+  try {
+    const { stdout } = await execFileAsync("keyward", full, {
+      maxBuffer: 64 * 1024 * 1024,
+      // Almost no gcloud call here should ever take minutes; without this a hung API call
+      // hangs the whole run, and for the bake there is no server-side backstop to end it.
+      // The one documented exception passes its own budget: `images create` (see the bake).
+      timeout: timeoutMs,
+    });
+    return stdout.trim();
+  } catch (e: any) {
+    if (e?.code === "ENOENT") throw new Error("remote-build: keyward is not on PATH; every gcloud call runs through it.");
+    throw e;
   }
-  return { ...process.env, CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE: CRED };
-}
-
-async function gcloud(args: string[], timeoutMs = 180_000) {
-  const full = [...args, "--project", PROJECT];
-  const { stdout } = await execFileAsync("gcloud", full, {
-    env: gcloudEnv(),
-    maxBuffer: 64 * 1024 * 1024,
-    // Almost no gcloud call here should ever take minutes; without this a hung API call
-    // hangs the whole run, and for the bake there is no server-side backstop to end it.
-    // The one documented exception passes its own budget: `images create` (see the bake).
-    timeout: timeoutMs,
-  });
-  return stdout.trim();
 }
 
 function sh(cmd: string, args: string[], opts: Record<string, unknown> = {}) {
@@ -277,8 +282,43 @@ const SSH_OPTS = [
   "-o", "ServerAliveInterval=30",
 ];
 
+// Every connection to a VM offers its own key and nothing else. `IdentityAgent=none` is the
+// load-bearing half: the maintainer's ssh config routes through an agent whose every
+// signature can raise a Touch ID sheet, and `IdentitiesOnly` alone still consults it.
+export function sshArgs(key: string) {
+  return ["-i", key, "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none", ...SSH_OPTS];
+}
+
+// The same options as one string, for rsync's `-e`, which splits it on whitespace.
+export function sshCommand(key: string) {
+  return `ssh ${sshArgs(key).join(" ")}`;
+}
+
+export function vmKeyPath(name: string) {
+  return join(KEY_ROOT, name, "id_ed25519");
+}
+
+// A fresh ed25519 key with no passphrase, private to this user. Instance names are unique, so
+// a leftover key under the same name is a stale one and is replaced (ssh-keygen would
+// otherwise stop to ask about overwriting it).
+function makeVmKey(name: string) {
+  const dir = join(KEY_ROOT, name);
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  chmodSync(dir, 0o700);
+  const key = vmKeyPath(name);
+  sh("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", name, "-f", key], { stdio: ["ignore", "pipe", "pipe"] });
+  chmodSync(key, 0o600);
+  chmodSync(`${key}.pub`, 0o600);
+  return key;
+}
+
+function dropVmKey(name: string) {
+  rmSync(join(KEY_ROOT, name), { recursive: true, force: true });
+}
+
 async function instanceIp(name: string, zone: string) {
-  return await gcloud([
+  return await gcloud(`look up the address of ${name}`, [
     "compute", "instances", "describe", name, "--zone", zone,
     "--format=value(networkInterfaces[0].accessConfigs[0].natIP)",
   ]);
@@ -287,12 +327,12 @@ async function instanceIp(name: string, zone: string) {
 // A RUNNING status does not mean sshd is up — especially right after create. Poll the
 // real thing (a successful command) rather than the status field, and surface the serial
 // console on give-up, which diagnoses a wedged boot instantly where guessing does not.
-async function waitForSsh(name: string, zone: string, ip: string, timeoutMs: number) {
+async function waitForSsh(name: string, zone: string, ip: string, key: string, timeoutMs: number) {
   const deadline = Date.now() + timeoutMs;
   let lastErr = "";
   while (Date.now() < deadline) {
     try {
-      await execFileAsync("ssh", ["-i", SSH_KEY, ...SSH_OPTS, `${SSH_USER}@${ip}`, "true"], { timeout: 20_000 });
+      await execFileAsync("ssh", [...sshArgs(key), `${SSH_USER}@${ip}`, "true"], { timeout: 20_000 });
       return;
     } catch (e: any) {
       lastErr = String(e?.stderr || e?.message || e);
@@ -301,7 +341,9 @@ async function waitForSsh(name: string, zone: string, ip: string, timeoutMs: num
   }
   let serial = "";
   try {
-    serial = await gcloud(["compute", "instances", "get-serial-port-output", name, "--zone", zone]);
+    serial = await gcloud(`read the serial console of ${name}, whose ssh never came up`, [
+      "compute", "instances", "get-serial-port-output", name, "--zone", zone,
+    ]);
     serial = serial.split("\n").slice(-25).join("\n");
   } catch {
     serial = "(serial console unavailable)";
@@ -324,6 +366,11 @@ export function instanceCreateArgs(
     // Only this key. A builder gets a public IP on the default network (which ships
     // default-allow-ssh from 0.0.0.0/0), so project-wide keys are needless extra reach.
     "--metadata", `ssh-keys=${SSH_USER}:${pubKey},block-project-ssh-keys=TRUE`,
+    // No service account and no token on the box. Nothing a builder or the bake runs calls a
+    // Google API, so a job (or a dependency's build script) gets no credential to find at the
+    // metadata server. It also means creating one needs no `iam.serviceAccounts.actAs`: the
+    // default compute account is what would otherwise be attached.
+    "--no-service-account", "--no-scopes",
   ];
   // Layer 2: GCE terminates the VM server-side no matter what happens to this process —
   // the only layer a SIGKILL cannot defeat. Builders DELETE (a merely-stopped VM still bills
@@ -349,35 +396,59 @@ export function placementCandidates(preferredMachine: string) {
   return out;
 }
 
+// What the Touch ID sheet says when a builder boots, e.g. "boot a spot VM for the clippy job".
+export function bootReason(a: { job: string; onDemand: boolean }) {
+  return `boot ${a.onDemand ? "an on-demand" : "a spot"} VM for the ${a.job} job`;
+}
+
+// Makes the VM's key first, since its public half goes into the create call, and drops it
+// again if no VM comes of it. From here on the key lives exactly as long as the VM:
+// deleteInstance takes it with the instance.
 async function createInstance(
   name: string,
-  opts: { machine: string; onDemand: boolean; fromImage: boolean; terminate: "DELETE" | "STOP" },
+  opts: { why: string; machine: string; onDemand: boolean; fromImage: boolean; terminate: "DELETE" | "STOP" },
   log: (s: string) => void = () => {},
 ) {
-  const pubKey = readFileSync(`${SSH_KEY}.pub`, "utf8").trim();
+  const key = makeVmKey(name);
+  const pubKey = readFileSync(`${key}.pub`, "utf8").trim();
   let lastErr: any;
-  for (const { zone, machine } of placementCandidates(opts.machine)) {
-    try {
-      await gcloud(instanceCreateArgs(name, pubKey, { ...opts, machine, zone }));
-      return { zone, machine };
-    } catch (e: any) {
-      const msg = String(e?.stderr || e?.message || e);
-      if (!STOCKOUT.test(msg)) throw e;
-      lastErr = e;
-      log(`no ${machine} capacity in ${zone}, trying next`);
+  try {
+    for (const { zone, machine } of placementCandidates(opts.machine)) {
+      try {
+        // A long budget: the first disk made from an image that has sat unused took over five
+        // minutes, and giving up early leaves a VM booting with its key already deleted.
+        await gcloud(`${opts.why} (${name}, ${machine} in ${zone})`, instanceCreateArgs(name, pubKey, { ...opts, machine, zone }), 480_000);
+        return { zone, machine, key };
+      } catch (e: any) {
+        const msg = String(e?.stderr || e?.message || e);
+        if (!STOCKOUT.test(msg)) throw e;
+        lastErr = e;
+        log(`no ${machine} capacity in ${zone}, trying next`);
+      }
     }
+  } catch (e) {
+    dropVmKey(name);
+    throw e;
   }
+  dropVmKey(name);
   throw new Error(`remote-build: no capacity for ${name} in any zone/machine combination.\n${lastErr?.message || lastErr}`);
 }
 
+// Every teardown path comes through here, so this is where a VM's key is deleted too. A
+// failed delete keeps the key: the VM is still up until its TTL, and a re-run of --attach
+// needs the key to try the delete again.
 async function deleteInstance(name: string, zone: string) {
   try {
-    await gcloud(["compute", "instances", "delete", name, "--zone", zone, "--quiet"]);
+    await gcloud(`delete the VM ${name}`, ["compute", "instances", "delete", name, "--zone", zone, "--quiet"]);
+    dropVmKey(name);
     return true;
   } catch (e: any) {
     const msg = String(e?.stderr || e?.message || e);
     // Spot preemption already deleted it server-side — expected, not a warning worth printing.
-    if (/was not found|already being deleted/i.test(msg)) return true;
+    if (/was not found|already being deleted/i.test(msg)) {
+      dropVmKey(name);
+      return true;
+    }
     process.stderr.write(`remote-build: WARNING could not delete ${name} (${zone}): ${msg.split("\n")[0]}\n`);
     return false;
   }
@@ -412,13 +483,13 @@ export function rsyncPushArgs(listFile: string, source: string, ip: string, sshC
   return ["-az", `--files-from=${listFile}`, "-e", sshCmd, `${source}/`, `${SSH_USER}@${ip}:~/src/`];
 }
 
-function syncSource(source: string, ip: string) {
+function syncSource(source: string, ip: string, key: string) {
   const listed = sh("git", ["ls-files", "--cached", "--others", "--exclude-standard", "--deduplicate"], { cwd: source });
   const files = filterSourceFiles(listed, (f) => existsSync(join(source, f)));
   const listFile = join(tmpdir(), `remote-build-files-${process.pid}-${Math.random().toString(36).slice(2)}.txt`);
   writeFileSync(listFile, files.join("\n") + "\n");
   try {
-    sh("rsync", rsyncPushArgs(listFile, source, ip, `ssh -i ${SSH_KEY} ${SSH_OPTS.join(" ")}`));
+    sh("rsync", rsyncPushArgs(listFile, source, ip, sshCommand(key)));
   } finally {
     rmSync(listFile, { force: true });
   }
@@ -539,12 +610,12 @@ export function remoteJobCommand(script: string, b64: string) {
   );
 }
 
-async function runJob(ip: string, script: string, onLine: (s: string) => void) {
+async function runJob(ip: string, key: string, script: string, onLine: (s: string) => void) {
   const b64 = Buffer.from(script, "utf8").toString("base64");
   return await new Promise<void>((resolve, reject) => {
     const child = execFile(
       "ssh",
-      ["-n", "-i", SSH_KEY, ...SSH_OPTS, `${SSH_USER}@${ip}`, remoteJobCommand(script, b64)],
+      ["-n", ...sshArgs(key), `${SSH_USER}@${ip}`, remoteJobCommand(script, b64)],
       { maxBuffer: 64 * 1024 * 1024 },
       (err, _stdout, stderr) => {
         if (err) reject(new Error(`remote job failed: ${stderr || err.message}`));
@@ -581,16 +652,16 @@ const JOB_RC = "$HOME/remote-build-job.rc";
 // minutes just as it was about to report, losing the progress it was holding.
 const ATTACH_WINDOW_MS = 5 * 60_000;
 
-async function ssh(ip: string, cmd: string, timeout = 60_000) {
+async function ssh(ip: string, key: string, cmd: string, timeout = 60_000) {
   const { stdout } = await execFileAsync(
     "ssh",
-    ["-n", "-i", SSH_KEY, ...SSH_OPTS, `${SSH_USER}@${ip}`, cmd],
+    ["-n", ...sshArgs(key), `${SSH_USER}@${ip}`, cmd],
     { timeout, maxBuffer: 64 * 1024 * 1024 },
   );
   return stdout;
 }
 
-async function startDetachedJob(ip: string, script: string) {
+async function startDetachedJob(ip: string, key: string, script: string) {
   const b64 = Buffer.from(script, "utf8").toString("base64");
   // The script is landed on disk rather than fed to `bash -s`, for the same reason
   // `remoteJobCommand` does it: anything inside that reads stdin would otherwise swallow the
@@ -607,6 +678,7 @@ async function startDetachedJob(ip: string, script: string) {
   // Backgrounding only the fully-redirected setsid inside a subshell returns in ~2s.
   await ssh(
     ip,
+    key,
     `printf %s '${b64}' | base64 -d > ${JOB_SH} && rm -f ${JOB_LOG} ${JOB_RC} && ` +
       `(setsid nohup bash -c 'bash ${JOB_SH} > ${JOB_LOG} 2>&1; echo $? > ${JOB_RC}' ` +
       `</dev/null >/dev/null 2>&1 &) && sleep 1 && echo detached`,
@@ -614,12 +686,27 @@ async function startDetachedJob(ip: string, script: string) {
 }
 
 async function findZone(name: string) {
-  const z = await gcloud(["compute", "instances", "list", "--filter", `name=${name}`, "--format", "value(zone)"]);
-  if (!z) throw new Error(`remote-build: no instance named ${name} — already reclaimed, or wrong name.`);
+  const z = await gcloud(`find the VM ${name} to collect its job`, [
+    "compute", "instances", "list", "--filter", `name=${name}`, "--format", "value(zone)",
+  ]);
+  if (!z) {
+    // Gone server-side (its TTL, a preemption, or a reap), so its key has nothing left to open.
+    dropVmKey(name);
+    throw new Error(`remote-build: no instance named ${name} — already reclaimed, or wrong name.`);
+  }
   return z.split("\n")[0].trim();
 }
 
 async function attachToJob(a: ReturnType<typeof parseArgs>, name: string) {
+  // Checked before any gcloud call, so a VM this machine cannot reach costs no Touch ID.
+  const key = vmKeyPath(name);
+  if (!existsSync(key)) {
+    throw new Error(
+      `remote-build: no SSH key for ${name} at ${key}. Each VM's key is made by the --detach ` +
+        `that booted it, on that machine, and is deleted with the VM — so ${name} was booted ` +
+        `elsewhere, or has already been collected or reaped.`,
+    );
+  }
   const zone = await findZone(name);
   const ip = await instanceIp(name, zone);
   const t0 = Date.now();
@@ -638,7 +725,7 @@ async function attachToJob(a: ReturnType<typeof parseArgs>, name: string) {
   // terminal pass the job has exited, so whatever remains is complete and must be printed or
   // the last line of every job would vanish.
   const drain = async (final: boolean) => {
-    const out = await ssh(ip, `tail -n +${seen + 1} ${JOB_LOG} 2>/dev/null || true`);
+    const out = await ssh(ip, key, `tail -n +${seen + 1} ${JOB_LOG} 2>/dev/null || true`);
     const lines = out.split("\n");
     if (lines.length && (!final || lines[lines.length - 1] === "")) lines.pop();
     for (const l of lines) process.stdout.write(`[r] ${l}\n`);
@@ -648,7 +735,7 @@ async function attachToJob(a: ReturnType<typeof parseArgs>, name: string) {
   for (;;) {
     await drain(false);
 
-    const rc = (await ssh(ip, `cat ${JOB_RC} 2>/dev/null || true`)).trim();
+    const rc = (await ssh(ip, key, `cat ${JOB_RC} 2>/dev/null || true`)).trim();
     if (rc !== "") {
       await drain(true);
       const secs = ((Date.now() - t0) / 1000).toFixed(0);
@@ -679,10 +766,10 @@ async function startDetached(a: ReturnType<typeof parseArgs>, source: string, li
   log(`creating ${name} (${a.machine}${a.onDemand ? "" : ", spot"})`);
   const placement = await createInstance(
     name,
-    { machine: a.machine, onDemand: a.onDemand, fromImage: true, terminate: "DELETE" },
+    { why: bootReason(a), machine: a.machine, onDemand: a.onDemand, fromImage: true, terminate: "DELETE" },
     log,
   );
-  const zone = placement.zone;
+  const { zone, key } = placement;
   live.add(`${name}|${zone}`);
   // `live` is drained only by the SIGNAL handlers, so a plain throw between here and the job
   // starting reaches `main().catch` → `process.exit(1)` with the instance still running,
@@ -691,11 +778,11 @@ async function startDetached(a: ReturnType<typeof parseArgs>, source: string, li
   // what --detach is for.
   try {
     const ip = await instanceIp(name, zone);
-    await waitForSsh(name, zone, ip, 240_000);
+    await waitForSsh(name, zone, ip, key, 240_000);
     log(`ssh up at ${ip} on ${zone}/${placement.machine}`);
-    syncSource(source, ip);
+    syncSource(source, ip, key);
     log("source synced");
-    await startDetachedJob(ip, jobScript(a.job, a.profile, scriptB64));
+    await startDetachedJob(ip, key, jobScript(a.job, a.profile, scriptB64));
   } catch (e) {
     if (!a.keep) await deleteInstance(name, zone);
     live.delete(`${name}|${zone}`);
@@ -729,23 +816,24 @@ async function oneBuild(
     // instance can exist server-side before gcloud returns.
     const placement = await createInstance(
       name,
-      { machine: a.machine, onDemand: a.onDemand, fromImage: true, terminate: "DELETE" },
+      { why: bootReason(a), machine: a.machine, onDemand: a.onDemand, fromImage: true, terminate: "DELETE" },
       log,
     );
     zone = placement.zone;
+    const key = placement.key;
     // The create window itself is NOT covered by layer 1 — the instance can exist
     // server-side before gcloud returns, and the placement walk can span several zones.
     // Builders are covered there by layer 2 (the server-side TTL); --reap catches the rest.
     live.add(`${name}|${zone}`);
     created = true;
     const ip = await instanceIp(name, zone);
-    await waitForSsh(name, zone, ip, 240_000);
+    await waitForSsh(name, zone, ip, key, 240_000);
     log(`ssh up at ${ip} on ${zone}/${placement.machine} (+${((Date.now() - t0) / 1000).toFixed(0)}s)`);
 
-    syncSource(source, ip);
+    syncSource(source, ip, key);
     log(`source synced (+${((Date.now() - t0) / 1000).toFixed(0)}s)`);
 
-    await runJob(ip, jobScript(a.job, a.profile, scriptB64), (l) => log(l));
+    await runJob(ip, key, jobScript(a.job, a.profile, scriptB64), (l) => log(l));
 
     const secs = (Date.now() - t0) / 1000;
     log(`done in ${secs.toFixed(0)}s`);
@@ -756,6 +844,8 @@ async function oneBuild(
     return { idx, ok: false, secs, error: String(e?.message || e) };
   } finally {
     if (created && !a.keep) await deleteInstance(name, zone);
+    // A kept VM keeps its key, so the operator can still reach it until its TTL.
+    if (created && a.keep) log(`kept ${name} (${zone}); reach it with: ${sshCommand(vmKeyPath(name))} ${SSH_USER}@<ip>`);
     live.delete(`${name}|${zone}`);
   }
 }
@@ -802,7 +892,7 @@ export function isStray(creationTimestamp: string, now: number, maxAgeMs: number
 }
 
 async function reap(all: boolean) {
-  const list = await gcloud([
+  const list = await gcloud(all ? "list every builder VM to delete them all" : "list builder VMs to find strays", [
     "compute", "instances", "list",
     "--filter", `labels.${LABEL}=1`,
     "--format=value(name,zone.basename(),creationTimestamp)",
@@ -816,6 +906,13 @@ async function reap(all: boolean) {
   const maxAgeMs = 90 * 60_000;
   const now = Date.now();
   const targets = all ? rows : rows.filter((r) => isStray(r[2], now, maxAgeMs));
+  // Keys whose VM no longer exists: a --keep run, or a launcher killed before its delete. The
+  // same age gate applies, because a sibling's key exists a little before its VM is listed.
+  const listed = new Set(rows.map((r) => r[0]));
+  for (const dir of existsSync(KEY_ROOT) ? readdirSync(KEY_ROOT) : []) {
+    const st = statSync(join(KEY_ROOT, dir), { throwIfNoEntry: false });
+    if (st && !listed.has(dir) && now - st.mtimeMs > maxAgeMs) dropVmKey(dir);
+  }
   const skipped = rows.length - targets.length;
   if (skipped) {
     process.stdout.write(
@@ -845,9 +942,9 @@ async function buildImage(a: ReturnType<typeof parseArgs>, source: string, live:
   process.stdout.write(`remote-build: baking image family ${IMAGE_FAMILY} on ${name}\n`);
   // On-demand (a preemption mid-bake wastes the whole run) and NO self-destruct (the
   // bake stops the instance and images its disk; a server-side DELETE would destroy it).
-  const { zone } = await createInstance(
+  const { zone, key } = await createInstance(
     name,
-    { machine: a.machine, onDemand: true, fromImage: false, terminate: "STOP" },
+    { why: "boot an on-demand VM to bake the nub-builder image", machine: a.machine, onDemand: true, fromImage: false, terminate: "STOP" },
     (l) => process.stdout.write(`  ${l}\n`),
   );
   // The bake is the ONE instance with no server-side self-destruct, so layer 1 is all that
@@ -855,7 +952,7 @@ async function buildImage(a: ReturnType<typeof parseArgs>, source: string, live:
   live.add(`${name}|${zone}`);
   try {
     const ip = await instanceIp(name, zone);
-    await waitForSsh(name, zone, ip, 300_000);
+    await waitForSsh(name, zone, ip, key, 300_000);
     const provision = `set -euxo pipefail
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq
@@ -868,11 +965,11 @@ curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolcha
 rustup component add clippy
 echo '. "$HOME/.cargo/env"' >> ~/.bashrc
 `;
-    await runJob(ip, provision, (l) => process.stdout.write(`  ${l}\n`));
+    await runJob(ip, key, provision, (l) => process.stdout.write(`  ${l}\n`));
 
     // Warm the crate registry + dependency artifacts from a real checkout so a booted
     // builder starts with the expensive dependency graph already compiled.
-    syncSource(source, ip);
+    syncSource(source, ip, key);
     // CARGO_TARGET_DIR must live OUTSIDE ~/src, which this step deletes at the end — that
     // is the entire point of warming it — and must match PREPARE's, or builders silently
     // start cold against an image that advertises warm artifacts.
@@ -934,17 +1031,17 @@ rm -rf ~/src
 # is mysteriously slow.
 echo "warm target dir: $(du -sh "$CARGO_TARGET_DIR" | cut -f1)"
 `;
-    await runJob(ip, warm, (l) => process.stdout.write(`  ${l}\n`));
+    await runJob(ip, key, warm, (l) => process.stdout.write(`  ${l}\n`));
 
     process.stdout.write("remote-build: stopping instance for imaging\n");
-    await gcloud(["compute", "instances", "stop", name, "--zone", zone]);
+    await gcloud(`stop ${name} so its disk can be imaged`, ["compute", "instances", "stop", name, "--zone", zone]);
     const image = `${IMAGE_FAMILY}-${Date.now().toString(36)}`;
     // Imaging a 50 GB disk routinely exceeds the helper's 180s default — measured
     // 2026-09-01: the default killed the client mid-create while the image finished
     // server-side, so the bake reported failure on a bake that had worked AND the
     // `finally` deleted the bake VM under a live create. gcloud blocks until the image
     // is READY, so a real budget here is the whole fix.
-    await gcloud([
+    await gcloud(`image the disk of ${name} into the ${IMAGE_FAMILY} family`, [
       "compute", "images", "create", image,
       "--source-disk", name, "--source-disk-zone", zone,
       "--family", IMAGE_FAMILY,
