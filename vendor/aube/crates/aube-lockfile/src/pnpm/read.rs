@@ -1,7 +1,7 @@
 use super::dep_path::{
-    PATCH_HASH_MARKER, dep_path_tail, is_override_link_target, parse_dep_path,
-    peerless_alias_target, registry_name_from_qualified_version, rewrite_peer_suffix,
-    rewrite_snapshot_alias_deps, strip_patch_hash_suffix, version_to_dep_path,
+    PATCH_HASH_MARKER, dep_path_tail, parse_dep_path, peerless_alias_target,
+    registry_name_from_qualified_version, rewrite_peer_suffix, rewrite_snapshot_alias_deps,
+    strip_patch_hash_suffix, version_to_dep_path,
 };
 use super::raw::{
     RawBinSpec, RawDepSpec, RawPnpmLockfile, RawRuntimeVariant, local_source_from_resolution,
@@ -1162,40 +1162,18 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         packages.entry(final_key).or_insert(pkg);
     }
     // pnpm keeps a `link:` target out of `packages:`, so the edge is its only
-    // record. A local parent's own dependency comes from its manifest and is
-    // relative to that parent. Anything else is relative to the lockfile directory:
-    // a peer, an override's value, and any edge of a parent with no directory of its
-    // own. Build the package a fresh resolve stores, or the edge reaches nothing.
-    let no_overrides = BTreeMap::new();
-    let overrides = raw.overrides.as_ref().unwrap_or(&no_overrides);
+    // record. It is relative to the lockfile directory on every parent, a directory
+    // parent's own dependency included: pnpm 10 and 12 link it from there. Build the
+    // package a fresh resolve stores, or the edge reaches nothing.
     let mut link_targets: BTreeMap<String, LockedPackage> = BTreeMap::new();
     for pkg in packages.values_mut() {
-        let parent_dir = match &pkg.local_source {
-            Some(
-                LocalSource::Directory(path) | LocalSource::Link(path) | LocalSource::Portal(path),
-            ) => Some(path.clone()),
-            _ => None,
-        };
         for map in [&mut pkg.dependencies, &mut pkg.optional_dependencies] {
             for (dep_name, value) in map.iter_mut() {
                 let bare = value.split('(').next().unwrap_or(value);
                 if let Some(key) = file_local_keys.get(&format!("{dep_name}@{bare}")) {
                     *value = dep_path_tail(key, dep_name).to_string();
                 } else if let Some(target) = bare.strip_prefix("link:") {
-                    let target = match &parent_dir {
-                        Some(dir)
-                            if !pkg.peer_dependencies.contains_key(dep_name)
-                                && !is_override_link_target(
-                                    overrides,
-                                    dep_name,
-                                    Path::new(target),
-                                ) =>
-                        {
-                            dir.join(target)
-                        }
-                        _ => PathBuf::from(target),
-                    };
-                    let local = LocalSource::Link(normalize_lexical(&target));
+                    let local = LocalSource::Link(normalize_lexical(Path::new(target)));
                     let key = local.dep_path(dep_name);
                     *value = dep_path_tail(&key, dep_name).to_string();
                     link_targets

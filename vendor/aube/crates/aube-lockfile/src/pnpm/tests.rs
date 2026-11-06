@@ -673,18 +673,14 @@ snapshots:
 #[test]
 fn a_link_edge_reaches_a_package_and_is_written_back_as_pnpm_spells_it() {
     // pnpm keeps `link:` targets out of `packages:`, so these edges are their only
-    // record. A local parent's own dependency is relative to that parent. Anything
-    // else is relative to the lockfile directory: a registry or tarball parent's
-    // edge, a peer, and an override's value.
+    // record. Each is relative to the lockfile directory, whichever package holds it:
+    // pnpm 10 and 12 link a directory parent's own `link:./x` to `<root>/x`.
     let dir = tempfile::tempdir().unwrap();
     let lockfile_path = dir.path().join("pnpm-lock.yaml");
     std::fs::write(
         &lockfile_path,
         r#"
 lockfileVersion: '9.0'
-
-overrides:
-  via-override: link:./vendor/via-override
 
 importers:
   .:
@@ -720,9 +716,9 @@ packages:
 snapshots:
   local-parent@file:a:
     dependencies:
-      own-link: link:vendor/via-override
+      inside: link:a/inside
+      own: link:vendor/own
       sibling: link:../b
-      via-override: link:vendor/via-override
 
   peer-consumer@file:c(member@packages+member):
     dependencies:
@@ -762,10 +758,9 @@ snapshots:
             .find(|pkg| pkg.name == name)
             .unwrap()
     };
-    reaches(named("local-parent"), "sibling", "b");
-    // The override's path, but not the dependency it overrides.
-    reaches(named("local-parent"), "own-link", "a/vendor/via-override");
-    reaches(named("local-parent"), "via-override", "vendor/via-override");
+    reaches(named("local-parent"), "sibling", "../b");
+    reaches(named("local-parent"), "own", "vendor/own");
+    reaches(named("local-parent"), "inside", "a/inside");
     reaches(named("peer-consumer"), "member", "packages/member");
     reaches(
         named("tarball-parent"),
@@ -791,8 +786,8 @@ snapshots:
     assert!(
         written.contains("overridden: link:vendor/overridden\n")
             && written.contains("sibling: link:../b\n")
-            && written.contains("own-link: link:vendor/via-override\n")
-            && written.contains("via-override: link:vendor/via-override\n")
+            && written.contains("own: link:vendor/own\n")
+            && written.contains("inside: link:a/inside\n")
             && written.contains("member: link:packages/member\n")
             && written.contains("tarball-peer: link:packages/tarball-peer\n"),
         "each edge keeps pnpm's spelling and anchor: {written}"
