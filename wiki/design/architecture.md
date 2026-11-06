@@ -49,6 +49,8 @@ When Node lacks Temporal, the shared runtime installer copies the polyfill's mem
 
 The runtime exists in two shapes, chosen by the availability of the synchronous hooks API and carried as [[crates/nub-core/src/node/version.rs#SupportTier]]. The floor of 18.19 is set by what the extension mechanisms permit.
 
+The CJS preload loads `runtime/primordials.cjs` before application code. It captures built-in references once per realm, following [Node's primordials](https://github.com/nodejs/node/blob/main/lib/internal/per_context/primordials.js) with receiver-first prototype methods. Shared preload helpers, lazy property installation, PnP format checks, the util facade, and Blob source bookkeeping use these references so later replacement of the adopted built-ins does not redirect internal operations. Node APIs that support user hooks remain live. This is scoped hardening, not a sandbox: runtime code outside these paths and some string/iterator operations still read mutable properties. Nothing freezes application globals.
+
 | | Fast tier | Compat tier |
 | --- | --- | --- |
 | Node | 22.15 and above, except 23.0 to 23.4 | 18.19 to 22.14, and 23.0 to 23.4 |
