@@ -9,13 +9,13 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const read = (path) => readFileSync(join(root, path), "utf8");
+const read = (path: string) => readFileSync(join(root, path), "utf8");
 const scripts = JSON.parse(read("package.json")).scripts;
 const spec = scripts.lat.match(/^npx --yes (lat\.md@\d+\.\d+\.\d+)$/)?.[1];
 const mcp = JSON.parse(read(".mcp.json")).mcpServers.lat;
 const hook = "scripts/lat-prompt.mjs";
 
-test("CLI and both MCP clients use the same exact Lat version", () => {
+void test("CLI and both MCP clients use the same exact Lat version", () => {
   assert.ok(spec, "lat must use an exact version outside root dependencies");
   assert.equal(scripts["lat:check"], `npx --yes ${spec} check`);
   assert.equal(scripts["lat:index"], `npx --yes ${spec} reindex --local --yes`);
@@ -27,7 +27,7 @@ test("CLI and both MCP clients use the same exact Lat version", () => {
   assert.match(codex, /^tool_timeout_sec = 600$/m);
 });
 
-test("both agents invoke the same fast, non-blocking prompt reminder", () => {
+void test("both agents invoke the same fast, non-blocking prompt reminder", () => {
   for (const path of [".claude/settings.json", ".codex/hooks.json"]) {
     const hooks = JSON.parse(read(path)).hooks.UserPromptSubmit;
     assert.deepEqual(hooks, [{ hooks: [{
@@ -53,7 +53,7 @@ test("both agents invoke the same fast, non-blocking prompt reminder", () => {
   }
 });
 
-test("the skill's navigation examples and prose section IDs resolve", {
+void test("the skill's navigation examples and prose section IDs resolve", {
   skip: process.env.LAT_SMOKE !== "1",
   timeout: 120000,
 }, () => {
@@ -61,7 +61,7 @@ test("the skill's navigation examples and prose section IDs resolve", {
   const examples = [...skill.matchAll(/^nub run lat .+$/gm)]
     .map(([line]) => line.replace(/\s{2,}#.*$/, "").trim());
   assert.equal(examples.length, 6);
-  const run = (args) => {
+  const run = (args: string[]) => {
     const result = spawnSync("npm", ["run", "--silent", "lat", "--", ...args], {
       cwd: root, encoding: "utf8", timeout: 30000,
     });
@@ -81,7 +81,7 @@ test("the skill's navigation examples and prose section IDs resolve", {
 });
 
 // Opt in where the pinned package can be fetched. Ordinary script tests stay offline.
-test("local indexing, refresh, cache recovery, and MCP search", {
+void test("local indexing, refresh, cache recovery, and MCP search", {
   skip: process.env.LAT_SMOKE !== "1",
   timeout: 180000,
 }, async (t) => {
@@ -100,7 +100,7 @@ test("local indexing, refresh, cache recovery, and MCP search", {
     LAT_LLM_KEY_HELPER: "",
     NO_COLOR: "1",
   };
-  const run = (...args) => {
+  const run = (...args: string[]) => {
     const result = spawnSync("npx", ["--yes", spec, ...args], {
       cwd, env, encoding: "utf8", timeout: 60000,
     });
@@ -123,8 +123,8 @@ test("local indexing, refresh, cache recovery, and MCP search", {
   server.stderr.on("data", (data) => { errors += data; });
   const lines = createInterface({ input: server.stdout });
   let id = 0;
-  const pending = new Map();
-  const rejectPending = (error) => {
+  const pending = new Map<number, { resolve(value: unknown): void; reject(error: unknown): void }>();
+  const rejectPending = (error: unknown) => {
     for (const request of pending.values()) request.reject(error);
     pending.clear();
   };
@@ -140,24 +140,24 @@ test("local indexing, refresh, cache recovery, and MCP search", {
     if (message.error) request.reject(new Error(JSON.stringify(message.error)));
     else request.resolve(message.result);
   });
-  const send = (method, params) => new Promise((resolve, reject) => {
+  const send = <T,>(method: string, params: object) => new Promise<T>((resolve, reject) => {
     const requestId = ++id;
     const timer = setTimeout(() => {
       pending.delete(requestId);
       reject(new Error(`MCP ${method} timed out: ${errors}`));
     }, 30000);
     pending.set(requestId, {
-      resolve: (value) => { clearTimeout(timer); resolve(value); },
-      reject: (error) => { clearTimeout(timer); reject(error); },
+      resolve: (value: unknown) => { clearTimeout(timer); resolve(value as T); },
+      reject: (error: unknown) => { clearTimeout(timer); reject(error); },
     });
     server.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params }) + "\n");
   });
   try {
     await send("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "nub-lat-test", version: "1.0.0" } });
     server.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
-    const list = await send("tools/list", {});
+    const list = await send<{ tools: { name: string }[] }>("tools/list", {});
     assert.deepEqual(list.tools.map((tool) => tool.name).sort(), ["lat_check", "lat_expand", "lat_locate", "lat_refs", "lat_search", "lat_section"]);
-    const result = await send("tools/call", { name: "lat_search", arguments: { query: "offline package installation cache", limit: 1 } });
+    const result = await send<{ isError?: boolean; content: { text?: string }[] }>("tools/call", { name: "lat_search", arguments: { query: "offline package installation cache", limit: 1 } });
     assert.notEqual(result.isError, true, JSON.stringify(result));
     assert.match(result.content.map((item) => item.text ?? "").join("\n"), /#Dependency mirror/);
   } finally {

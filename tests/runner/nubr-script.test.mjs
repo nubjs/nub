@@ -5,7 +5,7 @@
 //
 // The argument cases carry the extra weight, because they run against the shell
 // this platform actually uses. The escape algorithm is pinned to npm's by unit
-// test in scripts/nubr-escape.test.mjs; what a unit test cannot answer is
+// test in scripts/nubr-escape.test.mts; what a unit test cannot answer is
 // whether the escaped string then SURVIVES the shell. On Windows that is
 // cmd.exe's own second parse of the caret pass, and no macOS or Linux run
 // reaches it — so this file is the only place that code executes at all, which

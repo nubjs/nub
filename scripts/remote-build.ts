@@ -782,7 +782,7 @@ async function startDetached(a: ReturnType<typeof parseArgs>, source: string, li
     log(`ssh up at ${ip} on ${zone}/${placement.machine}`);
     syncSource(source, ip, key);
     log("source synced");
-    await startDetachedJob(ip, key, jobScript(a.job, a.profile, scriptB64));
+    await startDetachedJob(ip, key, jobScript(a.job, a.profile, scriptB64)!);
   } catch (e) {
     if (!a.keep) await deleteInstance(name, zone);
     live.delete(`${name}|${zone}`);
@@ -833,7 +833,7 @@ async function oneBuild(
     syncSource(source, ip, key);
     log(`source synced (+${((Date.now() - t0) / 1000).toFixed(0)}s)`);
 
-    await runJob(ip, key, jobScript(a.job, a.profile, scriptB64), (l) => log(l));
+    await runJob(ip, key, jobScript(a.job, a.profile, scriptB64)!, (l) => log(l));
 
     const secs = (Date.now() - t0) / 1000;
     log(`done in ${secs.toFixed(0)}s`);

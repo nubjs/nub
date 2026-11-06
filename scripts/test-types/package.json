@@ -1,0 +1,15 @@
+{
+  "name": "nub-script-test-types",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "check": "node lint.mjs",
+    "typecheck": "tsrs -p ../tsconfig.tests.json --typeRoots ./node_modules/@types --noEmit --fast",
+    "lint": "node lint.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "tsrs": "0.22.0-ts7.1.0-beta",
+    "oxlint": "1.92.0"
+  }
+}

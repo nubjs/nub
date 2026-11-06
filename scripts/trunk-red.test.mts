@@ -4,7 +4,7 @@
 // exercise a change to it, and a wrong close hides a red trunk from everyone. The stub
 // applies the step's own --jq filters with real jq.
 //
-// Run: node --test scripts/trunk-red.test.mjs
+// Run: node --test scripts/trunk-red.test.mts
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -12,7 +12,7 @@ import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Line-oriented, like ci-optin.test.mjs: the repo has no YAML parser dependency.
+// Line-oriented, like ci-optin.test.mts: the repo has no YAML parser dependency.
 function reportStep() {
   const lines = readFileSync(".github/workflows/trunk-red.yml", "utf8").split("\n");
   const start = lines.indexOf("        run: |") + 1;
@@ -39,17 +39,20 @@ esac
 echo "unexpected: gh $*" >&2; exit 99
 `;
 
-const report = ([workflow, runId]) =>
+type Run = { conclusion: string; databaseId: number; event: string };
+type Scenario = { event: [string, string]; reports?: (string | [string, number])[]; runs?: Record<string, Run[]>; unreadable?: boolean };
+
+const report = ([workflow, runId]: [string, number]) =>
   `\`${workflow}\` failed on main at \`abc123456\`.\n\n` +
   `https://github.com/nubjs/nub/actions/runs/${runId}\n\nTrunk-only legs ...\n`;
-const green = (databaseId, event = "push") => ({ conclusion: "success", databaseId, event });
-const red = (databaseId, event = "push") => ({ conclusion: "failure", databaseId, event });
-const cancelled = (databaseId) => ({ conclusion: "cancelled", databaseId, event: "push" });
+const green = (databaseId: number, event = "push") => ({ conclusion: "success", databaseId, event });
+const red = (databaseId: number, event = "push") => ({ conclusion: "failure", databaseId, event });
+const cancelled = (databaseId: number) => ({ conclusion: "cancelled", databaseId, event: "push" });
 
 // `reports` are [workflow, failed run id] pairs, or raw text; the first is the issue body and
 // the rest its comments. `runs` maps a workflow to its completed runs, newest first; a workflow
 // with no entry makes `gh run list` fail. Omitting `reports` means no issue is open.
-function trigger({ event, reports, runs = {}, unreadable = false }) {
+function trigger({ event, reports, runs = {}, unreadable = false }: Scenario) {
   const dir = mkdtempSync(join(tmpdir(), "trunk-red-"));
   try {
     writeFileSync(join(dir, "gh"), STUB_GH);
@@ -80,7 +83,7 @@ function trigger({ event, reports, runs = {}, unreadable = false }) {
     });
     const log = `${result.stdout}${result.stderr}`;
     assert.equal(result.status, 0, `the step must not fail the notifier:\n${log}`);
-    let actions = [];
+    let actions: string[] = [];
     try {
       actions = readFileSync(join(dir, "actions"), "utf8").trim().split("\n");
     } catch {}
@@ -90,9 +93,9 @@ function trigger({ event, reports, runs = {}, unreadable = false }) {
   }
 }
 
-const CI_GREEN = ["CI", "success"];
+const CI_GREEN: [string, string] = ["CI", "success"];
 
-test("a green from another workflow does not clear a reported red", () => {
+void test("a green from another workflow does not clear a reported red", () => {
   const { actions, log } = trigger({
     event: CI_GREEN,
     reports: [["Aube parity", 200]],
@@ -102,7 +105,7 @@ test("a green from another workflow does not clear a reported red", () => {
   assert.match(log, /still red: Aube parity/);
 });
 
-test("closes once every reported workflow has a green verdict newer than its failure", () => {
+void test("closes once every reported workflow has a green verdict newer than its failure", () => {
   const { actions, log } = trigger({
     event: CI_GREEN,
     reports: [["CI", 200], ["Node matrix", 210]],
@@ -114,7 +117,7 @@ test("closes once every reported workflow has a green verdict newer than its fai
   assert.deepEqual(actions, ["close"], log);
 });
 
-test("a re-run of the failed run never falls back to the green before the failure", () => {
+void test("a re-run of the failed run never falls back to the green before the failure", () => {
   // A re-run keeps its run id: in progress it leaves the completed list, cancelled it is skipped.
   for (const completed of [[green(100)], [cancelled(200), green(100)]]) {
     const { actions, log } = trigger({
@@ -126,7 +129,7 @@ test("a re-run of the failed run never falls back to the green before the failur
   }
 });
 
-test("a successful re-run of the failed run clears it", () => {
+void test("a successful re-run of the failed run clears it", () => {
   const { actions, log } = trigger({
     event: ["Node matrix", "success"],
     reports: [["Node matrix", 200]],
@@ -135,7 +138,7 @@ test("a successful re-run of the failed run clears it", () => {
   assert.deepEqual(actions, ["close"], log);
 });
 
-test("a workflow reported twice must recover from its newest failure, compared numerically", () => {
+void test("a workflow reported twice must recover from its newest failure, compared numerically", () => {
   // As strings "9999999999" sorts above "41636887252", which would anchor on the older failure.
   const { actions, log } = trigger({
     event: CI_GREEN,
@@ -145,7 +148,7 @@ test("a workflow reported twice must recover from its newest failure, compared n
   assert.deepEqual(actions, [], log);
 });
 
-test("a pull-request run from a fork's main branch counts neither way", () => {
+void test("a pull-request run from a fork's main branch counts neither way", () => {
   const held = trigger({
     event: CI_GREEN,
     reports: [["Node matrix", 200]],
@@ -161,8 +164,8 @@ test("a pull-request run from a fork's main branch counts neither way", () => {
   assert.deepEqual(closed.actions, ["close"], closed.log);
 });
 
-test("anything unreadable leaves the issue open", () => {
-  const cases = {
+void test("anything unreadable leaves the issue open", () => {
+  const cases: Record<string, Omit<Scenario, "event">> = {
     "issue unreadable": { reports: [["CI", 200]], runs: { CI: [green(300)] }, unreadable: true },
     "run list failing": { reports: [["CI", 200], ["WPT Worker", 210]], runs: { CI: [green(300)] } },
     "no report lines": { reports: ["filed by hand\n"], runs: { CI: [green(300)] } },
@@ -178,13 +181,13 @@ test("anything unreadable leaves the issue open", () => {
   }
 });
 
-test("a failure comments on the open issue, or files one when none is open", () => {
-  const event = ["Node matrix", "failure"];
+void test("a failure comments on the open issue, or files one when none is open", () => {
+  const event: [string, string] = ["Node matrix", "failure"];
   assert.deepEqual(trigger({ event, reports: [["CI", 200]] }).actions, ["comment"]);
   assert.deepEqual(trigger({ event }).actions, ["create"]);
 });
 
-test("a green with no open issue does nothing", () => {
+void test("a green with no open issue does nothing", () => {
   assert.deepEqual(trigger({ event: CI_GREEN }).actions, []);
 });
 
@@ -198,15 +201,15 @@ const NOT_A_VERDICT = {
 
 const WORKFLOWS = ".github/workflows";
 
-// Runs on main = a schedule, or a push whose branch filter includes main. ci-optin.test.mjs
+// Runs on main = a schedule, or a push whose branch filter includes main. ci-optin.test.mts
 // already forbids a push trigger with no branch filter.
-function runsOnMain(file) {
+function runsOnMain(file: string) {
   const lines = readFileSync(join(WORKFLOWS, file), "utf8").split("\n");
-  const name = lines.find((l) => /^name:/.test(l))?.replace(/^name:\s*/, "").trim();
-  const on = lines.findIndex((l) => /^on:/.test(l));
+  const name = lines.find((l) => l.startsWith("name:"))?.replace(/^name:\s*/, "").trim();
+  const on = lines.findIndex((l) => l.startsWith("on:"));
   const end = lines.findIndex((l, i) => i > on && /^[^\s#]/.test(l));
   const block = lines.slice(on + 1, end === -1 ? undefined : end);
-  const trigger = (key) => {
+  const trigger = (key: string) => {
     const i = block.findIndex((l) => l.startsWith(`  ${key}:`));
     if (i === -1) return null;
     const j = block.findIndex((l, k) => k > i && /^ {0,2}[^\s#]/.test(l));
@@ -215,6 +218,7 @@ function runsOnMain(file) {
   const push = trigger("push");
   const branches = push?.match(/^ {4}branches:\s*\[([^\]]*)\]/m)?.[1].split(",").map((b) => b.trim()) ??
     push?.match(/^ {4}branches:\s*\n((?: {6}- .*\n?)+)/m)?.[1].split("\n").map((b) => b.replace(/^\s*- /, "").trim());
+  assert.ok(name, `${file} needs a workflow name`);
   return { name, onMain: trigger("schedule") !== null || (branches ?? []).includes("main") };
 }
 
@@ -225,7 +229,7 @@ function watched() {
   return lines.slice(start, end).map((l) => l.replace("      - ", "").trim());
 }
 
-test("every workflow that runs on main is watched by trunk-red, unless it is not a verdict", () => {
+void test("every workflow that runs on main is watched by trunk-red, unless it is not a verdict", () => {
   const all = readdirSync(WORKFLOWS).filter((f) => f.endsWith(".yml")).map(runsOnMain);
   const onMain = all.filter((w) => w.onMain).map((w) => w.name);
   // Instrument check: a schedule-only, a push-to-main and a probe-branch-only workflow.

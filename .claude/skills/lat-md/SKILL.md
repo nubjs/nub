@@ -10,7 +10,7 @@ metadata:
 
 The design and research corpus in `wiki/` is a [lat.md](https://github.com/1st1/lat.md) graph: cross-linked markdown, with `lat check` enforcing that every link and code reference still resolves. The repo root carries a `lat.md` symlink pointing at `wiki/`, because `lat` finds its graph by that directory name.
 
-The package scripts fetch an exact Lat version outside the root dependency tree. `nub run lat:check` runs the same graph gate as CI; `nub run lat <command>` exposes the full CLI without a global install. The pin in `package.json` is checked against both MCP configurations by `scripts/lat.test.mjs`.
+The package scripts fetch an exact Lat version outside the root dependency tree. `nub run lat:check` runs the same graph gate as CI; `nub run lat <command>` exposes the full CLI without a global install. The pin in `package.json` is checked against both MCP configurations by `scripts/lat.test.mts`.
 
 **Do not invoke bare `lat`.** It is not installed globally. Run commands from the repository root with `nub run lat`, or use the MCP tools. With only Node/npm installed, `npm run --silent lat -- <command>` is equivalent.
 

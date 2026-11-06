@@ -8,6 +8,21 @@ import { setTimeout as wait } from "node:timers/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+type RateFunction = ((...args: unknown[]) => Promise<unknown>) & {
+  pending: Promise<unknown> | null;
+  pendingCount: number;
+  activeCount?: number;
+  unref(): RateFunction;
+  ref(): RateFunction;
+  flush(): void;
+  cancel(reason?: unknown): void;
+  hasImmediateCapacity(): boolean;
+};
+type RateImplementation = {
+  debounce(fn: unknown, delay: unknown, options?: unknown): RateFunction;
+  throttle(fn: unknown, limit: unknown, interval: unknown, options?: unknown): RateFunction;
+};
+
 const require = createRequire(import.meta.url);
 const util = require("node:util");
 const rate = fileURLToPath(new URL("../runtime/util/rate.cjs", import.meta.url));
@@ -22,11 +37,12 @@ const hideNative = 'const util = require("node:util"); delete util.debounce; del
 const { installUtilRateShims, resolveUtilRateFacade } = require(rate);
 installUtilRateShims();
 
-test("installs lazy getters shaped like Node's, loading nothing until read", () => {
+void test("installs lazy getters shaped like Node's, loading nothing until read", () => {
   for (const name of ["debounce", "throttle"]) {
     const descriptor = Object.getOwnPropertyDescriptor(util, name);
+    assert.ok(descriptor);
     assert.equal(typeof descriptor.get, "function", `${name} is a getter`);
-    assert.equal(descriptor.set, undefined, `${name} has no setter`);
+    assert.equal(typeof descriptor.set, "undefined", `${name} has no setter`);
     assert.equal(descriptor.enumerable, true);
     assert.equal(descriptor.configurable, true);
   }
@@ -36,7 +52,7 @@ test("installs lazy getters shaped like Node's, loading nothing until read", () 
   assert.equal(util, require("util"));
 });
 
-test("routes ESM imports of util through a facade that re-exports the singleton", async () => {
+void test("routes ESM imports of util through a facade that re-exports the singleton", async () => {
   const facade = resolveUtilRateFacade("node:util", { conditions: ["node", "import"] }, true);
   assert.equal(facade.url, resolveUtilRateFacade("util", { conditions: ["import"] }, true).url);
   assert.equal(resolveUtilRateFacade("node:util", { conditions: ["import"], parentURL: facade.url }, true), null);
@@ -51,7 +67,7 @@ test("routes ESM imports of util through a facade that re-exports the singleton"
   assert.equal(namespace.promisify, util.promisify);
 });
 
-test("preload exposes named ESM imports on both loader tiers", () => {
+void test("preload exposes named ESM imports on both loader tiers", () => {
   const dir = mkdtempSync(join(tmpdir(), "util-rate-"));
   const hide = join(dir, "hide-native.cjs");
   writeFileSync(hide, hideNative);
@@ -77,9 +93,9 @@ test("preload exposes named ESM imports on both loader tiers", () => {
   }
 });
 
-test("debounce shares the latest result and exposes window controls", async () => {
-  const calls = [];
-  const fn = util.debounce(function (value) {
+void test("debounce shares the latest result and exposes window controls", async () => {
+  const calls: number[] = [];
+  const fn = util.debounce(function (this: unknown, value: number) {
     assert.equal(this, fn);
     calls.push(value);
     return value;
@@ -97,9 +113,9 @@ test("debounce shares the latest result and exposes window controls", async () =
   assert.equal(fn.pendingCount, 0);
 });
 
-test("debounce leading, supersession, cancellation, and signal", async () => {
-  const values = [];
-  const fn = util.debounce((value) => { values.push(value); return value; }, 100, {
+void test("debounce leading, supersession, cancellation, and signal", async () => {
+  const values: number[] = [];
+  const fn = util.debounce((value: number) => { values.push(value); return value; }, 100, {
     leading: true,
     rejectOnCancel: true,
   });
@@ -115,20 +131,20 @@ test("debounce leading, supersession, cancellation, and signal", async () => {
   const pending = fn(5);
   const cause = new Error("stop");
   fn.cancel(cause);
-  await assert.rejects(pending, (error) => error.code === "ABORT_ERR" && error.cause === cause);
+  await assert.rejects(pending, (error) => error instanceof Error && "code" in error && error.code === "ABORT_ERR" && error.cause === cause);
 
   const controller = new AbortController();
   const signaled = util.debounce(() => 1, 100, { signal: controller.signal });
   const aborted = signaled();
   controller.abort(cause);
-  await assert.rejects(aborted, (error) => error.code === "ABORT_ERR" && error.cause === cause);
+  await assert.rejects(aborted, (error) => error instanceof Error && "code" in error && error.code === "ABORT_ERR" && error.cause === cause);
   await assert.rejects(signaled(), { code: "ABORT_ERR" });
 });
 
-test("throttle preserves queue order and limits concurrent invocations", async () => {
-  const starts = [];
-  const releases = [];
-  const fn = util.throttle((value) => {
+void test("throttle preserves queue order and limits concurrent invocations", async () => {
+  const starts: number[] = [];
+  const releases: (() => void)[] = [];
+  const fn = util.throttle((value: number) => {
     starts.push(value);
     return new Promise((resolve) => releases.push(() => resolve(value)));
   }, 3, 100, { concurrency: 1 });
@@ -138,44 +154,44 @@ test("throttle preserves queue order and limits concurrent invocations", async (
   assert.equal(fn.pendingCount, 2);
   assert.equal(fn.pending, results[2]);
   assert.equal(fn.hasImmediateCapacity(), false);
-  releases.shift()();
+  releases.shift()!();
   await wait(0);
   assert.deepEqual(starts, [1, 2]);
-  releases.shift()();
+  releases.shift()!();
   await wait(0);
   assert.deepEqual(starts, [1, 2, 3]);
-  releases.shift()();
+  releases.shift()!();
   assert.deepEqual(await Promise.all(results), [1, 2, 3]);
   await wait(0);
   assert.equal(fn.activeCount, 0);
 });
 
-test("throttle handles overflow, cancellation, strict windows, and signal", async () => {
-  const fn = util.throttle((value) => value, 1, 100, { maxPending: 1, strict: true });
+void test("throttle handles overflow, cancellation, strict windows, and signal", async () => {
+  const fn = util.throttle((value: number) => value, 1, 100, { maxPending: 1, strict: true });
   assert.equal(await fn(1), 1);
   const queued = fn(2);
   const dropped = fn(3);
   await assert.rejects(dropped, { code: "ERR_THROTTLED" });
   assert.equal(fn.pendingCount, 1);
   fn.cancel("reset");
-  await assert.rejects(queued, (error) => error.code === "ABORT_ERR" && error.cause === "reset");
+  await assert.rejects(queued, (error) => error instanceof Error && "code" in error && error.code === "ABORT_ERR" && error.cause === "reset");
   assert.equal(await fn(4), 4);
 
-  const drop = util.throttle((value) => value, 1, 100, { overflow: "drop" });
+  const drop = util.throttle((value: number) => value, 1, 100, { overflow: "drop" });
   assert.equal(await drop(1), 1);
   await assert.rejects(drop(2), { code: "ERR_THROTTLED" });
 
   const controller = new AbortController();
-  const signaled = util.throttle((value) => value, 1, 100, { signal: controller.signal });
+  const signaled = util.throttle((value: number) => value, 1, 100, { signal: controller.signal });
   assert.equal(await signaled(1), 1);
   const pending = signaled(2);
   controller.abort("stop");
-  await assert.rejects(pending, (error) => error.code === "ABORT_ERR" && error.cause === "stop");
+  await assert.rejects(pending, (error) => error instanceof Error && "code" in error && error.code === "ABORT_ERR" && error.cause === "stop");
   await assert.rejects(signaled(3), { code: "ABORT_ERR" });
 });
 
-test("errors carry Node's codes, messages, and shape", async () => {
-  const misuse = [
+void test("errors carry Node's codes, messages, and shape", async () => {
+  const misuse: ((impl: RateImplementation) => unknown)[] = [
     (impl) => impl.debounce(null, 1),
     (impl) => impl.debounce(() => {}, 1.5),
     (impl) => impl.debounce(() => {}, 2 ** 31),
@@ -185,23 +201,27 @@ test("errors carry Node's codes, messages, and shape", async () => {
     (impl) => impl.throttle(() => {}, 1, 1, { overflow: "other" }),
     (impl) => impl.throttle(() => {}, 1, 1, { strict: 1 }),
   ];
-  const describe = (error) => ({
-    constructor: error.constructor,
-    name: error.name,
-    code: error.code,
-    message: error.message,
-    string: String(error),
-    header: error.stack.split("\n")[0],
-    keys: Object.keys(error),
-  });
-  const thrown = (impl, call) => {
+  const describe = (error: unknown) => {
+    assert.ok(error instanceof Error && "code" in error);
+    assert.ok(error.stack);
+    return {
+      constructor: error.constructor,
+      name: error.name,
+      code: error.code,
+      message: error.message,
+      string: String(error),
+      header: error.stack.split("\n")[0],
+      keys: Object.keys(error),
+    };
+  };
+  const thrown = (impl: RateImplementation, call: (impl: RateImplementation) => unknown) => {
     try { call(impl); } catch (error) { return describe(error); }
     assert.fail("expected a throw");
   };
-  const dropped = async (impl) => {
+  const dropped = async (impl: RateImplementation) => {
     const fn = impl.throttle(() => {}, 1, 100, { overflow: "drop" });
-    fn();
-    const error = await fn().then(() => assert.fail("expected a drop"), (e) => e);
+    void fn();
+    const error = await fn().then(() => assert.fail("expected a drop"), (e: unknown) => e);
     return { ...describe(error), header: undefined };
   };
 
@@ -225,10 +245,10 @@ test("errors carry Node's codes, messages, and shape", async () => {
   }
 });
 
-test("abort cannot be suppressed by an earlier signal listener", async () => {
+void test("abort cannot be suppressed by an earlier signal listener", async () => {
   for (const create of [
-    (signal) => util.debounce(() => 1, 1000, { signal }),
-    (signal) => util.throttle(() => 1, 1, 1000, { signal }),
+    (signal: AbortSignal) => util.debounce(() => 1, 1000, { signal }),
+    (signal: AbortSignal) => util.throttle(() => 1, 1, 1000, { signal }),
   ]) {
     const controller = new AbortController();
     controller.signal.addEventListener("abort", (event) => event.stopImmediatePropagation());
@@ -244,7 +264,7 @@ test("abort cannot be suppressed by an earlier signal listener", async () => {
   }
 });
 
-test("shim operations retain captured intrinsics after global mutation", () => {
+void test("shim operations retain captured intrinsics after global mutation", () => {
   const source = `
     ${hideNative}
     require(${JSON.stringify(rate)}).installUtilRateShims();
