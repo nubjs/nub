@@ -1218,6 +1218,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             }
         }
         resolve::run_lockfile_only(resolve::LockfileOnlyInput {
+            rewrite_lockfile: opts.rewrite_lockfile,
             cwd: &cwd,
             mode,
             lockfile_dir: &lockfile_dir,
@@ -1869,7 +1870,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     ignore_scripts: opts.ignore_scripts,
                 },
                 read_package_hook,
-            );
+            )
+            .with_keep_importer_pins(matches!(mode, FrozenMode::Fix));
 
             // Spawn the tarball fetch coordinator — it starts fetching as
             // packages arrive from the resolver, overlapping network I/O.
@@ -2810,6 +2812,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         shared_workspace_lockfile,
                         has_workspace,
                         per_project_write_selection: per_project_write_selection.clone(),
+                        rewrite_lockfile: opts.rewrite_lockfile,
                     };
                     lockfile_write_handle = Some(lockfile_write_overlap::spawn(write_inputs));
                 } else {
@@ -2826,6 +2829,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                         shared_workspace_lockfile,
                         has_workspace,
                         per_project_write_selection.as_ref(),
+                        opts.rewrite_lockfile,
                     )?;
                 }
             } else {
@@ -2978,6 +2982,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                                 &lock_write_graph,
                                 &manifest,
                                 write_kind,
+                                false,
                             )
                             .into_diagnostic()
                             .wrap_err("failed to write lockfile with computed integrity")?;

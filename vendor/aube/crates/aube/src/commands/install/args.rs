@@ -296,6 +296,7 @@ impl InstallArgs {
             ignore_scripts: self.ignore_scripts,
             dry_run: self.dry_run,
             lockfile_only: self.lockfile_only,
+            rewrite_lockfile: self.fix_lockfile,
             merge_git_branch_lockfiles: self.merge_git_branch_lockfiles,
             dangerously_allow_all_builds: self.dangerously_allow_all_builds,
             network_mode,
@@ -373,6 +374,10 @@ pub struct InstallOptions {
     /// costs a report line per prune until it ages out.
     pub register_in_store: bool,
     pub mode: FrozenMode,
+    /// `--fix-lockfile`: write the lockfile even when the resolved graph matches
+    /// the file on disk. Separate from [`FrozenMode::Fix`], which `add` and
+    /// `remove` also use and which keeps the no-churn guard.
+    pub rewrite_lockfile: bool,
     /// Which dep sections to keep in the materialized graph
     /// (`--prod` / `--dev` / `--no-optional`, in any valid combo).
     pub dep_selection: DepSelection,
@@ -586,6 +591,7 @@ impl InstallOptions {
             project_dir: None,
             register_in_store: true,
             mode,
+            rewrite_lockfile: false,
             dep_selection: DepSelection::All,
             ignore_pnpmfile: false,
             pnpmfile: None,

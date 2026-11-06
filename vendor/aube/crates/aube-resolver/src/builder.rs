@@ -45,6 +45,7 @@ impl Resolver {
             named_registries: BTreeMap::new(),
             read_package_hook: None,
             dependency_policy: DependencyPolicy::default(),
+            keep_importer_pins: false,
             vulnerable_ranges: BTreeMap::new(),
             git_shallow_hosts: Vec::new(),
             peers_suffix_max_length: 1000,
@@ -93,6 +94,7 @@ impl Resolver {
                 named_registries: BTreeMap::new(),
                 read_package_hook: None,
                 dependency_policy: DependencyPolicy::default(),
+                keep_importer_pins: false,
                 vulnerable_ranges: BTreeMap::new(),
                 git_shallow_hosts: Vec::new(),
                 peers_suffix_max_length: 1000,
@@ -338,6 +340,15 @@ impl Resolver {
     /// and `blockExoticSubdeps`.
     pub fn with_dependency_policy(mut self, policy: DependencyPolicy) -> Self {
         self.dependency_policy = policy;
+        self
+    }
+
+    /// Keep each importer's locked pick for its direct dependencies. Without
+    /// this, a direct dependency takes the first locked version of that name
+    /// that satisfies its range, which can be a nested copy another package
+    /// needed rather than the one the importer was locked to.
+    pub fn with_keep_importer_pins(mut self, value: bool) -> Self {
+        self.keep_importer_pins = value;
         self
     }
 
