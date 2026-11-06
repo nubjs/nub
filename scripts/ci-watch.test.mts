@@ -75,7 +75,6 @@ void test("--required mode: required gate still pending → pending, and exits 2
   const rollup = [check("some job", "SUCCESS"), { __typename: "CheckRun", name: "CI gate", status: "IN_PROGRESS", startedAt: "t" }];
   const v = classifyPr(JSON.stringify({ statusCheckRollup: rollup }), new Set(["CI gate"]));
   assert.equal(v.kind, "pending");
-  assert.equal(v.kind, "pending");
   const exit = resolvePendingExit(v, "pr 9", 10, { lastSig: signatureOf(v), lastProgressAt: 0 }, cfg({ deadline: 0 }));
   assert.ok(exit);
   assert.equal(exit.code, 2);

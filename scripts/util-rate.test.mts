@@ -204,15 +204,15 @@ void test("errors carry Node's codes, messages, and shape", async () => {
   const describe = (error: unknown) => {
     assert.ok(error instanceof Error && "code" in error);
     assert.ok(error.stack);
-    return ({
-    constructor: error.constructor,
-    name: error.name,
-    code: error.code,
-    message: error.message,
-    string: String(error),
-    header: error.stack.split("\n")[0],
-    keys: Object.keys(error),
-    });
+    return {
+      constructor: error.constructor,
+      name: error.name,
+      code: error.code,
+      message: error.message,
+      string: String(error),
+      header: error.stack.split("\n")[0],
+      keys: Object.keys(error),
+    };
   };
   const thrown = (impl: RateImplementation, call: (impl: RateImplementation) => unknown) => {
     try { call(impl); } catch (error) { return describe(error); }
