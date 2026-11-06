@@ -796,8 +796,9 @@ pub(super) fn build(
                     .or_else(|| graph.packages.get(&peerless_dep_path(&name, &value)));
                 let rewritten = if let Some(target) = target
                     && let Some(ref local) = target.local_source
-                    && !matches!(local, LocalSource::Link(_))
                 {
+                    // A `link:` path is relative to the lockfile directory on every
+                    // parent, where pnpm links it from. It has no `packages:` entry.
                     local.pnpm_specifier()
                 } else if native_pnpm_aliases
                     && let Some(target) = target

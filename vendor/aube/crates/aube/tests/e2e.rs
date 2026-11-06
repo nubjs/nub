@@ -939,6 +939,48 @@ fn an_optional_dependency_that_is_also_required_still_fails_the_install() {
             "lifecycle script postinstall failed",
         ))
         .stderr(predicates::str::contains("optional-dep@1.0.0"));
+
+    // The same answer from the lockfile, which the run above never reads. The
+    // reader re-keys the root's `file:./optional-dep` to a hashed key, and
+    // `required-dep`'s edge has to follow it: when it did not, the required
+    // path vanished, the failure was swallowed as an optional one, and
+    // `required-dep`'s own `node_modules/optional-dep` link dangled.
+    sbx.cmd()
+        .args(["install", "--lockfile-only"])
+        .assert()
+        .success();
+    let modules = sbx.project.join("node_modules");
+    if modules.exists() {
+        fs::remove_dir_all(&modules).unwrap();
+    }
+    sbx.cmd()
+        .args([
+            "install",
+            "--frozen-lockfile",
+            "--dangerously-allow-all-builds",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "lifecycle script postinstall failed for optional-dep@",
+        ));
+    let required_dir = fs::read_dir(modules.join(".aube"))
+        .unwrap()
+        .flatten()
+        .find(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("required-dep@")
+        })
+        .expect("required-dep is materialized in the virtual store")
+        .path();
+    assert!(
+        required_dir
+            .join("node_modules/optional-dep/package.json")
+            .exists(),
+        "required-dep's link to optional-dep must resolve after a lockfile install"
+    );
 }
 
 #[test]

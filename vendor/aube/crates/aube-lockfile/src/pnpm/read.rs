@@ -1105,6 +1105,94 @@ pub fn parse_with_options(path: &Path, options: ParseOptions) -> Result<Lockfile
         }
     }
 
+    // Same for an importer-declared local package that another package also
+    // depends on (root -> `file:./a`, `file:./b`; `a` -> `file:../b`). The
+    // snapshot edge keeps the lockfile spelling `file:./b`, but the package was
+    // re-keyed to the hashed `b@file+<hash>`, so no graph key carries that
+    // spelling and every `resolve_dep_edge` walker dropped the edge: the linker
+    // wrote a dangling sibling symlink, and optional marking treated a
+    // required package as optional-only. A fresh resolve stores the hashed
+    // tail, and the writer renders it back to `file:`, so this matches both.
+    // Git and remote-tarball edges keep their values: they already resolve
+    // through `shared_local_dep_path`.
+    let mut file_local_keys: BTreeMap<String, String> = local_by_canonical
+        .iter()
+        .filter(|(_, key)| {
+            packages.get(*key).is_some_and(|pkg| {
+                matches!(
+                    pkg.local_source,
+                    Some(LocalSource::Directory(_) | LocalSource::Tarball(_))
+                )
+            })
+        })
+        .map(|(canonical, key)| (canonical.clone(), key.clone()))
+        .collect();
+    // A local package only other packages depend on, or an alias of one, reaches
+    // here under its lockfile key (`b@file:./b`). A fresh resolve hashes that key
+    // too, and the package's parents hash theirs from it, so without this a
+    // project re-keys on every re-resolve: `dedupe --check` fails forever, and
+    // the shared store holds a second copy of each parent. A peer-suffixed key
+    // stays as read.
+    let transitive_local_keys: Vec<String> = packages
+        .iter()
+        .filter(|(key, pkg)| {
+            !key.contains('(')
+                && matches!(
+                    &pkg.local_source,
+                    Some(local @ (LocalSource::Directory(_) | LocalSource::Tarball(_)))
+                        if local.dep_path(&pkg.name) != **key
+                )
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in transitive_local_keys {
+        let Some(mut pkg) = packages.remove(&key) else {
+            continue;
+        };
+        let Some(final_key) = pkg.local_source.as_ref().map(|l| l.dep_path(&pkg.name)) else {
+            continue;
+        };
+        pkg.dep_path = final_key.clone();
+        for dep in importers.values_mut().flatten() {
+            if dep.dep_path == key {
+                dep.dep_path.clone_from(&final_key);
+            }
+        }
+        file_local_keys.insert(key, final_key.clone());
+        packages.entry(final_key).or_insert(pkg);
+    }
+    // pnpm keeps a `link:` target out of `packages:`, so the edge is its only
+    // record. It is relative to the lockfile directory on every parent, a directory
+    // parent's own dependency included: pnpm 10 and 12 link it from there. Build the
+    // package a fresh resolve stores, or the edge reaches nothing.
+    let mut link_targets: BTreeMap<String, LockedPackage> = BTreeMap::new();
+    for pkg in packages.values_mut() {
+        for map in [&mut pkg.dependencies, &mut pkg.optional_dependencies] {
+            for (dep_name, value) in map.iter_mut() {
+                let bare = value.split('(').next().unwrap_or(value);
+                if let Some(key) = file_local_keys.get(&format!("{dep_name}@{bare}")) {
+                    *value = dep_path_tail(key, dep_name).to_string();
+                } else if let Some(target) = bare.strip_prefix("link:") {
+                    let local = LocalSource::Link(normalize_lexical(Path::new(target)));
+                    let key = local.dep_path(dep_name);
+                    *value = dep_path_tail(&key, dep_name).to_string();
+                    link_targets
+                        .entry(key.clone())
+                        .or_insert_with(|| LockedPackage {
+                            name: dep_name.clone(),
+                            version: "0.0.0".to_string(),
+                            dep_path: key,
+                            local_source: Some(local),
+                            ..Default::default()
+                        });
+                }
+            }
+        }
+    }
+    for (key, pkg) in link_targets {
+        packages.entry(key).or_insert(pkg);
+    }
+
     // Drop each alias-clone source that nothing else in the graph reaches.
     //
     // pnpm v9 writes only the canonical (real-name-keyed) entry for an
