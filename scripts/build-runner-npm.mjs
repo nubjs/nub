@@ -39,6 +39,7 @@ const RUNTIME_FILES = [
   "util/throttle.cjs",
   "util/internals.cjs",
   "pnp-util.cjs",
+  "primordials.cjs",
   "floor-builtin.mjs",
   "cache-evict.mjs",
   // Reachable only through preload-common.cjs's lazy require, which the

@@ -194,3 +194,8 @@ type SecondArgument = { fetch: (r: Request, env: unknown) => Response } extends 
   : false;
 const oneArgumentOnly: false = null as unknown as SecondArgument;
 void [fetchIsRequired, oneArgumentOnly];
+
+const localeVariants: string | undefined = new Intl.Locale("sl-rozaj-biske").variants;
+void localeVariants;
+// @ts-expect-error Locale variants is a read-only getter.
+new Intl.Locale("en").variants = "rozaj";

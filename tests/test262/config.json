@@ -1,0 +1,18 @@
+{
+  "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+  "harnessVersion": "10.0.0",
+  "suites": [
+    "test/built-ins/Math/sumPrecise",
+    "test/intl402/Locale/prototype/variants",
+    "test/built-ins/Iterator/zip",
+    "test/built-ins/Iterator/zipKeyed",
+    "test/built-ins/Iterator/prototype/join",
+    "test/built-ins/Iterator/prototype/includes",
+    "test/built-ins/Iterator/prototype/take",
+    "test/built-ins/Iterator/prototype/drop",
+    "test/built-ins/Promise/try",
+    "test/built-ins/AsyncIteratorPrototype/Symbol.asyncDispose"
+  ],
+  "expectedFiles": 252,
+  "expectedScenarios": 504
+}

@@ -13,10 +13,11 @@ function installCompiledFloat16LazyGlobals() {
   let f16;
   const load = () => (f16 ??= require("@petamoriken/float16"));
   // Decided before any accessor exists: `typeof` on a lazy member would run it.
-  const wantDataView = typeof DataView.prototype.getFloat16 !== "function";
+  const wantGet = typeof DataView.prototype.getFloat16 !== "function";
+  const wantSet = typeof DataView.prototype.setFloat16 !== "function";
   const wantMath = typeof Math.f16round !== "function";
   defineLazy(globalThis, "Float16Array", () => load().Float16Array);
-  if (wantDataView) {
+  if (wantGet) {
     defineLazy(
       DataView.prototype,
       "getFloat16",
@@ -25,6 +26,8 @@ function installCompiledFloat16LazyGlobals() {
           return load().getFloat16(this, offset, littleEndian);
         },
     );
+  }
+  if (wantSet) {
     defineLazy(
       DataView.prototype,
       "setFloat16",

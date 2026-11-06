@@ -22,13 +22,13 @@ The choice of per-file hooks over a bundler pass is in [[research/augmentation-l
 
 Nub supports Node 18.19 and above. Across that range a feature may be native, gated behind a flag, or absent — so making it work means a different action per version.
 
-All of it lives in one table, 51 features deep. Each carries sorted, non-overlapping version bands, and each band names exactly one mitigation:
+All of it lives in one feature table. Each carries sorted, non-overlapping version bands, and each band names exactly one mitigation:
 
 | Mitigation | What Nub does |
 | --- | --- |
 | Native | Nothing. The version already ships it. |
 | Unflag | Injects the experimental flag, across the exact range where it exists and is still required |
-| Polyfill | Installs a JavaScript polyfill, guarded by a `typeof` feature detect |
+| Polyfill | Installs a JavaScript polyfill, guarded by a method or accessor feature detect |
 | Storage file | Passes a workspace-keyed `--localstorage-file` path, for Web Storage only |
 | Unflag on argv | Injects a V8 flag Node accepts only on the command line, never through `NODE_OPTIONS` |
 | Runtime V8 flag | Turns a V8 flag on from inside the process, the first time a module that uses its syntax is loaded |
@@ -42,6 +42,8 @@ Banding is exact because it has to be. Injecting an experimental flag on a versi
 The flag-injection logic in [[crates/nub-core/src/node/flags.rs#compute_inject_flags]] reads the table in [[crates/nub-core/src/node/feature_matrix.rs#FEATURES]] rather than keeping its own copy, so a version-gated claim traces to a row. A band that runs to infinity would eventually inject a flag the running Node has dropped, so both unflag shapes are checked against the real binary before injection, by different probes. The ordinary set is filtered against the list Node reports as accepted in `NODE_OPTIONS` — a cheap read that stays a valid existence check even though the flags themselves travel on argv. The argv-only and runtime sets cannot use that list, since a flag Node refuses there is absent from it by construction, so each is checked by spawning the binary with it once and caching the verdict. A flag the binary no longer takes is dropped rather than aborting it at startup. Surveys behind the bands: [[research/node-experimental-flag-lifecycle]], [[research/node-flag-arity]].
 
 When Node lacks Temporal, the shared runtime installer copies the polyfill's members into an ordinary extensible namespace. Its value properties are writable, non-enumerable, and configurable; its `Symbol.toStringTag` is `"Temporal"`, non-writable, non-enumerable, and configurable. Member identities are preserved. Both lazy preload and compiled-artifact getters use this installer, and the package replacement exports the resulting global. See [The Temporal Object](https://tc39.es/proposal-temporal/#sec-temporal-objects) and the [built-in property defaults](https://tc39.es/ecma262/#sec-ecmascript-standard-built-in-objects).
+
+The shared polyfills cover Node 27 Alpha's `Math.sumPrecise`, `Intl.Locale.prototype.variants`, `Iterator.zip`, `Iterator.zipKeyed`, and iterator `includes`/`join`. Their feature-table bands record native support starting at 27, while runtime guards preserve any implementation already supplied by Node. Math sums accumulate exact integer multiples of the smallest subnormal before one ties-to-even rounding; joint iteration closes remaining inputs in reverse order. Missing `Promise.try`, iterator `take`/`drop`, and async iterator disposal follow the revised specification, without replacing earlier native implementations. The native-versus-fallback regression corpus is `scripts/node27-polyfills.test.mts`.
 
 ## Two tiers
 
