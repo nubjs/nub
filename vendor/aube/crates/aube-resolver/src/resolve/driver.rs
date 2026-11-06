@@ -3206,7 +3206,11 @@ impl<'a> ResolveDriver<'a> {
             .iter()
             .find(|dep| dep.name == task.name)?;
         let pkg = graph.packages.get(&dep.dep_path)?;
+        // The version alone does not identify the package: a retargeted alias
+        // (`x` from `npm:old@1` to `npm:new@1`) can keep a satisfying version.
         (!pkg.in_bundle
+            && pkg.local_source.is_none()
+            && pkg.registry_name() == task.registry_name()
             && version_satisfies(&pkg.version, &task.range)
             && !is_vulnerable(
                 task.registry_name(),

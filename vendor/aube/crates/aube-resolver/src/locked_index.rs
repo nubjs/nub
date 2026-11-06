@@ -85,6 +85,10 @@ impl<'a> LockedIndex<'a> {
     /// could bind to the integrity-less bundled entry (it sorts ahead of
     /// the real standalone entry in nested dep_path order) and fail
     /// offline. The real standalone entry, if any, is selected instead.
+    ///
+    /// So are entries for another package: an alias retargeted to a new package
+    /// (`x` from `npm:old@1` to `npm:new@1`) keeps its name and can keep a
+    /// satisfying version, and has to be fetched rather than reused.
     pub fn find_satisfying(
         &self,
         name: &str,
@@ -94,6 +98,7 @@ impl<'a> LockedIndex<'a> {
     ) -> Option<&'a LockedPackage> {
         self.bucket(name).iter().copied().find(|p| {
             !p.in_bundle
+                && p.registry_name() == registry_name
                 && version_satisfies(&p.version, range)
                 && !is_vulnerable(registry_name, &p.version, vulnerable_ranges)
         })

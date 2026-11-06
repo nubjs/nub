@@ -819,6 +819,37 @@ fn fix_lockfile_keeps_a_root_pin_over_a_nested_copy() {
     );
 }
 
+/// The pin does not outlive the package: retargeting an alias re-resolves it even
+/// when the locked version also satisfies the new range.
+#[test]
+fn fix_lockfile_follows_a_retargeted_alias() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY unset");
+        return;
+    }
+    let manifest = |spec: &str| {
+        format!(
+            r#"{{"name":"fixalias","version":"1.0.0","packageManager":"npm@10.8.2","dependencies":{{"x":"{spec}"}}}}"#
+        )
+    };
+    let dir = pm_tmpdir("fixalias");
+    std::fs::write(dir.join("package.json"), manifest("npm:is-number@3.0.0")).unwrap();
+    let (_, stderr, code) = run_install(&dir, &["install", "--lockfile-only"]);
+    assert_eq!(code, 0, "generating the lockfile failed: {stderr}");
+
+    std::fs::write(dir.join("package.json"), manifest("npm:is-odd@>=0.1.0")).unwrap();
+    let (_, stderr, code) = run_install(&dir, &["install", "--fix-lockfile", "--lockfile-only"]);
+    assert_eq!(code, 0, "--fix-lockfile failed: {stderr}");
+    let fixed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("package-lock.json")).unwrap())
+            .unwrap();
+    let entry = &fixed["packages"]["node_modules/x"];
+    assert_eq!(
+        entry["name"], "is-odd",
+        "the alias kept its old target: {entry}"
+    );
+}
+
 /// A package-lock.json missing a required child's entry gets the child back from
 /// `--fix-lockfile`, in the lockfile and on disk, with the parent's edge intact.
 #[test]
