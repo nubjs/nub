@@ -119,6 +119,12 @@ void test("the variants option sets, replaces, sorts and validates variants", ()
   assert.throws(() => (Intl.Locale as unknown as (tag: string) => unknown)("en"), TypeError);
 });
 
+void test("polyfills leave frozen intrinsics alone so the program still starts", () => {
+  const script = `require(${JSON.stringify(polyfills)}).installSyncPolyfills();`;
+  const result = spawnSync(process.execPath, ["--frozen-intrinsics", "--no-warnings", "-e", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 void test("polyfills install on a Node with no Intl", () => {
   const script = `delete globalThis.Intl; require(${JSON.stringify(polyfills)}).installSyncPolyfills();`;
   const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });

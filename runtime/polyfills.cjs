@@ -135,7 +135,6 @@ const { installUtilRateShims } = require("./util/rate.cjs");
 function installSyncPolyfills(preloaded) {
   preloaded = preloaded || {};
   installUtilRateShims();
-  installLocaleVariants();
 
   // ── Web Storage: neutralize the throwing localStorage getter ────────
   // When nub injects `--experimental-webstorage` on the 22.4–24 band AND the user
@@ -292,6 +291,13 @@ function installSyncPolyfills(preloaded) {
   // Temporal (in no Node version) is installed as a LAZY global by the preload
   // entry after this runs — see preload.cjs / preload.mjs (A37). Touching
   // globalThis.Temporal here would defeat that laziness, so we must not.
+
+  // `--frozen-intrinsics`: every installer below adds a member to a built-in, and
+  // defining one on a frozen object throws, which would stop the program starting.
+  // The globals above are unaffected, because globalThis itself stays extensible.
+  if (ObjectIsFrozen(Object.prototype)) return;
+
+  installLocaleVariants();
 
   // ── Stage 4 polyfills (native on Node 24+, missing on 22.x) ────────
 
