@@ -38,7 +38,8 @@
 //!   row records the *floor* and *intent*, not the path.
 //! - **`Polyfill { runtime_file, global }`** — no Node version ships it (or the
 //!   floor doesn't), so nub installs a JS polyfill from `runtime/<file>`, gated
-//!   at runtime by a `typeof <global>` feature-detect. The matrix records the
+//!   at runtime by a `typeof <global>` feature-detect (`"key" in owner` for an
+//!   accessor, whose getter throws on its prototype). The matrix records the
 //!   intent + the floor; it does **not** version-gate the polyfill in Rust (the
 //!   polyfill bows out on its own when the global is already present). A unit
 //!   test asserts each named file exists and contains the named feature-detect.

@@ -13,8 +13,8 @@ interface SelectionConfig {
 const config: SelectionConfig = JSON.parse(readFileSync(new URL("../tests/test262/config.json", import.meta.url), "utf8"));
 void test("Test262 selection stays pinned and limited to implemented polyfills", () => {
   assert.doesNotThrow(() => validateSelection(config));
-  assert.equal(config.expectedFiles, 252);
-  assert.equal(config.expectedScenarios, 504);
+  assert.equal(config.expectedFiles, 355);
+  assert.equal(config.expectedScenarios, 710);
   assert.deepEqual(config.suites, implementedSuites);
 });
 void test("Test262 refuses full suites, wildcards, unrelated APIs and path escapes", () => {

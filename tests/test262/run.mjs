@@ -29,7 +29,7 @@ if (!existsSync(checkout)) {
   try {
     run("git", ["init", "--quiet", staging]);
     run("git", ["-C", staging, "remote", "add", "origin", "https://github.com/tc39/test262.git"]);
-    run("git", ["-C", staging, "sparse-checkout", "set", "harness", ...config.suites]);
+    run("git", ["-C", staging, "sparse-checkout", "set", "--no-cone", "/package.json", "/harness/", ...config.suites.map((suite) => `/${suite}`)]);
     run("git", ["-C", staging, "fetch", "--filter=blob:none", "--depth=1", "origin", config.revision]);
     run("git", ["-C", staging, "checkout", "--detach", "FETCH_HEAD"]);
     try { renameSync(staging, checkout); }
@@ -48,10 +48,14 @@ if (run("git", ["-C", checkout, "status", "--porcelain", "--untracked-files=no"]
 const files = run("git", ["-C", checkout, "ls-files", "-z", "--", ...config.suites]).split("\0")
   .filter((file) => file.endsWith(".js") && !file.endsWith("_FIXTURE.js"));
 for (const suite of config.suites) {
-  if (!files.some((file) => file.startsWith(`${suite}/`))) throw new Error(`Empty Test262 suite: ${suite}`);
+  if (!files.some((file) => file === suite || file.startsWith(`${suite}/`))) throw new Error(`Empty Test262 suite: ${suite}`);
 }
 if (files.length !== config.expectedFiles) throw new Error(`Expected ${config.expectedFiles} files, found ${files.length}`);
-const selected = selectShard(files, options.shard, config.expectedScenarios);
+// `--native` skips what no Node ships yet, so a missing method is not a failure.
+const runnable = native
+  ? files.filter((file) => !config.polyfillOnly.some((suite) => file.startsWith(`${suite}/`)))
+  : files;
+const selected = selectShard(runnable, options.shard, native ? runnable.length * 2 : config.expectedScenarios);
 if (options.list) {
   console.log(JSON.stringify({
     revision, native, workers, shard: options.shard,
@@ -63,7 +67,7 @@ if (options.list) {
 }
 const harnessArgs = [
   "--host-type", "node", "--host-path", node, "--test262-dir", checkout,
-  "--threads", String(workers), "--timeout", "10000", "--error-for-failures=true",
+  "--threads", String(workers), "--timeout", "10000",
   ...(!native ? ["--prelude", join(here, "polyfill-prelude.cjs")] : []), ...selected.files.map((file) => join(checkout, file)),
 ];
 console.log(`Test262 ${revision}: shard ${options.shard.index}/${options.shard.count}; ${selected.files.length}/${files.length} files; ${selected.expectedScenarios} scenarios; ${workers} workers; ${native ? "native" : "forced polyfills"}; ${run(node, ["--version"]).trim()}`);
@@ -77,5 +81,18 @@ if (result.error) throw result.error;
 process.stdout.write(result.stdout || "");
 process.stderr.write(result.stderr || "");
 const summary = /Ran (\d+) tests\s+(\d+) passed\s+(\d+) failed/.exec(result.stdout || "");
+const major = Number(/^v(\d+)/.exec(run(node, ["--version"]))[1]);
+const known = native ? [] : config.knownFailures
+  .filter((entry) => entry.nodeMajors.includes(major))
+  .flatMap((entry) => entry.files)
+  .filter((file) => selected.files.includes(file));
+const failed = [...(result.stdout || "").matchAll(/^FAIL (\S+\.js) \(/gm)].map((match) => match[1]);
+const unexpected = failed.filter((file) => !known.some((entry) => file.endsWith(entry)));
+const stale = !summary ? [] : known.filter((entry) => !failed.some((file) => file.endsWith(entry)));
+for (const file of unexpected) console.error(`Unexpected failure: ${file}`);
+for (const file of stale) console.error(`Listed in knownFailures for Node ${major}, but passed: ${file}`);
 // Fail closed: a runner failure or zero/truncated test selection is never green.
-if (result.status !== 0 || !summary || +summary[1] !== selected.expectedScenarios || +summary[3] !== 0) process.exit(1);
+if (!summary || +summary[1] !== selected.expectedScenarios || +summary[3] !== failed.length || unexpected.length || stale.length) {
+  if (summary) console.error(`Ran ${summary[1]} of ${selected.expectedScenarios} expected scenarios; ${summary[3]} failed`);
+  process.exit(1);
+}

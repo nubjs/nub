@@ -101,9 +101,12 @@ const {
   ObjectIs,
   ObjectIsFrozen,
   ObjectKeys,
+  Proxy,
   RangeError,
   ReflectApply,
+  ReflectConstruct,
   ReflectDefineProperty,
+  ReflectGet,
   ReflectGetOwnPropertyDescriptor,
   ReflectOwnKeys,
   ReflectSet,
@@ -726,14 +729,14 @@ function installIteratorSurface() {
       const n = validate(O, () => toLimit(limit));
       const rec = getIteratorDirect(O);
       return makeHelper(rec, function* () {
-        let left = n;
-        for (const v of asIterable(rec)) {
-          if (left > 0) {
-            left--;
-            continue;
-          }
-          yield v;
+        // IteratorStep, not IteratorStepValue: a skipped value is never read. A
+        // throwing `next` or `done` leaves the source done, so nothing closes it here.
+        for (let left = n; left > 0; left--) {
+          const r = ReflectApply(rec.next, rec.iterator, []);
+          if (!isObject(r)) throw new TypeError("iterator result is not an object");
+          if (r.done) return;
         }
+        for (const v of asIterable(rec)) yield v;
       });
     },
     flatMap(mapper) {
@@ -1339,22 +1342,24 @@ function installMapGetOrInsert() {
   }
 }
 
-// Intl.Locale.prototype.variants (native on Node 27+)
+// ── Intl.Locale.prototype.variants and the `variants` option (native on Node 27+) ──
 function installLocaleVariants() {
-  const proto = Intl.Locale.prototype;
+  // A Node built without ICU has no Intl at all.
+  if (typeof Intl !== "object" || typeof Intl.Locale !== "function") return;
   if ("variants" in Intl.Locale.prototype) return;
+  const NativeLocale = Intl.Locale;
+  const proto = NativeLocale.prototype;
   // The intrinsic getter checks [[InitializedLocale]] even across realms and
   // ignores user overrides of baseName/toString. Its result omits extensions.
   const baseName = ObjectGetOwnPropertyDescriptor(proto, "baseName").get;
+  const localeToString = proto.toString;
+  const isVariant = (part) => RegExpPrototypeExec(/^(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3})$/i, part) !== null;
   const getter = {
     get variants() {
       const parts = StringPrototypeSplit(ReflectApply(baseName, this, []), "-");
       let result;
       for (let i = 1; i < parts.length; i++) {
-        const part = parts[i];
-        if (RegExpPrototypeExec(/^[a-z0-9]{5,8}$/i, part) || RegExpPrototypeExec(/^[0-9][a-z0-9]{3}$/i, part)) {
-          result = result === undefined ? part : `${result}-${part}`;
-        }
+        if (isVariant(parts[i])) result = result === undefined ? parts[i] : `${result}-${parts[i]}`;
       }
       return result;
     },
@@ -1364,6 +1369,50 @@ function installLocaleVariants() {
     enumerable: false,
     configurable: true,
   });
+  // Without this wrapper the option is silently ignored. UpdateLanguageId reads it
+  // between region and calendar, so the proxy reads it there and hides it from the
+  // engine. The tag is then rebuilt, because the engine sorts variants and rejects
+  // duplicates only when parsing a tag.
+  const variantList = /^(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3})(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*$/i;
+  const Locale = function Locale(tag) {
+    if (new.target === undefined) throw new TypeError("Constructor Intl.Locale requires 'new'");
+    const options = arguments[1];
+    if (options === undefined || options === null) {
+      return ReflectConstruct(NativeLocale, [tag, options], new.target);
+    }
+    let variants;
+    const hooked = new Proxy(Object(options), {
+      __proto__: null,
+      get(target, key) {
+        if (key === "variants") return undefined;
+        if (key === "calendar") {
+          const value = target.variants;
+          if (value !== undefined) {
+            variants = `${value}`;
+            if (RegExpPrototypeExec(variantList, variants) === null) {
+              throw new RangeError(`Invalid variants: ${variants}`);
+            }
+          }
+        }
+        return ReflectGet(target, key);
+      },
+    });
+    const locale = ReflectConstruct(NativeLocale, [tag, hooked]);
+    const text = ReflectApply(localeToString, locale, []);
+    if (variants === undefined) {
+      return new.target === Locale ? locale : ReflectConstruct(NativeLocale, [text], new.target);
+    }
+    const base = ReflectApply(baseName, locale, []);
+    const parts = StringPrototypeSplit(base, "-");
+    let id = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      if (!isVariant(parts[i])) id = `${id}-${parts[i]}`;
+    }
+    return ReflectConstruct(NativeLocale, [`${id}-${variants}${StringPrototypeSlice(text, base.length)}`], new.target);
+  };
+  ObjectDefineProperty(Locale, "prototype", { value: proto, writable: false });
+  ObjectDefineProperty(proto, "constructor", { value: Locale });
+  ObjectDefineProperty(Intl, "Locale", { value: Locale });
 }
 
 // ── Math.sumPrecise (native on Node 27+) ──

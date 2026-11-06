@@ -1608,36 +1608,33 @@ jobs:
         working-directory: npm/nub-types/test
 
   test262:
-    name: Test262 polyfills (${{ matrix.shard }}/4)
+    name: Test262 polyfills (Node ${{ matrix.node }})
     needs: matrix-plan
     if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && needs.matrix-plan.outputs.run_scripts == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
-        shard: [1, 2, 3, 4]
+        # Each leg takes a different fallback path: no native iterator helpers (18),
+        # helpers that do not track a running state (24), and helpers that do (26).
+        node: ["18.19.0", "24", "26"]
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
         with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: tests/test262/config.json
+          node-version: ${{ matrix.node }}
       - name: Cache pinned Test262 checkout
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5
         with:
           path: ${{ runner.temp }}/nub-test262
           key: test262-${{ runner.os }}-${{ hashFiles('tests/test262/config.json') }}
-      - name: Run focused conformance shard
-        env:
-          SHARD: ${{ matrix.shard }}
-        run: node tests/test262/run.mjs --checkout "$RUNNER_TEMP/nub-test262" --workers 2 --shard "$SHARD/4"
+      - name: Run the focused conformance suite
+        run: node tests/test262/run.mjs --checkout "$RUNNER_TEMP/nub-test262" --workers 2
 
   docs-links:
     name: Docs links & anchors

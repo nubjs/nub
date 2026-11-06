@@ -63,6 +63,39 @@ void test("locale variants use the intrinsic locale, brand-check and omit extens
   assert.equal(getter.name, "get variants");
 });
 
+void test("the variants option sets, replaces, sorts and validates variants", () => {
+  // Non-string and invalid values are intentional here.
+  const Locale = Intl.Locale as unknown as new (tag: string, options?: unknown) => Intl.Locale;
+  for (const [tag, variants, expected] of [
+    ["sl", "rozaj", "sl-rozaj"], ["sl-biske", "rozaj", "sl-rozaj"], ["sl", "rozaj-biske", "sl-biske-rozaj"],
+    ["de-Latn-DE-u-ca-gregory", 1901, "de-Latn-DE-1901-u-ca-gregory"], ["sl-rozaj", undefined, "sl-rozaj"],
+  ] as [string, unknown, string][]) assert.equal(new Locale(tag, { variants }).toString(), expected);
+  for (const variants of ["", "x", "GB-scouse", "rozaj-", "rozaj-Rozaj"]) {
+    assert.throws(() => new Locale("sl", { variants }), RangeError);
+  }
+  assert.throws(() => new Locale("sl", { variants: Symbol() }), TypeError);
+  let reads = 0;
+  assert.equal(new Locale("sl", { get variants() { reads++; return "rozaj"; } }).variants, "rozaj");
+  assert.equal(reads, 1);
+  const order: PropertyKey[] = [];
+  new Locale("sl", new Proxy<Record<PropertyKey, unknown>>({ variants: "rozaj" }, { get(target, key) { order.push(key); return target[key]; } }));
+  assert.ok(order.indexOf("region") < order.indexOf("variants") && order.indexOf("variants") < order.indexOf("calendar"), order.map(String).join());
+  class Sub extends Intl.Locale {}
+  assert.ok(new (Sub as unknown as typeof Locale)("sl", { variants: "rozaj" }) instanceof Sub);
+  assert.ok(new Sub("sl", { region: "IT" }) instanceof Sub);
+  assert.ok(new Intl.Locale("en") instanceof Intl.Locale);
+  assert.equal(Intl.Locale.prototype.constructor, Intl.Locale);
+  assert.equal(Intl.Locale.name, "Locale");
+  assert.equal(Intl.Locale.length, 1);
+  assert.throws(() => (Intl.Locale as unknown as (tag: string) => unknown)("en"), TypeError);
+});
+
+void test("polyfills install on a Node with no Intl", () => {
+  const script = `delete globalThis.Intl; require(${JSON.stringify(polyfills)}).installSyncPolyfills();`;
+  const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+});
+
 void test("precise sums round once, preserve signed zero and survive overflow/cancellation", () => {
   const m = Number.MAX_VALUE, tiny = Number.MIN_VALUE;
   for (const [values, expected] of [
@@ -170,6 +203,10 @@ void test("take/drop reject excessive finite limits, close on validation and per
       assert.deepEqual(log, ["a.return"]);
     }
   }
+  const reads: number[] = [];
+  const source = { i: 0, next() { const i = this.i++; return { done: i > 2, get value() { reads.push(i); return i; } }; } };
+  assert.deepEqual((ip as { drop(limit: number): { toArray(): unknown[] } }).drop.call(source, 2).toArray(), [2]);
+  assert.deepEqual(reads, [2]);
   assert.deepEqual([1, 2].values().take(Infinity).toArray(), [1, 2]);
   assert.deepEqual([1, 2].values().drop(Infinity).toArray(), []);
 });
