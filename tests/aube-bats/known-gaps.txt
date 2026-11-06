@@ -26,13 +26,6 @@ install.bats|aube install labels workspace dependency summaries by package name|
 # ── verbs / aliases / flags not wired yet ───────────────────────────────────
 install.bats|aube recursive install honors nested --frozen-lockfile|'recursive' verb staged (phase Surface)
 install.bats|aube recursive install honors nested --registry|'recursive' verb staged (phase Surface)
-install.bats|aube install --fix-lockfile is a no-op on a fresh lockfile|--fix-lockfile not wired
-install.bats|aube install --fix-lockfile preserves unchanged deps when new dep is added|--fix-lockfile not wired
-install.bats|aube install --fix-lockfile --lockfile-only is a no-op on a fresh lockfile|--fix-lockfile not wired
-install.bats|aube install --fix-lockfile --lockfile-only heals drift without linking|--fix-lockfile not wired
-install.bats|aube install --fix-lockfile conflicts with --frozen-lockfile|--fix-lockfile not wired
-install.bats|aube install --fix-lockfile conflicts with --no-frozen-lockfile|--fix-lockfile not wired
-install.bats|aube install --fix-lockfile conflicts with --prefer-frozen-lockfile|--fix-lockfile not wired
 install.bats|aube install --network-concurrency caps tarball fetches|--network-concurrency / --no-verify-store-integrity / --no-side-effects-cache not wired
 install.bats|aube install --lockfile-only conflicts with --frozen-lockfile|flag-conflict validation not wired
 ci.bats|aube clean-install is an alias for aube ci|clean-install alias not wired

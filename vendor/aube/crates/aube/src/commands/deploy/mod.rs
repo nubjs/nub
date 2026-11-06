@@ -338,6 +338,7 @@ pub async fn run(
             aube_registry::NetworkMode::Online
         };
         let opts = InstallOptions {
+            rewrite_lockfile: false,
             control: install::InstallControl::default(),
             embedder_runtime: None,
             project_dir: Some(s.target.clone()),

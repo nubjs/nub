@@ -1304,6 +1304,7 @@ pub struct InstallFlags {
     pub frozen_lockfile: bool,
     pub no_frozen_lockfile: bool,
     pub prefer_frozen_lockfile: bool,
+    pub fix_lockfile: bool,
     pub prod: bool,
     pub dev: bool,
     pub ignore_scripts: bool,
@@ -1460,6 +1461,15 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
         flags.frozen_lockfile || (config.frozen && !flags.no_frozen_lockfile);
     args.lockfile.no_frozen_lockfile = flags.no_frozen_lockfile;
     args.lockfile.prefer_frozen_lockfile = flags.prefer_frozen_lockfile;
+    // pnpm accepts `--fix-lockfile` beside the frozen flags and the fix wins
+    // (measured on pnpm 10.34 and 11.28), so it clears whichever is set, a
+    // config-requested frozen included.
+    if flags.fix_lockfile {
+        args.fix_lockfile = true;
+        args.lockfile.frozen_lockfile = false;
+        args.lockfile.no_frozen_lockfile = false;
+        args.lockfile.prefer_frozen_lockfile = false;
+    }
 
     args.network.install_overrides();
     args.lockfile.install_overrides();
@@ -1521,7 +1531,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
         }
         let dir = &detected.dir;
         // Refuse upfront when the flags *ask* for a lockfile write…
-        if flags.no_frozen_lockfile || flags.force || flags.lockfile_only {
+        if flags.no_frozen_lockfile || flags.fix_lockfile || flags.force || flags.lockfile_only {
             return Err(yarn_gate_error(
                 "install",
                 "the requested install would rewrite yarn.lock",

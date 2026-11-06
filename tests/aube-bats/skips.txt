@@ -82,6 +82,13 @@ install.bats|aube install surfaces lockfile parse errors instead of silently re-
 install.bats|aube install --frozen-lockfile errors when lockfile is stale|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock
 install.bats|aube install --frozen-lockfile succeeds when lockfile is fresh|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock
 install.bats|aube install --lockfile-only is a no-op when lockfile is fresh|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock
+install.bats|aube install --fix-lockfile is a no-op on a fresh lockfile|compares aube-lock.yaml; nub's canonical lockfile name is nub.lock
+install.bats|aube install --fix-lockfile preserves unchanged deps when new dep is added|greps aube-lock.yaml; nub's canonical lockfile name is nub.lock
+install.bats|aube install --fix-lockfile --lockfile-only round-trips a fresh lockfile|compares aube-lock.yaml; nub's canonical lockfile name is nub.lock
+install.bats|aube install --fix-lockfile --lockfile-only heals drift without linking|greps aube-lock.yaml; nub's canonical lockfile name is nub.lock
+install.bats|aube install --fix-lockfile conflicts with --frozen-lockfile|pnpm accepts the pair and the fix wins; nub mirrors pnpm's grammar
+install.bats|aube install --fix-lockfile conflicts with --no-frozen-lockfile|pnpm accepts the pair and the fix wins; nub mirrors pnpm's grammar
+install.bats|aube install --fix-lockfile conflicts with --prefer-frozen-lockfile|pnpm accepts the pair and the fix wins; nub mirrors pnpm's grammar
 ci.bats|aube ci installs from a committed lockfile|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock
 ci.bats|aube ci deletes existing node_modules first|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock
 ci.bats|aube ci errors when lockfile drifts from package.json|fixture's committed aube-lock.yaml is invisible: nub's canonical lockfile name is nub.lock

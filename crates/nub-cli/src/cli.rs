@@ -1460,6 +1460,11 @@ pub enum Command {
         #[usage(long, conflicts("--frozen-lockfile", "--no-frozen-lockfile"))]
         prefer_frozen_lockfile: bool,
 
+        /// Rewrite the lockfile, keeping its pinned versions and re-resolving
+        /// only what drifted.
+        #[usage(long)]
+        fix_lockfile: bool,
+
         /// Skip devDependencies; install only production deps.
         #[usage(short = 'P', long, visible_alias = "production")]
         prod: bool,
@@ -3438,6 +3443,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             frozen_lockfile,
             no_frozen_lockfile,
             prefer_frozen_lockfile,
+            fix_lockfile,
             prod,
             dev,
             ignore_scripts,
@@ -3467,6 +3473,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 frozen_lockfile,
                 no_frozen_lockfile,
                 prefer_frozen_lockfile,
+                fix_lockfile,
                 prod,
                 dev,
                 ignore_scripts,

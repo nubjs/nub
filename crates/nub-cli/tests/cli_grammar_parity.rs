@@ -126,6 +126,11 @@ fn install_family_grammar_accepts_documented_forms() {
                 &["install", "--no-frozen-lockfile"],
                 "pnpm --no-frozen-lockfile",
             ),
+            (&["install", "--fix-lockfile"], "pnpm --fix-lockfile"),
+            (
+                &["install", "--fix-lockfile", "--frozen-lockfile"],
+                "pnpm accepts --fix-lockfile beside a frozen flag",
+            ),
             (
                 &["install", "--prefer-frozen-lockfile"],
                 "pnpm --prefer-frozen-lockfile",

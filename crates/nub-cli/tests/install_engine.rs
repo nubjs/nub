@@ -693,6 +693,12 @@ fn install_refuses_to_mutate_a_drifted_yarn_lock() {
         stderr2.contains("refusing to modify yarn.lock"),
         "the explicit-rewrite path must hit the same gate: {stderr2}"
     );
+    let (_, stderr3, code3) = run_install(&dir, &["install", "--fix-lockfile"]);
+    assert_ne!(code3, 0, "--fix-lockfile must be refused: {stderr3}");
+    assert!(
+        stderr3.contains("refusing to modify yarn.lock"),
+        "--fix-lockfile must hit the same gate: {stderr3}"
+    );
 
     assert_eq!(
         std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
@@ -703,6 +709,73 @@ fn install_refuses_to_mutate_a_drifted_yarn_lock() {
         !dir.join("aube-lock.yaml").exists(),
         "the gate must not leave an aube-lock.yaml behind"
     );
+}
+
+/// A lockfile whose specifiers all match reads as up to date, and one whose
+/// resolved graph is unchanged is never rewritten, whatever else in it is wrong.
+/// `--fix-lockfile` writes it anyway, with or without `--lockfile-only`, and keeps
+/// the pins: `is-odd` stays at 0.1.2 under a range that 3.0.1 also satisfies.
+#[test]
+fn fix_lockfile_rewrites_an_up_to_date_lockfile_and_keeps_its_pins() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY unset");
+        return;
+    }
+    let manifest = |range: &str| {
+        format!(
+            r#"{{"name":"fixlock","version":"1.0.0","packageManager":"npm@10.8.2","devDependencies":{{"is-odd":"{range}"}}}}"#
+        )
+    };
+    let dir = pm_tmpdir("fixlock");
+    std::fs::write(dir.join("package.json"), manifest("0.1.2")).unwrap();
+    let (_, stderr, code) = run_install(&dir, &["install", "--lockfile-only"]);
+    assert_eq!(code, 0, "generating the lockfile failed: {stderr}");
+
+    let lockfile = dir.join("package-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
+    lock["packages"][""]["devDependencies"]["is-odd"] = ">=0.1.2".into();
+    let entry = lock["packages"]["node_modules/is-odd"]
+        .as_object_mut()
+        .expect("is-odd is in the lockfile");
+    entry.remove("dev");
+    entry.insert("devOptional".to_string(), true.into());
+    let stale = serde_json::to_string_pretty(&lock).unwrap();
+    std::fs::write(dir.join("package.json"), manifest(">=0.1.2")).unwrap();
+
+    std::fs::write(&lockfile, &stale).unwrap();
+    let (_, stderr, code) = run_install(&dir, &["install", "--lockfile-only"]);
+    assert_eq!(code, 0, "plain --lockfile-only failed: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&lockfile).unwrap(),
+        stale,
+        "without the flag an up-to-date lockfile must stay as it is"
+    );
+
+    // The last row runs over the tree the row before it linked.
+    for (args, links) in [
+        (&["install", "--fix-lockfile", "--lockfile-only"][..], false),
+        (&["install", "--fix-lockfile"][..], true),
+        (&["install", "--fix-lockfile"][..], true),
+    ] {
+        std::fs::write(&lockfile, &stale).unwrap();
+        let (_, stderr, code) = run_install(&dir, args);
+        assert_eq!(code, 0, "{args:?} failed: {stderr}");
+        let fixed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
+        let entry = &fixed["packages"]["node_modules/is-odd"];
+        assert_eq!(entry["version"], "0.1.2", "{args:?} moved the pin: {entry}");
+        assert_eq!(entry["dev"], true, "{args:?} left the flag: {entry}");
+        assert!(
+            entry.get("devOptional").is_none(),
+            "{args:?} left devOptional: {entry}"
+        );
+        assert_eq!(
+            dir.join("node_modules/is-odd").exists(),
+            links,
+            "{args:?} linked the wrong tree"
+        );
+    }
 }
 
 #[test]

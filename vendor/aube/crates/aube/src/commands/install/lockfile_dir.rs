@@ -93,16 +93,23 @@ pub(super) fn guard_against_foreign_importers(
 
 /// Write `graph` to `lockfile_dir`, remapping the project's `"."`
 /// importer key to its relative-path key from `lockfile_dir`.
-/// No-op remap when `importer_key == "."`.
+/// No-op remap when `importer_key == "."`. `rewrite` writes even when the
+/// resolved graph matches the file on disk (`--fix-lockfile`).
 pub(super) fn write_lockfile_dir_remapped(
     lockfile_dir: &std::path::Path,
     importer_key: &str,
     graph: &aube_lockfile::LockfileGraph,
     manifest: &aube_manifest::PackageJson,
     kind: aube_lockfile::LockfileKind,
+    rewrite: bool,
 ) -> Result<std::path::PathBuf, aube_lockfile::Error> {
+    let write = if rewrite {
+        aube_lockfile::rewrite_lockfile_as
+    } else {
+        aube_lockfile::write_lockfile_as
+    };
     if importer_key == "." {
-        return aube_lockfile::write_lockfile_as(lockfile_dir, graph, manifest, kind);
+        return write(lockfile_dir, graph, manifest, kind);
     }
     let mut remapped = graph.clone();
     let deps = remapped.importers.remove(".").ok_or_else(|| {
@@ -114,7 +121,7 @@ pub(super) fn write_lockfile_dir_remapped(
         )
     })?;
     remapped.importers.insert(importer_key.to_string(), deps);
-    aube_lockfile::write_lockfile_as(lockfile_dir, &remapped, manifest, kind)
+    write(lockfile_dir, &remapped, manifest, kind)
 }
 
 #[cfg(test)]
