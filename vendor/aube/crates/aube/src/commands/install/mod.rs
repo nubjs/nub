@@ -1870,7 +1870,8 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     ignore_scripts: opts.ignore_scripts,
                 },
                 read_package_hook,
-            );
+            )
+            .with_keep_importer_pins(matches!(mode, FrozenMode::Fix));
 
             // Spawn the tarball fetch coordinator — it starts fetching as
             // packages arrive from the resolver, overlapping network I/O.

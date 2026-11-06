@@ -302,7 +302,8 @@ pub(super) async fn run_lockfile_only(input: LockfileOnlyInput<'_>) -> miette::R
             ignore_scripts,
         },
         read_package_hook,
-    );
+    )
+    .with_keep_importer_pins(matches!(mode, FrozenMode::Fix));
     let mut graph = if has_workspace {
         resolver
             .resolve_workspace(manifests, existing_for_resolver, ws_package_versions)

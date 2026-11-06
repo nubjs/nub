@@ -778,6 +778,103 @@ fn fix_lockfile_rewrites_an_up_to_date_lockfile_and_keeps_its_pins() {
     }
 }
 
+/// `--fix-lockfile` keeps the version each importer is locked to even when an
+/// earlier version of the same name, nested under another package, also
+/// satisfies the importer's range.
+#[test]
+fn fix_lockfile_keeps_a_root_pin_over_a_nested_copy() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY unset");
+        return;
+    }
+    let manifest = |range: &str| {
+        format!(
+            r#"{{"name":"fixpin","version":"1.0.0","packageManager":"npm@10.8.2","dependencies":{{"is-number":"{range}","is-odd":"0.1.2"}}}}"#
+        )
+    };
+    let dir = pm_tmpdir("fixpin");
+    std::fs::write(dir.join("package.json"), manifest("7.0.0")).unwrap();
+    let (_, stderr, code) = run_install(&dir, &["install", "--lockfile-only"]);
+    assert_eq!(code, 0, "generating the lockfile failed: {stderr}");
+
+    let lockfile = dir.join("package-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
+    lock["packages"][""]["dependencies"]["is-number"] = ">=3.0.0".into();
+    assert_eq!(
+        lock["packages"]["node_modules/is-odd/node_modules/is-number"]["version"], "3.0.0",
+        "the fixture needs the nested copy: {lock}"
+    );
+    std::fs::write(&lockfile, serde_json::to_string_pretty(&lock).unwrap()).unwrap();
+    std::fs::write(dir.join("package.json"), manifest(">=3.0.0")).unwrap();
+
+    let (_, stderr, code) = run_install(&dir, &["install", "--fix-lockfile", "--lockfile-only"]);
+    assert_eq!(code, 0, "--fix-lockfile failed: {stderr}");
+    let fixed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
+    assert_eq!(
+        fixed["packages"]["node_modules/is-number"]["version"], "7.0.0",
+        "the root pin moved: {}",
+        fixed["packages"]
+    );
+}
+
+/// A package-lock.json missing a required child's entry gets the child back from
+/// `--fix-lockfile`, in the lockfile and on disk, with the parent's edge intact.
+#[test]
+fn fix_lockfile_restores_a_missing_required_entry() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY unset");
+        return;
+    }
+    let dir = pm_tmpdir("fixmissing");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"fixmissing","version":"1.0.0","packageManager":"npm@10.8.2","dependencies":{"is-odd":"0.1.2"}}"#,
+    )
+    .unwrap();
+    let (_, stderr, code) = run_install(&dir, &["install", "--lockfile-only"]);
+    assert_eq!(code, 0, "generating the lockfile failed: {stderr}");
+
+    let lockfile = dir.join("package-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
+    lock["packages"]
+        .as_object_mut()
+        .unwrap()
+        .remove("node_modules/is-number")
+        .expect("is-number is in the lockfile");
+    let broken = serde_json::to_string_pretty(&lock).unwrap();
+
+    for (args, links) in [
+        (&["install", "--fix-lockfile", "--lockfile-only"][..], false),
+        (&["install", "--fix-lockfile"][..], true),
+    ] {
+        std::fs::write(&lockfile, &broken).unwrap();
+        let (_, stderr, code) = run_install(&dir, args);
+        assert_eq!(code, 0, "{args:?} failed: {stderr}");
+        let fixed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
+        let packages = &fixed["packages"];
+        assert_eq!(
+            packages["node_modules/is-number"]["version"], "3.0.0",
+            "{args:?} did not restore the child: {packages}"
+        );
+        assert_eq!(
+            packages["node_modules/is-odd"]["dependencies"]["is-number"], "^3.0.0",
+            "{args:?} lost the parent's edge: {packages}"
+        );
+        if links {
+            let parent = std::fs::canonicalize(dir.join("node_modules/is-odd")).unwrap();
+            assert!(
+                parent.with_file_name("is-number/package.json").exists(),
+                "{args:?} did not link the child beside {}",
+                parent.display()
+            );
+        }
+    }
+}
+
 #[test]
 fn frozen_yarn_berry_installs_reject_a_drifted_workspace_member() {
     let fixture = |tag: &str| {
