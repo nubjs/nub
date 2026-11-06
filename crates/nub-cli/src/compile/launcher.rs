@@ -370,11 +370,9 @@ fn cache_path(cache_root: &Path, target: &TargetPlatform) -> PathBuf {
 
 /// The immutable release tag carrying this binary's launchers.
 ///
-/// Every build, including a canary, pins the template to its exact package
-/// version. The release workflow publishes a matching immutable prerelease for
-/// each canary before updating the rolling `canary` release used by installers.
-/// A launcher and payload writer are a format-coupled pair, so a mutable tag
-/// would allow a later canary launcher to be injected into an earlier build.
+/// Every build pins the template to its exact package version. A launcher and
+/// payload writer are a format-coupled pair, so a mutable tag would allow a
+/// later launcher to be injected into an earlier build.
 fn release_tag() -> String {
     format!("v{}", env!("CARGO_PKG_VERSION"))
 }
@@ -568,9 +566,8 @@ mod tests {
     }
 
     /// The fetch resolves against the immutable release that published THIS
-    /// binary — including a canary's exact `v<version>` prerelease, never a
-    /// rolling channel tag or "latest", because the launcher and payload writer
-    /// share a container format.
+    /// binary, never a rolling channel tag or "latest", because the launcher and
+    /// payload writer share a container format.
     #[test]
     fn the_asset_url_pins_this_release() {
         let target = TargetPlatform::parse("win32-arm64").unwrap();

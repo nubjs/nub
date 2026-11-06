@@ -222,9 +222,8 @@ clean:
 # Portable (node-based, no macOS-only sed). preload.mjs NUB_VERSION must stay in
 # lockstep with the binary version — it is the transpile-cache key, so a stale
 # value would serve stale cached output after an upgrade. The file-stamping body
-# lives in scripts/set-version.mjs so release.yml's canary stamp (which can't
-# rely on `make` on the Windows runners) shares it; this target adds the
-# Cargo.lock refresh a committed bump wants.
+# lives in scripts/set-version.mjs; this target adds the Cargo.lock refresh a
+# committed bump wants.
 version:
 	@test -n "$(V)" || (echo "Usage: make version V=0.0.3" && exit 1)
 	@echo "Setting version to $(V) across all packages, Cargo.toml, and preload.mjs..."

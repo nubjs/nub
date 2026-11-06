@@ -101,8 +101,8 @@ runs:
       run: |
         set -euo pipefail
         spec="${NUB_VERSION#v}"
-        if [ "$spec" = latest ] || [ "$spec" = canary ]; then
-          # The installer resolves these itself (releases/latest, or the rolling canary tag).
+        if [ "$spec" = latest ]; then
+          # The installer resolves this itself (releases/latest).
           resolved="$spec"
         elif [[ "$spec" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
           resolved="$spec"
@@ -150,8 +150,8 @@ runs:
         set -euo pipefail
         root="${RUNNER_TOOL_CACHE:-$RUNNER_TEMP}/nub/${VERSION}/${RUNNER_ARCH}"
         # An exact version already in the tool cache (a persistent self-hosted
-        # runner) is reused as-is; latest/canary always re-resolve.
-        if [ -x "$root/bin/nub" ] && [ "$VERSION" != latest ] && [ "$VERSION" != canary ]; then
+        # runner) is reused as-is; latest always re-resolves.
+        if [ -x "$root/bin/nub" ] && [ "$VERSION" != latest ]; then
           echo "nub ${VERSION} found in the tool cache at ${root}"
         else
           rm -rf "$root" && mkdir -p "$root"
@@ -186,7 +186,7 @@ runs:
         $root = Join-Path $cacheRoot "nub\$env:VERSION\$env:RUNNER_ARCH"
         $exe = Join-Path $root "bin\nub.exe"
         $ok = $false
-        if ((Test-Path $exe) -and $env:VERSION -ne "latest" -and $env:VERSION -ne "canary") {
+        if ((Test-Path $exe) -and $env:VERSION -ne "latest") {
           Write-Host "nub $env:VERSION found in the tool cache at $root"
           $ok = $true
         } else {

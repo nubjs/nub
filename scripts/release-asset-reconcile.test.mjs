@@ -1,6 +1,5 @@
-// Runs the two "Reconcile immutable … assets" steps of release.yml, exactly as written,
-// against a fake `gh`. They are the last gate before a release or a nightly canary goes
-// out, so a transient GitHub 5xx must not fail them, and retrying must not let a real
+// Runs the "Reconcile immutable stable assets" step of release.yml, exactly as written,
+// against a fake `gh`. It is the last gate before a release goes out, so a transient GitHub 5xx must not fail them, and retrying must not let a real
 // outage or a byte mismatch through.
 //
 // Run: node --test scripts/release-asset-reconcile.test.mjs
@@ -11,9 +10,9 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
-const STEPS = ["Reconcile immutable stable assets", "Reconcile immutable canary assets"];
+const STEP = "Reconcile immutable stable assets";
 
-// The steps use `mapfile`, which macOS's bash 3.2 lacks. CI's script tests run on Linux.
+// The step uses `mapfile`, which macOS's bash 3.2 lacks. CI's script tests run on Linux.
 const bashMajor = Number(spawnSync("bash", ["-c", "echo ${BASH_VERSINFO[0]}"], { encoding: "utf8" }).stdout);
 const skip = bashMajor >= 4 ? false : `needs bash 4 or later, found ${bashMajor || "none"}`;
 
@@ -95,24 +94,22 @@ function runStep(name, { fail = [], tamper } = {}) {
   }
 }
 
-for (const name of STEPS) {
-  test(`${name}: passes through a transient 5xx on a listing and on a download`, { skip }, () => {
-    const r = runStep(name, { fail: ["view", "download"] });
-    assert.equal(r.status, 0, `the step should recover:\n${r.stdout}\n${r.stderr}`);
-    assert.match(r.stderr, /failed on attempt 1 of 4/, "the fault should have been injected and retried");
-    assert.match(r.stdout, /✓ all 32 /);
-  });
+test("passes through a transient 5xx on a listing and on a download", { skip }, () => {
+  const r = runStep(STEP, { fail: ["view", "download"] });
+  assert.equal(r.status, 0, `the step should recover:\n${r.stdout}\n${r.stderr}`);
+  assert.match(r.stderr, /failed on attempt 1 of 4/, "the fault should have been injected and retried");
+  assert.match(r.stdout, /✓ all 32 /);
+});
 
-  test(`${name}: fails when downloads never recover`, { skip }, () => {
-    const r = runStep(name, { fail: ["download-always"] });
-    assert.notEqual(r.status, 0, `the step should fail:\n${r.stdout}`);
-    assert.match(r.stderr, /failed on attempt 4 of 4/);
-    assert.doesNotMatch(r.stdout, /✓ all 32 /);
-  });
+test("fails when downloads never recover", { skip }, () => {
+  const r = runStep(STEP, { fail: ["download-always"] });
+  assert.notEqual(r.status, 0, `the step should fail:\n${r.stdout}`);
+  assert.match(r.stderr, /failed on attempt 4 of 4/);
+  assert.doesNotMatch(r.stdout, /✓ all 32 /);
+});
 
-  test(`${name}: fails on an asset whose bytes differ`, { skip }, () => {
-    const r = runStep(name, { tamper: "nub-linux-x64.tar.gz" });
-    assert.notEqual(r.status, 0, `the step should fail:\n${r.stdout}`);
-    assert.match(r.stdout, /::error::.*nub-linux-x64\.tar\.gz differs/);
-  });
-}
+test("fails on an asset whose bytes differ", { skip }, () => {
+  const r = runStep(STEP, { tamper: "nub-linux-x64.tar.gz" });
+  assert.notEqual(r.status, 0, `the step should fail:\n${r.stdout}`);
+  assert.match(r.stdout, /::error::.*nub-linux-x64\.tar\.gz differs/);
+});
