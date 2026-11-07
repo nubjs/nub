@@ -42,7 +42,8 @@ use rolldown::plugin::{
 };
 use rolldown::{BundlerBuilder, BundlerOptions, InputItem};
 use rolldown_common::{
-    IsExternal, ModuleType, Output, OutputFormat, Platform, RawMinifyOptions, ResolveOptions,
+    AttachDebugInfo, ExperimentalOptions, IsExternal, ModuleType, Output, OutputFormat, Platform,
+    RawMinifyOptions, ResolveOptions,
 };
 use rolldown_error::{BuildDiagnostic, DiagnosticOptions, EventKind};
 
@@ -306,6 +307,13 @@ fn build(
         ),
         minify: Some(RawMinifyOptions::Bool(minify)),
         keep_names: Some(keep_names),
+        // Unminified, each module would be headed by a `//#region` comment naming it
+        // relative to this process, through the store on this machine. Nothing reads
+        // them in a chunk that ships third-party code.
+        experimental: Some(ExperimentalOptions {
+            attach_debug_info: Some(AttachDebugInfo::None),
+            ..Default::default()
+        }),
         external: Some(IsExternal::Fn(Some(Arc::new(
             move |specifier: &str, importer: Option<&str>, _resolved: bool| {
                 // Never an entry's own specifier: its chunk is written into a stub
@@ -668,6 +676,38 @@ mod tests {
                 })
                 .collect(),
         )
+    }
+
+    /// Rolldown would head each module with its path from this process, which runs
+    /// through the store on the building machine.
+    #[test]
+    fn an_unminified_chunk_names_no_module_by_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tree = dir.path().join("store/x@1.0.0-aaa/node_modules");
+        std::fs::create_dir_all(tree.join("x")).unwrap();
+        std::fs::write(
+            tree.join("x/package.json"),
+            r#"{ "name": "x", "version": "1.0.0", "main": "index.js" }"#,
+        )
+        .unwrap();
+        std::fs::write(tree.join("x/index.js"), "module.exports = \"from x\";\n").unwrap();
+        let plan = Plan {
+            entries: vec![Entry {
+                importer: tree.join("y/importer.js"),
+                specifier: "x".to_string(),
+                chunk: "node_modules/x/__nub/0.js".to_string(),
+                esm: false,
+            }],
+            ..Default::default()
+        };
+        let bundled = bundle(&plan, None, false, false).expect("bundle the closure");
+        let chunks: String = bundled
+            .files
+            .iter()
+            .map(|file| String::from_utf8_lossy(&file.bytes).into_owned())
+            .collect();
+        assert!(chunks.contains("from x"), "the chunk is missing: {chunks}");
+        assert!(!chunks.contains("#region"), "{chunks}");
     }
 
     /// The shapes pdfkit really uses, plus the ones that must not add to the set.

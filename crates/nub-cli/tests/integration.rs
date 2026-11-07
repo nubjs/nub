@@ -800,11 +800,16 @@ fn compiled_map_sources(map: &serde_json::Value) -> (Vec<String>, Vec<String>) {
 /// header from the throw site, so every such program printed the loader's
 /// `throw error;` as the location of its own bug.
 ///
-/// The map half is checked twice. A host-targeted build maps the runtime's own
-/// files. A 22.20 target, which lacks Temporal, URLPattern and Float16Array, also
-/// bundles the runtime's vendored polyfill packages, and a development build
-/// resolves those from the checkout rather than from the runtime directory. The
-/// fixture's own `jsbi` shares a name with one of them and must keep its own.
+/// Unminified, a region comment heads each module, and the blob stores the chunk raw,
+/// so those names are read out of the executable without launching it. The names for
+/// a target old enough to bundle the runtime's vendored polyfills are checked at the
+/// bundler, since this is the one half that needs a Node download.
+///
+/// The fixture's own `jsbi` shares a name with a package the runtime vendors and must
+/// keep its own. It also reaches packages laid out like a global store's, outside the
+/// project, two of them versions of one package. They are imported by path so the case
+/// needs no symlink, which a Windows runner may refuse, and resolves to the same module
+/// id a store's link would.
 #[cfg(feature = "compile")]
 #[test]
 fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
@@ -836,17 +841,98 @@ fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
          throw new Error(\"no such order\");\n  }\n  return id;\n}\n",
     )
     .expect("write the module");
+    let store = unique_test_cache();
+    let store_name = store
+        .file_name()
+        .expect("the store has a name")
+        .to_string_lossy()
+        .into_owned();
+    let store_package = |dir: &str, package: &str, version: &str, file: &str, tag: &str| {
+        let root = store
+            .join("v1")
+            .join(dir)
+            .join("node_modules")
+            .join(package);
+        let module = root.join(file);
+        std::fs::create_dir_all(module.parent().unwrap()).expect("create the store package");
+        std::fs::write(
+            root.join("package.json"),
+            format!(
+                "{{ \"name\": \"{package}\", \"version\": \"{version}\", \"type\": \"module\" }}\n"
+            ),
+        )
+        .expect("write the store package's manifest");
+        std::fs::write(&module, format!("export const tag = \"{tag}\";\n"))
+            .expect("write the store package");
+        format!("../{store_name}/v1/{dir}/node_modules/{package}/{file}")
+    };
+    let dup_one = store_package("dup@1.0.0-aaaa", "dup", "1.0.0", "index.mjs", "dup one");
+    let dup_two = store_package("dup@2.0.0-bbbb", "dup", "2.0.0", "index.mjs", "dup two");
+    let solo = store_package(
+        "@scope+solo@3.0.0-cccc",
+        "@scope/solo",
+        "3.0.0",
+        "lib/index.mjs",
+        "solo",
+    );
     std::fs::write(
         work.join("app.ts"),
-        "import { tag } from \"jsbi\";\nimport { loadOrder } from \"./src/order.ts\";\n\n\
-         console.log(tag);\nconsole.log(loadOrder(\"zz\"));\n",
+        format!(
+            "import {{ tag }} from \"jsbi\";\nimport {{ loadOrder }} from \"./src/order.ts\";\n\
+             import {{ tag as one }} from \"{dup_one}\";\n\
+             import {{ tag as two }} from \"{dup_two}\";\n\
+             import {{ tag as solo }} from \"{solo}\";\n\n\
+             console.log(tag);\nconsole.log(one, two, solo);\nconsole.log(loadOrder(\"zz\"));\n"
+        ),
     )
     .expect("write the entry");
     let app_sources = [
         "../app.ts",
         "../node_modules/jsbi/index.mjs",
         "../src/order.ts",
+        "node_modules/@scope/solo/lib/index.mjs",
+        "node_modules/dup@1.0.0/index.mjs",
+        "node_modules/dup@2.0.0/index.mjs",
     ];
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut machine_paths = vec![work.clone(), cache.clone(), store.clone(), checkout];
+    machine_paths.extend(std::env::var_os("HOME").map(PathBuf::from));
+    let assert_no_machine_path = |what: &str, text: &str| {
+        for path in &machine_paths {
+            for spelling in [
+                path.clone(),
+                std::fs::canonicalize(path).unwrap_or(path.clone()),
+            ] {
+                let spelling = spelling.to_string_lossy().into_owned();
+                assert!(
+                    !text.contains(&spelling),
+                    "{what} names {spelling}, a path on the building machine"
+                );
+            }
+        }
+    };
+    // Node finds a mapped source's text by the first `sources` entry with its name, so
+    // two versions sharing one would print each other's lines in a stack trace.
+    let assert_each_version_keeps_its_text = |map: &serde_json::Value| {
+        let sources = compiled_json_string_array(&map["sources"]);
+        let contents = map["sourcesContent"]
+            .as_array()
+            .expect("the map embeds its sources");
+        for (name, tag) in [
+            ("node_modules/dup@1.0.0/index.mjs", "dup one"),
+            ("node_modules/dup@2.0.0/index.mjs", "dup two"),
+        ] {
+            let at = sources
+                .iter()
+                .position(|source| source == name)
+                .unwrap_or_else(|| panic!("the map has no {name}: {sources:?}"));
+            let text = contents[at].as_str().unwrap_or_default();
+            assert!(
+                text.contains(tag),
+                "{name} should carry its own text, not {text:?}"
+            );
+        }
+    };
     let compile = |args: &[&str], out: &Path| {
         let compiled = Command::new(nub_binary())
             .arg("compile")
@@ -871,101 +957,13 @@ fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
         )
     };
 
-    // Ahead of the single-executable half, so it runs on every host. `--smol`
-    // embeds no Node, so the old target costs no download, and `external` writes
-    // the map beside the artifact under the entry chunk's name.
-    let floor = work.join(format!("orders-floor{}", std::env::consts::EXE_SUFFIX));
-    compile(
-        &[
-            "--smol",
-            "--target",
-            "22.20.0",
-            "--sourcemap=external",
-            "--no-minify",
-        ],
-        &floor,
-    );
-    let floor_map: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(work.join("app.mjs.map")).expect("the external map is beside the artifact"),
-    )
-    .expect("the external map is JSON");
-    let (runtime_sources, others) = compiled_map_sources(&floor_map);
-    assert_eq!(
-        others, app_sources,
-        "every source outside the application must be named under `runtime/`, never by \
-         where the building machine keeps the runtime or its packages: {runtime_sources:?}"
-    );
-    for package in ["@js-temporal/polyfill", "jsbi"] {
-        let prefix = format!("runtime/node_modules/{package}/");
-        assert!(
-            runtime_sources
-                .iter()
-                .any(|source| source.starts_with(&prefix)),
-            "a 22.20 target bundles the runtime's {package}, which should be named under \
-             {prefix}: {runtime_sources:?}"
-        );
-    }
-
-    // Unminified, every module is headed by a `//#region <name>` comment, and those
-    // names ship. A map makes this shape extract on first run, so the chunk Node
-    // actually loads is on disk to read.
-    let extracted = work.join("artifact-cache");
-    let mut command = Command::new(&floor);
-    command
-        .current_dir(&work)
-        .env("__NUB_COMPILE_CACHE_DIR", &extracted);
-    run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(20));
-    let mut pending = vec![extracted.clone()];
-    let mut chunk = None;
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("read the extraction cache") {
-            let path = entry.expect("read an extraction entry").path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path.file_name().is_some_and(|name| name == "app.mjs") {
-                chunk = Some(path);
-            }
-        }
-    }
-    let chunk = chunk.expect("the artifact extracted its entry chunk");
-    let text = std::fs::read_to_string(&chunk).expect("read the extracted chunk");
-    let regions: Vec<&str> = text
-        .lines()
-        .filter_map(|line| line.trim_start().strip_prefix("//#region "))
-        .collect();
-    let stray: Vec<&&str> = regions
-        .iter()
-        .filter(|id| {
-            !(id.starts_with("runtime/") || id.starts_with("\\0"))
-                && (id.starts_with("..") || Path::new(id).is_absolute())
-        })
-        .collect();
-    assert!(
-        stray.is_empty(),
-        "a region names a module outside the project by its place on this machine: {stray:?}"
-    );
-    for prefix in ["runtime/", "runtime/node_modules/@js-temporal/polyfill/"] {
-        assert!(
-            regions.iter().any(|id| id.starts_with(prefix)),
-            "an unminified chunk should head the runtime's modules with `//#region {prefix}…`: \
-             {regions:?}"
-        );
-    }
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut machine_paths = vec![work.clone(), cache.clone(), checkout];
-    machine_paths.extend(std::env::var_os("HOME").map(PathBuf::from));
-    for path in machine_paths {
-        for spelling in [path.clone(), std::fs::canonicalize(&path).unwrap_or(path)] {
-            let spelling = spelling.to_string_lossy().into_owned();
-            assert!(
-                !text.contains(&spelling),
-                "the bundled chunk names {spelling}, a path on the building machine"
-            );
-        }
-    }
-
     let summary = compile(
-        &["--sourcemap", "--target", &runtime.node_target],
+        &[
+            "--sourcemap",
+            "--no-minify",
+            "--target",
+            &runtime.node_target,
+        ],
         &artifact,
     );
     if !summary.contains("a single-executable application") {
@@ -986,8 +984,8 @@ fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
         "an uncaught error must exit 1\nstderr: {stderr}"
     );
     assert_eq!(
-        stdout, "own jsbi\n",
-        "the application's own jsbi must be the one it imports"
+        stdout, "own jsbi\ndup one dup two solo\n",
+        "the application's own jsbi must be the one it imports, and each store package its own"
     );
     let mut lines = stderr.lines().skip_while(|line| line.trim().is_empty());
     let header = lines.next().unwrap_or_default();
@@ -1001,6 +999,27 @@ fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
 
     // The inline map rides inside the chunk, so it is read out of the executable.
     let bytes = std::fs::read(&artifact).expect("read the artifact");
+    let text = String::from_utf8_lossy(&bytes);
+    let regions: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("//#region "))
+        .collect();
+    for name in [
+        "runtime/compile-record.mjs",
+        "node_modules/dup@1.0.0/index.mjs",
+        "node_modules/dup@2.0.0/index.mjs",
+        "node_modules/@scope/solo/lib/index.mjs",
+    ] {
+        assert!(
+            regions.contains(&name),
+            "the chunk should head that module with `//#region {name}`: {regions:?}"
+        );
+    }
+    assert_no_machine_path("the executable", &text);
+    assert!(
+        !regions.iter().any(|id| id.contains(&store_name)),
+        "a region reaches the store by a relative path: {regions:?}"
+    );
     let marker = b"sourceMappingURL=data:application/json;charset=utf-8;base64,";
     let start = bytes
         .windows(marker.len())
@@ -1022,9 +1041,11 @@ fn a_single_executable_reports_an_uncaught_error_where_it_was_thrown() {
     let (runtime_sources, others) = compiled_map_sources(&map);
     assert_eq!(
         others, app_sources,
-        "every source outside the application must be named under `runtime/`, never by \
-         where the building machine keeps the runtime: {runtime_sources:?}"
+        "every source outside the application must be named under `runtime/` or by its \
+         package, never by where the building machine keeps it: {runtime_sources:?}"
     );
+    assert_no_machine_path("the inline source map", &map.to_string());
+    assert_each_version_keeps_its_text(&map);
     assert!(
         !runtime_sources.is_empty(),
         "the prelude's runtime modules should still be mapped: {others:?}"

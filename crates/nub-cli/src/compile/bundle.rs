@@ -34,12 +34,12 @@
 //! successfully" mean the output is at least loadable.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, HashMap, btree_map::Entry};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result, anyhow, bail};
 use oxc_ast::ast::{BinaryExpression, BinaryOperator, Expression, NewExpression, Program};
@@ -433,14 +433,20 @@ fn bundle_inner(
         Arc::clone(&collected),
     ));
     let mut prelude = CompilePreamble::new(entry_abs, opts.target_node, opts.eager_startup)?;
-    let runtime_names = Arc::new(RuntimeNames::new(&prelude.runtime_dir));
-    if !opts.minify {
-        prelude.region_names = Some((cwd.clone(), Arc::clone(&runtime_names)));
+    if options.sourcemap.is_some() || !opts.minify {
+        let names = Arc::new(ModuleNames::new(
+            &prelude.runtime_dir,
+            &canonicalize_for_bundler(launch_root.unwrap_or(&cwd)),
+        ));
+        if options.sourcemap.is_some() {
+            options.sourcemap_path_transform = Some(source_map_names(Arc::clone(&names)));
+        }
+        if !opts.minify {
+            prelude.region_cwd = Some(cwd.clone());
+        }
+        prelude.module_names = Some(names);
     }
     let prelude = Arc::new(prelude);
-    if options.sourcemap.is_some() {
-        options.sourcemap_path_transform = Some(runtime_source_names(runtime_names));
-    }
     let new_urls = Arc::new(NewUrlAssets {
         collected: Arc::clone(&collected),
         files: Arc::clone(&files_plugin),
@@ -2178,10 +2184,11 @@ struct CompilePreamble {
     /// prelude is bundled; otherwise the emitted chunk resolves them from the
     /// extraction directory and fails before application code runs.
     support_files: Vec<(String, Vec<u8>)>,
-    /// The bundler's `cwd` and the runtime's output names, for
-    /// [`rename_runtime_regions`]. Unset when minifying, which strips those comments,
-    /// and where nothing renders a chunk.
-    region_names: Option<(PathBuf, Arc<RuntimeNames>)>,
+    /// What emitted output calls each module. Unset when nothing emits a name.
+    module_names: Option<Arc<ModuleNames>>,
+    /// The bundler's `cwd`, for [`rename_regions`]. Unset when minifying, which strips
+    /// those comments.
+    region_cwd: Option<PathBuf>,
     /// Runtime bootstrap extracted at the payload root rather than beside the
     /// content-addressed bundle layout. The launcher loads it before the entry.
     root_support_files: Vec<(String, Vec<u8>)>,
@@ -2444,7 +2451,8 @@ impl CompilePreamble {
                 COMPILE_PREAMBLE_ID.to_string()
             ]))),
             support_files: Vec::new(),
-            region_names: None,
+            module_names: None,
+            region_cwd: None,
             root_support_files: Vec::new(),
             app_uses_child_process: AtomicBool::new(false),
             app_uses_worker: AtomicBool::new(false),
@@ -2707,19 +2715,26 @@ impl Plugin for CompilePreamble {
             | HookUsage::RenderChunk
     }
 
-    /// See [`hoist_module_wrappers`] and [`rename_runtime_regions`]. No source map
-    /// is returned: the first rewrite is confined to the wrapper's own declaration
-    /// head and tail and the second to comment text, so every line of module code
-    /// keeps its position and the incoming map stays accurate.
+    /// See [`hoist_module_wrappers`] and [`rename_regions`]. No source map is returned:
+    /// the first rewrite is confined to the wrapper's own declaration head and tail and
+    /// the second to comment text, so every line of module code keeps its position and
+    /// the incoming map stays accurate.
     fn render_chunk(
         &self,
-        _ctx: &PluginContext,
+        ctx: &PluginContext,
         args: &HookRenderChunkArgs<'_>,
     ) -> impl Future<Output = HookRenderChunkReturn> + Send {
+        if let Some(names) = &self.module_names {
+            names.note_modules(|| ctx.get_module_ids());
+        }
         let rewritten = hoist_module_wrappers(&args.code).map(|hoisted| {
-            let renamed = self.region_names.as_ref().and_then(|(cwd, names)| {
-                rename_runtime_regions(hoisted.as_deref().unwrap_or(&args.code), cwd, names)
-            });
+            let renamed = self
+                .module_names
+                .as_ref()
+                .zip(self.region_cwd.as_ref())
+                .and_then(|(names, cwd)| {
+                    rename_regions(hoisted.as_deref().unwrap_or(&args.code), cwd, names)
+                });
             renamed.or(hoisted)
         });
         async move {
@@ -4761,29 +4776,43 @@ fn effective_jsx_setting(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> 
     tsconfig.compiler_options.jsx.clone()
 }
 
-/// What nub's own runtime modules are called in emitted output: their place in the
-/// runtime, never where the building machine keeps it.
+/// What modules are called in emitted output when Rolldown's own spelling would carry
+/// the building machine's layout: their path relative to the output or the project,
+/// which reached every artifact through its source map and, unminified, its
+/// `//#region` comments. Every other module keeps Rolldown's spelling.
 ///
-/// The prelude is bundled from the runtime extraction cache, so Rolldown names
-/// each of its files by its path relative to the output or the project —
-/// `../../.cache/nub/runtime-0.9.7-…/compile-record.mjs`, or a temporary
-/// `XDG_CACHE_HOME` — and that reached every artifact through its source map and,
-/// unminified, its `//#region` comments. `runtime/<file>` names it instead, which
-/// a single executable's map resolves to `/N:/$nub/runtime/compile-record.mjs`.
+/// Nub's runtime is bundled from its extraction cache (`../../.cache/nub/runtime-0.9.7-…/
+/// compile-record.mjs`, or a temporary `XDG_CACHE_HOME`) and is named `runtime/<file>`
+/// instead, which a single executable's map resolves to
+/// `/N:/$nub/runtime/compile-record.mjs`. Its vendored packages (a Temporal polyfill on
+/// a target without one) sit in its own `node_modules/` once extracted, but a
+/// development build resolves them from the checkout, outside the runtime directory.
+/// Each is resolved from the runtime as Node would and named
+/// `runtime/node_modules/<pkg>/…` wherever it lives. An application's own copy of one
+/// of those packages is not one of them.
 ///
-/// The runtime's vendored packages (a Temporal polyfill on a target without one)
-/// sit in its own `node_modules/` once extracted, but a development build resolves
-/// them from the checkout, outside the runtime directory. Each is resolved from the
-/// runtime as Node would and named `runtime/node_modules/<pkg>/…` wherever it
-/// lives. Every other module, including an application's own copy of one of those
-/// packages, keeps Rolldown's spelling.
+/// A package in a global store is named `node_modules/<pkg>/<file>`, as
+/// [`store_relative`] defines it. Two copies in one build would then share a name, and
+/// Node finds a mapped source's text by the first `sources` entry with that name, so a
+/// stack frame in one would print the other's line. So versions tell copies apart,
+/// `node_modules/<pkg>@<version>/<file>`, and two git or tarball copies of one version
+/// add a short id from their store directory's name:
+/// `node_modules/<pkg>@<version>_<id>/<file>`. No version can hold a `_`, so that
+/// name never matches another copy's version. The directory name hashes the package's
+/// identity and dependencies, not where the store or the project is, so a build stays
+/// byte-identical across locations.
 #[derive(Debug)]
-struct RuntimeNames {
+struct ModuleNames {
     roots: Vec<(PathBuf, String)>,
+    launch_root: PathBuf,
+    /// What each copy of a package with more than one store directory is called, by
+    /// package and directory. Known once a chunk renders, which comes before any map is
+    /// written.
+    copies: OnceLock<HashMap<(String, PathBuf), String>>,
 }
 
-impl RuntimeNames {
-    fn new(runtime_dir: &Path) -> Self {
+impl ModuleNames {
+    fn new(runtime_dir: &Path, launch_root: &Path) -> Self {
         let mut roots: Vec<(PathBuf, String)> = Vec::new();
         let mut add = |dir: &Path, name: String| {
             for spelling in [dir.to_path_buf(), canonicalize_for_bundler(dir)] {
@@ -4805,7 +4834,11 @@ impl RuntimeNames {
                 add(&dir, format!("runtime/node_modules/{package}"));
             }
         }
-        Self { roots }
+        Self {
+            roots,
+            launch_root: launch_root.to_path_buf(),
+            copies: OnceLock::new(),
+        }
     }
 
     /// `relative` is resolved lexically against `base`, the way both Node (for a
@@ -4821,15 +4854,121 @@ impl RuntimeNames {
                 other => absolute.push(other),
             }
         }
+        self.runtime_name(&absolute)
+            .or_else(|| self.store_name(&absolute))
+    }
+
+    fn runtime_name(&self, path: &Path) -> Option<String> {
         self.roots.iter().find_map(|(root, name)| {
-            let rel = absolute.strip_prefix(root).ok()?;
+            let rel = path.strip_prefix(root).ok()?;
             Some(format!("{name}/{}", slash_path(rel)))
         })
     }
+
+    fn store_name(&self, path: &Path) -> Option<String> {
+        let name = store_relative(path, &self.launch_root)?;
+        let renamed = store_package(&name).and_then(|(package, file)| {
+            let tree = native::install_tree_root(path)?;
+            let copy = self.copies.get()?.get(&(package.to_string(), tree))?;
+            Some(format!("{copy}/{file}"))
+        });
+        Some(renamed.unwrap_or(name))
+    }
+
+    /// Runs once, over the whole module graph, so a name does not depend on which chunk
+    /// happens to be written first.
+    fn note_modules<Ids>(&self, ids: impl FnOnce() -> Ids)
+    where
+        Ids: IntoIterator,
+        Ids::Item: AsRef<str>,
+    {
+        self.copies.get_or_init(|| {
+            let mut directories: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
+            for id in ids() {
+                let path = Path::new(id.as_ref());
+                if self.runtime_name(path).is_some() {
+                    continue;
+                }
+                let inner = store_relative(path, &self.launch_root);
+                let package = inner.as_deref().and_then(store_package);
+                if let (Some((package, _)), Some(tree)) = (package, native::install_tree_root(path))
+                {
+                    directories
+                        .entry(package.to_string())
+                        .or_default()
+                        .insert(tree);
+                }
+            }
+            let mut copies = HashMap::new();
+            for (package, trees) in directories {
+                if trees.len() > 1 {
+                    name_store_copies(&package, trees, &mut copies);
+                }
+            }
+            copies
+        });
+    }
+}
+
+fn name_store_copies(
+    package: &str,
+    trees: BTreeSet<PathBuf>,
+    copies: &mut HashMap<(String, PathBuf), String>,
+) {
+    let mut by_version: BTreeMap<Option<String>, Vec<PathBuf>> = BTreeMap::new();
+    for tree in trees {
+        let manifest = std::fs::read(tree.join(package).join("package.json")).ok();
+        let manifest: Option<serde_json::Value> =
+            manifest.and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        let version = manifest.and_then(|m| m["version"].as_str().map(str::to_owned));
+        by_version.entry(version).or_default().push(tree);
+    }
+    for (version, trees) in by_version {
+        let leaf = |tree: &PathBuf| {
+            tree.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let short = |tree: &PathBuf| {
+            let leaf = leaf(tree);
+            let id = leaf.rsplit('-').next().unwrap_or_default();
+            id.chars().take(8).collect::<String>()
+        };
+        // A store that names its directories otherwise may share that tail, and then
+        // only the whole name tells them apart.
+        let distinct = trees.iter().map(short).collect::<BTreeSet<_>>().len() == trees.len();
+        let shared = trees.len() > 1;
+        for tree in trees {
+            let mut name = package.to_string();
+            if let Some(version) = &version {
+                name = format!("{name}@{version}");
+            }
+            if shared {
+                let id = if distinct { short(&tree) } else { leaf(&tree) };
+                name = format!("{name}_{id}");
+            }
+            copies.insert((package.to_string(), tree), name);
+        }
+    }
+}
+
+/// Splits [`store_relative`]'s path into the package, `node_modules/<name>` with any
+/// scope, and the file inside it.
+fn store_package(inner: &str) -> Option<(&str, &str)> {
+    let start = inner.rfind("node_modules/")? + "node_modules/".len();
+    let name = &inner[start..];
+    let mut slashes = name.match_indices('/').map(|(at, _)| at);
+    let end = if name.starts_with('@') {
+        slashes.nth(1)
+    } else {
+        slashes.next()
+    }?;
+    Some((&inner[..start + end], &name[end + 1..]))
 }
 
 /// A map's `sources` arrive relative to the map's own directory.
-fn runtime_source_names(names: Arc<RuntimeNames>) -> SourceMapPathTransform {
+fn source_map_names(names: Arc<ModuleNames>) -> SourceMapPathTransform {
     SourceMapPathTransform::new(Arc::new(move |source: &str, map_path: &str| {
         let named = Path::new(map_path)
             .parent()
@@ -4844,7 +4983,7 @@ fn runtime_source_names(names: Arc<RuntimeNames>) -> SourceMapPathTransform {
 /// because a template literal can hold the same line as data. Only comment text
 /// changes, so no mapped line moves. An unparseable chunk is left for
 /// `reject_invalid_chunks`, as in [`hoist_module_wrappers`].
-fn rename_runtime_regions(code: &str, cwd: &Path, names: &RuntimeNames) -> Option<String> {
+fn rename_regions(code: &str, cwd: &Path, names: &ModuleNames) -> Option<String> {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
@@ -6366,20 +6505,316 @@ mod tests {
     /// A line that only looks like a region comment is the application's data.
     #[test]
     fn a_region_rename_leaves_a_template_holding_the_same_line_alone() {
-        let names = RuntimeNames {
-            roots: vec![(PathBuf::from("/build/runtime"), "runtime".to_string())],
-        };
+        let names = ModuleNames::new(Path::new("/build/runtime"), Path::new("/build/app"));
         let template =
             "export const raw = String.raw`\n//#region ../runtime/compile-record.mjs\n`;\n";
         let code = format!(
             "//#region ../runtime/compile-record.mjs\nvar a = 1;\n//#endregion\n{template}"
         );
-        let renamed = rename_runtime_regions(&code, Path::new("/build/app"), &names)
+        let renamed = rename_regions(&code, Path::new("/build/app"), &names)
             .expect("the real region comment should be renamed");
         assert_eq!(
             renamed,
             format!("//#region runtime/compile-record.mjs\nvar a = 1;\n//#endregion\n{template}")
         );
+    }
+
+    /// A store's layout is the building machine's, so it gives way to the package. What
+    /// a reader can find in the source tree keeps its path, and only a package with two
+    /// directories in the build needs its version to tell them apart.
+    #[test]
+    fn a_store_package_is_named_by_package_and_the_source_tree_keeps_its_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = canonicalize_for_bundler(dir.path());
+        let project = root.join("repo/packages/app");
+        let package = |tree: &str, name: &str, version: &str| {
+            let at = root.join(tree).join("node_modules").join(name);
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(
+                at.join("package.json"),
+                format!("{{ \"version\": \"{version}\" }}"),
+            )
+            .unwrap();
+        };
+        package("store/ms@2.0.0-aaa", "ms", "2.0.0");
+        package("store/ms@2.1.3-bbb", "ms", "2.1.3");
+        package("store/@s+solo@1.0.0-ccc", "@s/solo", "1.0.0");
+        package("store/git@1.0.0-aaaa1111ffff", "git", "1.0.0");
+        package("store/git@1.0.0-bbbb2222ffff", "git", "1.0.0");
+        package(
+            "store/git@1.0.0-aaaa1111-cccc3333ffff",
+            "git",
+            "1.0.0-aaaa1111",
+        );
+        package("cache/odd-one-copy.zip", "odd", "1.0.0");
+        package("cache/odd-two-copy.zip", "odd", "1.0.0");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(root.join("repo/packages/lib/node_modules")).unwrap();
+        std::fs::write(root.join("repo/packages/lib/package.json"), "{}").unwrap();
+
+        let names = ModuleNames::new(&root.join("no-runtime"), &project);
+        let id = |path: &str| root.join(path).to_string_lossy().into_owned();
+        let named = |path: &str| names.name(&project, &id(path));
+
+        // Before the graph is known, and with one copy in it, the name is the package's.
+        assert_eq!(
+            named("store/ms@2.0.0-aaa/node_modules/ms/index.js").as_deref(),
+            Some("node_modules/ms/index.js")
+        );
+        names.note_modules(|| {
+            [
+                "store/ms@2.0.0-aaa/node_modules/ms/index.js",
+                "store/ms@2.1.3-bbb/node_modules/ms/index.js",
+                "store/ms@2.1.3-bbb/node_modules/ms/lib/util.js",
+                "store/@s+solo@1.0.0-ccc/node_modules/@s/solo/lib/index.js",
+                "store/git@1.0.0-aaaa1111ffff/node_modules/git/index.js",
+                "store/git@1.0.0-bbbb2222ffff/node_modules/git/index.js",
+                "store/git@1.0.0-aaaa1111-cccc3333ffff/node_modules/git/index.js",
+                "cache/odd-one-copy.zip/node_modules/odd/index.js",
+                "cache/odd-two-copy.zip/node_modules/odd/index.js",
+                "repo/packages/lib/node_modules/ms/index.js",
+                "repo/packages/app/node_modules/.pnpm/ms@1.0.0/node_modules/ms/index.js",
+            ]
+            .map(id)
+        });
+        for (path, expected) in [
+            (
+                "store/ms@2.0.0-aaa/node_modules/ms/index.js",
+                Some("node_modules/ms@2.0.0/index.js"),
+            ),
+            (
+                "store/ms@2.1.3-bbb/node_modules/ms/index.js",
+                Some("node_modules/ms@2.1.3/index.js"),
+            ),
+            (
+                "store/ms@2.1.3-bbb/node_modules/ms/lib/util.js",
+                Some("node_modules/ms@2.1.3/lib/util.js"),
+            ),
+            (
+                "store/@s+solo@1.0.0-ccc/node_modules/@s/solo/lib/index.js",
+                Some("node_modules/@s/solo/lib/index.js"),
+            ),
+            (
+                "store/git@1.0.0-aaaa1111ffff/node_modules/git/index.js",
+                Some("node_modules/git@1.0.0_aaaa1111/index.js"),
+            ),
+            (
+                "store/git@1.0.0-bbbb2222ffff/node_modules/git/index.js",
+                Some("node_modules/git@1.0.0_bbbb2222/index.js"),
+            ),
+            (
+                "store/git@1.0.0-aaaa1111-cccc3333ffff/node_modules/git/index.js",
+                Some("node_modules/git@1.0.0-aaaa1111/index.js"),
+            ),
+            (
+                "cache/odd-one-copy.zip/node_modules/odd/index.js",
+                Some("node_modules/odd@1.0.0_odd-one-copy.zip/index.js"),
+            ),
+            (
+                "cache/odd-two-copy.zip/node_modules/odd/index.js",
+                Some("node_modules/odd@1.0.0_odd-two-copy.zip/index.js"),
+            ),
+            ("repo/packages/lib/node_modules/ms/index.js", None),
+            ("repo/packages/lib/index.js", None),
+            (
+                "repo/packages/app/node_modules/.pnpm/ms@1.0.0/node_modules/ms/index.js",
+                None,
+            ),
+            ("repo/packages/app/src/main.ts", None),
+        ] {
+            assert_eq!(named(path).as_deref(), expected, "{path}");
+        }
+    }
+
+    /// What a build emits names no path on the machine that built it, minified or not.
+    /// The target is old enough to bundle the runtime's vendored polyfills, which a
+    /// development build resolves from the checkout. The application's own `jsbi` shares
+    /// a name with one of them, and the store's packages sit outside the project, two of
+    /// them versions of one package.
+    #[test]
+    fn emitted_chunks_and_maps_name_no_path_on_the_building_machine() {
+        let root = canonicalize_for_bundler(&fixture_dir("portable-names"));
+        let project = root.join("project");
+        let package = |dir: PathBuf, name: &str, version: &str, file: &str, tag: &str| {
+            let module = dir.join(file);
+            std::fs::create_dir_all(module.parent().unwrap()).unwrap();
+            std::fs::write(
+                dir.join("package.json"),
+                format!(
+                    "{{ \"name\": \"{name}\", \"version\": \"{version}\", \"type\": \"module\", \
+                     \"exports\": \"./{file}\" }}"
+                ),
+            )
+            .unwrap();
+            std::fs::write(module, format!("export const tag = \"{tag}\";\n")).unwrap();
+        };
+        package(
+            project.join("node_modules/jsbi"),
+            "jsbi",
+            "0.0.1",
+            "index.mjs",
+            "own jsbi",
+        );
+        let store = root.join("store/v1");
+        package(
+            store.join("dup@1.0.0-aaaa/node_modules/dup"),
+            "dup",
+            "1.0.0",
+            "index.mjs",
+            "dup one",
+        );
+        package(
+            store.join("dup@2.0.0-bbbb/node_modules/dup"),
+            "dup",
+            "2.0.0",
+            "index.mjs",
+            "dup two",
+        );
+        package(
+            store.join("twin@1.0.0-aaaa1111ffff0000/node_modules/twin"),
+            "twin",
+            "1.0.0",
+            "index.mjs",
+            "twin first",
+        );
+        package(
+            store.join("twin@1.0.0-bbbb2222ffff0000/node_modules/twin"),
+            "twin",
+            "1.0.0",
+            "index.mjs",
+            "twin second",
+        );
+        package(
+            store.join("twin@1.0.0-aaaa1111-cccc3333ffff0000/node_modules/twin"),
+            "twin",
+            "1.0.0-aaaa1111",
+            "index.mjs",
+            "twin prerelease",
+        );
+        package(
+            store.join("@scope+solo@3.0.0-cccc/node_modules/@scope/solo"),
+            "@scope/solo",
+            "3.0.0",
+            "lib/index.mjs",
+            "solo",
+        );
+        let entry = project.join("app.ts");
+        std::fs::write(
+            &entry,
+            "import { tag } from \"jsbi\";\n\
+             import { tag as one } from \"../store/v1/dup@1.0.0-aaaa/node_modules/dup/index.mjs\";\n\
+             import { tag as two } from \"../store/v1/dup@2.0.0-bbbb/node_modules/dup/index.mjs\";\n\
+             import { tag as solo } from \"../store/v1/@scope+solo@3.0.0-cccc/node_modules/@scope/solo/lib/index.mjs\";\n\
+             import { tag as first } from \"../store/v1/twin@1.0.0-aaaa1111ffff0000/node_modules/twin/index.mjs\";\n\
+             import { tag as second } from \"../store/v1/twin@1.0.0-bbbb2222ffff0000/node_modules/twin/index.mjs\";\n\
+             import { tag as pre } from \"../store/v1/twin@1.0.0-aaaa1111-cccc3333ffff0000/node_modules/twin/index.mjs\";\n\
+             console.log(tag, one, two, solo, first, second, pre);\n",
+        )
+        .unwrap();
+
+        let checkout =
+            canonicalize_for_bundler(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));
+        let mut machine = vec![root.clone(), checkout];
+        machine.extend(std::env::var_os("HOME").map(PathBuf::from));
+        let assert_portable = |what: &str, text: &str| {
+            for path in &machine {
+                let path = path.to_string_lossy();
+                assert!(!text.contains(path.as_ref()), "{what} names {path}");
+            }
+        };
+
+        for minify in [false, true] {
+            let mut o = opts();
+            o.target_node = Some((22, 20, 0));
+            o.minify = minify;
+            o.sourcemap = SourcemapMode::External;
+            let res = bundle_for_compile(&entry, &o, &project).expect("bundle the fixture");
+
+            let map_text = String::from_utf8(res.detached_maps[0].bytes.clone()).unwrap();
+            let map: serde_json::Value = serde_json::from_str(&map_text).unwrap();
+            assert_portable("the source map", &map_text);
+            let sources: Vec<&str> = map["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|source| source.as_str().unwrap())
+                .collect();
+            let (runtime, mut others): (Vec<&str>, Vec<&str>) = sources
+                .iter()
+                .partition(|source| source.starts_with("runtime/"));
+            others.sort_unstable();
+            assert_eq!(
+                others,
+                [
+                    "../app.ts",
+                    "../node_modules/jsbi/index.mjs",
+                    "node_modules/@scope/solo/lib/index.mjs",
+                    "node_modules/dup@1.0.0/index.mjs",
+                    "node_modules/dup@2.0.0/index.mjs",
+                    "node_modules/twin@1.0.0-aaaa1111/index.mjs",
+                    "node_modules/twin@1.0.0_aaaa1111/index.mjs",
+                    "node_modules/twin@1.0.0_bbbb2222/index.mjs",
+                ],
+                "minify={minify}, the runtime's: {runtime:?}"
+            );
+            for vendored in ["@js-temporal/polyfill", "jsbi"] {
+                let prefix = format!("runtime/node_modules/{vendored}/");
+                assert!(
+                    runtime.iter().any(|source| source.starts_with(&prefix)),
+                    "a 22.20 target bundles the runtime's {vendored}: {runtime:?}"
+                );
+            }
+            // Node reads a mapped source's text from the first entry with its name.
+            for (name, tag) in [
+                ("node_modules/dup@1.0.0/index.mjs", "dup one"),
+                ("node_modules/dup@2.0.0/index.mjs", "dup two"),
+                ("node_modules/twin@1.0.0_aaaa1111/index.mjs", "twin first"),
+                ("node_modules/twin@1.0.0_bbbb2222/index.mjs", "twin second"),
+                (
+                    "node_modules/twin@1.0.0-aaaa1111/index.mjs",
+                    "twin prerelease",
+                ),
+            ] {
+                let at = sources.iter().position(|source| *source == name).unwrap();
+                let text = map["sourcesContent"][at].as_str().unwrap();
+                assert!(text.contains(tag), "{name} carries {text:?}");
+            }
+
+            let chunk = emitted_chunk_code(&res);
+            assert_portable("the chunk", &chunk);
+            assert!(
+                !chunk.contains("store/v1"),
+                "the chunk reaches the store by a relative path"
+            );
+            let regions: Vec<&str> = chunk
+                .lines()
+                .filter_map(|line| line.trim_start().strip_prefix("//#region "))
+                .collect();
+            if !minify {
+                for prefix in [
+                    "runtime/compile-record.mjs",
+                    "runtime/node_modules/@js-temporal/polyfill/",
+                    "node_modules/jsbi/index.mjs",
+                    "node_modules/dup@1.0.0/index.mjs",
+                    "node_modules/dup@2.0.0/index.mjs",
+                    "node_modules/twin@1.0.0_aaaa1111/index.mjs",
+                    "node_modules/twin@1.0.0_bbbb2222/index.mjs",
+                    "node_modules/twin@1.0.0-aaaa1111/index.mjs",
+                    "node_modules/@scope/solo/lib/index.mjs",
+                ] {
+                    assert!(
+                        regions.iter().any(|id| id.starts_with(prefix)),
+                        "no region for {prefix}: {regions:?}"
+                    );
+                }
+            }
+            let stray: Vec<&&str> = regions
+                .iter()
+                .filter(|id| id.starts_with("..") || Path::new(id).is_absolute())
+                .collect();
+            assert!(stray.is_empty(), "{stray:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn opts() -> BundleOptions {
