@@ -298,6 +298,38 @@
           "utf8",
         ).toString("base64"));
 
+    // The compile bootstrap's parser, verbatim: this body is serialized into a
+    // worker and can reach nothing outside it.
+    function withoutRefusedExecArgv(execArgv, error) {
+      if (error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") return null;
+      const report = String(error.message);
+      const start = report.indexOf(": ");
+      if (start === -1) return null;
+      let cursor = start + 2;
+      const kept = [];
+      const refused = [];
+      for (let i = 0; i < execArgv.length; i++) {
+        const arg = execArgv[i];
+        const end = cursor + arg.length;
+        if (
+          arg !== "" &&
+          report.startsWith(arg, cursor) &&
+          (end === report.length || report.startsWith(", ", end))
+        ) {
+          refused.push(arg);
+          cursor = end === report.length ? end : end + 2;
+          const next = execArgv[i + 1];
+          if (!arg.includes("=") && next !== undefined && !next.startsWith("-")) {
+            refused.push(next);
+            i++;
+          }
+        } else {
+          kept.push(arg);
+        }
+      }
+      return cursor === report.length && refused.length > 0 ? { kept, refused } : null;
+    }
+
     class Worker extends OriginalWorker {
       constructor(target, options) {
         // `eval: true` means the target is SOURCE rather than a location, so none
@@ -314,23 +346,23 @@
             return;
           }
           const arg = scopeArgFor();
-          const execArgv = [arg, ...(given ?? process.execArgv).filter((flag) => flag !== arg)];
-          try {
-            super(target, { ...options, execArgv });
-          } catch (error) {
-            if (given !== undefined || error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") throw error;
-            const refused = error.message.slice(error.message.indexOf(": ") + 2).split(", ");
+          let execArgv = [arg, ...(given ?? process.execArgv).filter((flag) => flag !== arg)];
+          for (;;) {
             try {
-              super(target, {
-                ...options,
-                execArgv: execArgv.filter((flag) => !refused.includes(flag)),
-              });
-            } catch {
-              super(target, options);
+              super(target, { ...options, execArgv });
+              return;
+            } catch (error) {
+              if (given !== undefined || error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") throw error;
+              const retry = withoutRefusedExecArgv(execArgv, error);
+              if (retry === null) break;
+              execArgv = retry.kept;
             }
           }
+          super(target, options);
           return;
         }
+        // A traced entry starts as eval source, and Node runs no `--import` ahead
+        // of that, so a scope module inherited from an untraced parent never loads.
         // `eval` last, so an application that passed `eval: false` beside a payload
         // target cannot turn the generated bootstrap back into a path. Everything
         // else — `workerData`, `env`, `execArgv`, `transferList` — passes through.

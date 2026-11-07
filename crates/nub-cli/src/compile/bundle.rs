@@ -349,20 +349,33 @@ pub fn bundle_worker_scope(opts: &BundleOptions) -> Result<Vec<u8>> {
 /// the program's preamble, and loading the scope's copy as well would install
 /// the worker scope twice.
 pub fn configure_bootstrap_worker_scope(bootstrap: &[u8], traced: &[String]) -> Result<Vec<u8>> {
-    const NEEDLE: &str = "const workerScope = undefined;\nconst tracedWorkers = [];\n";
+    // One declaration per needle, without its line ending: a Windows checkout
+    // gives the runtime files CRLF.
     let text = std::str::from_utf8(bootstrap).context("the compile bootstrap is not utf-8")?;
-    if !text.contains(NEEDLE) {
-        bail!(
-            "the compile bootstrap no longer declares its worker scope the way the \
-             compiler expects, so nub cannot name it"
-        );
+    let declarations = [
+        (
+            "const workerScope = undefined;",
+            format!(
+                "const workerScope = {};",
+                serde_json::to_string(WORKER_SCOPE_NAME)?
+            ),
+        ),
+        (
+            "const tracedWorkers = [];",
+            format!("const tracedWorkers = {};", serde_json::to_string(traced)?),
+        ),
+    ];
+    let mut filled = text.to_string();
+    for (needle, value) in &declarations {
+        if filled.matches(needle).count() != 1 {
+            bail!(
+                "the compile bootstrap no longer declares its worker scope the way the \
+                 compiler expects, so nub cannot name it"
+            );
+        }
+        filled = filled.replacen(needle, value, 1);
     }
-    let filled = format!(
-        "const workerScope = {};\nconst tracedWorkers = {};\n",
-        serde_json::to_string(WORKER_SCOPE_NAME)?,
-        serde_json::to_string(traced)?
-    );
-    Ok(text.replacen(NEEDLE, &filled, 1).into_bytes())
+    Ok(filled.into_bytes())
 }
 
 fn bundle_inner(
@@ -11757,6 +11770,17 @@ after
             filled.contains(&format!("const workerScope = \"{WORKER_SCOPE_NAME}\";"))
                 && filled.contains("const tracedWorkers = [\"src/w-1.mjs\"];"),
             "{filled}"
+        );
+        let crlf = String::from_utf8(shipped)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .replace('\n', "\r\n");
+        let filled_crlf = configure_bootstrap_worker_scope(crlf.as_bytes(), &[]).unwrap();
+        assert!(
+            String::from_utf8(filled_crlf)
+                .unwrap()
+                .contains(&format!("const workerScope = \"{WORKER_SCOPE_NAME}\";\r\n")),
+            "a CRLF checkout of the bootstrap must be filled in too"
         );
         assert!(configure_bootstrap_worker_scope(b"const workerScope = 1;\n", &[]).is_err());
     }

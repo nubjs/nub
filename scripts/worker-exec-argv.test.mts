@@ -1,0 +1,104 @@
+// The three Worker constructors that turn a parent's flags into an explicit
+// `execArgv` drop the flags Node refuses there by matching Node's report against
+// the list. Each file carries its own copy of the parser, so each is driven here
+// with the refusals the running Node actually produces.
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test, { describe } from "node:test";
+import { Worker } from "node:worker_threads";
+
+type Parse = (
+  execArgv: string[],
+  error: unknown,
+) => { kept: string[]; refused: string[] } | null;
+
+const runtime = new URL("../runtime/", import.meta.url);
+
+function parserIn(file: string): Parse {
+  const source = readFileSync(new URL(file, runtime), "utf8");
+  const start = source.indexOf("function withoutRefusedExecArgv(");
+  assert.notEqual(start, -1, `${file} carries no withoutRefusedExecArgv`);
+  let depth = 0;
+  for (let i = source.indexOf("{", start); i < source.length; i++) {
+    if (source[i] === "{") depth++;
+    else if (source[i] === "}" && --depth === 0) {
+      return new Function(`return ${source.slice(start, i + 1)}`)() as Parse;
+    }
+  }
+  throw new Error(`${file}: unbalanced withoutRefusedExecArgv`);
+}
+
+function refusal(execArgv: string[]): unknown {
+  try {
+    new Worker("0", { eval: true, execArgv }).terminate();
+  } catch (error) {
+    return error;
+  }
+  throw new Error(`Node accepted ${JSON.stringify(execArgv)}`);
+}
+
+// Drop what Node refuses until it accepts, as each constructor does.
+function accepted(parse: Parse, execArgv: string[]): string[] {
+  for (;;) {
+    let error: unknown;
+    try {
+      new Worker("0", { eval: true, execArgv }).terminate();
+      return execArgv;
+    } catch (caught) {
+      error = caught;
+    }
+    const retry = parse(execArgv, error);
+    assert.ok(retry, `no retry for ${JSON.stringify(execArgv)}: ${(error as Error).message}`);
+    execArgv = retry.kept;
+  }
+}
+
+function conditionsInWorker(execArgv: string[]): Promise<string[]> {
+  const worker = new Worker(
+    "require('node:worker_threads').parentPort.postMessage(process.execArgv)",
+    { eval: true, execArgv },
+  );
+  return new Promise<string[]>((resolve, reject) => {
+    worker.once("message", resolve);
+    worker.once("error", reject);
+  }).finally(() => worker.terminate());
+}
+
+for (const file of ["compile-bootstrap.cjs", "compile-sea-loader.cjs", "worker-polyfill.mjs"]) {
+  describe(file, () => {
+    const parse = parserIn(file);
+
+    test("drops a refused --flag=value and keeps the rest in order", () => {
+      const list = ["--enable-source-maps", "--max-old-space-size=200", "--conditions=x"];
+      assert.deepEqual(parse(list, refusal(list)), {
+        kept: ["--enable-source-maps", "--conditions=x"],
+        refused: ["--max-old-space-size=200"],
+      });
+    });
+
+    test("drops a refused flag's separate value, so later flags still reach the worker", async () => {
+      const list = ["--title", "demo", "--conditions=x"];
+      assert.deepEqual(parse(list, refusal(list))?.kept, ["--conditions=x"]);
+      assert.ok((await conditionsInWorker(accepted(parse, list))).includes("--conditions=x"));
+    });
+
+    test("matches a refused value that itself contains a comma and space", () => {
+      const list = ["--title=one, two", "--conditions=x"];
+      assert.deepEqual(parse(list, refusal(list))?.kept, ["--conditions=x"]);
+    });
+
+    test("reaches flags Node only reports once an earlier stray value is gone", () => {
+      const list = ["--stack-size=900", "--title", "a", "--expose-gc", "--conditions=x"];
+      assert.deepEqual(accepted(parse, list), ["--conditions=x"]);
+    });
+
+    test("returns null for a report that does not line up with the list", () => {
+      const error = Object.assign(
+        new Error("Initiated Worker with invalid execArgv flags: --not-in-the-list"),
+        { code: "ERR_WORKER_INVALID_EXEC_ARGV" },
+      );
+      assert.equal(parse(["--max-old-space-size=200"], error), null);
+      assert.equal(parse(["--max-old-space-size=200"], new Error("other")), null);
+    });
+  });
+}

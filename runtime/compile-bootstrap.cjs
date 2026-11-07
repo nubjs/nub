@@ -130,8 +130,9 @@ if (!validExisting) {
 // An omitted `execArgv` means "inherit", which an added flag cannot express, so it
 // becomes this process's flags. Node accepts per-process flags such as
 // `--max-old-space-size` only by inheritance, and refuses them in a list, naming
-// each; those are dropped, since a worker takes none of them from its parent's
-// list either. Should Node still refuse, the worker starts as it would have,
+// each; those are dropped, with any separate value, since a worker takes none of
+// them from its parent's list either. Should Node still refuse, or name them in a
+// way that does not line up with the list, the worker starts as it would have,
 // without the preamble. `eval: true` is left alone: Node runs no `--import`
 // before eval source.
 function installCompiledWorkerScope(threads, scopeArgFor, isTraced) {
@@ -140,31 +141,76 @@ function installCompiledWorkerScope(threads, scopeArgFor, isTraced) {
   class Worker extends OriginalWorker {
     constructor(target, options) {
       const given = options?.execArgv;
-      if (
-        options?.eval === true ||
-        (given !== undefined && !Array.isArray(given)) ||
-        isTraced(target)
-      ) {
+      if (options?.eval === true || (given !== undefined && !Array.isArray(given))) {
         super(target, options);
         return;
       }
       scopeArg ??= scopeArgFor();
-      const execArgv = [scopeArg, ...(given ?? process.execArgv).filter((arg) => arg !== scopeArg)];
-      try {
-        super(target, { ...options, execArgv });
-      } catch (error) {
-        if (given !== undefined || error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") throw error;
-        // Node names the flags it refused, after the message's colon.
-        const refused = error.message.slice(error.message.indexOf(": ") + 2).split(", ");
+      const inherited = given ?? process.execArgv;
+      const rest = inherited.filter((arg) => arg !== scopeArg);
+      // A traced entry's wrapper loads the program's preamble, so it must not
+      // also inherit the scope module from an untraced parent: the second copy
+      // would read the first's lazy globals and evaluate them.
+      let execArgv;
+      if (!isTraced(target)) execArgv = [scopeArg, ...rest];
+      else if (rest.length < inherited.length) execArgv = rest;
+      else {
+        super(target, options);
+        return;
+      }
+      // Node stops reading flags at a stray value, so a retry can surface more.
+      for (;;) {
         try {
-          super(target, { ...options, execArgv: execArgv.filter((arg) => !refused.includes(arg)) });
-        } catch {
-          super(target, options);
+          super(target, { ...options, execArgv });
+          return;
+        } catch (error) {
+          if (given !== undefined || error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") throw error;
+          const retry = withoutRefusedExecArgv(execArgv, error);
+          if (retry === null) break;
+          execArgv = retry.kept;
         }
       }
+      super(target, options);
     }
   }
   threads.Worker = Worker;
+}
+
+// Node names the flags it refused in one message, joined with ", ", and a flag
+// whose value is a separate token by the flag alone (`--title` for
+// `--title demo`). So the report is matched against `execArgv` in order rather
+// than split: a refused flag takes its operand with it, and a report that does
+// not line up with the list returns null. Copied verbatim into
+// compile-sea-loader.cjs and worker-polyfill.mjs, which cannot share a module
+// with this file; scripts/worker-exec-argv.test.mts drives all three.
+function withoutRefusedExecArgv(execArgv, error) {
+  if (error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") return null;
+  const report = String(error.message);
+  const start = report.indexOf(": ");
+  if (start === -1) return null;
+  let cursor = start + 2;
+  const kept = [];
+  const refused = [];
+  for (let i = 0; i < execArgv.length; i++) {
+    const arg = execArgv[i];
+    const end = cursor + arg.length;
+    if (
+      arg !== "" &&
+      report.startsWith(arg, cursor) &&
+      (end === report.length || report.startsWith(", ", end))
+    ) {
+      refused.push(arg);
+      cursor = end === report.length ? end : end + 2;
+      const next = execArgv[i + 1];
+      if (!arg.includes("=") && next !== undefined && !next.startsWith("-")) {
+        refused.push(next);
+        i++;
+      }
+    } else {
+      kept.push(arg);
+    }
+  }
+  return cursor === report.length && refused.length > 0 ? { kept, refused } : null;
 }
 
 // A compiled artifact publishes the outer executable as `process.execPath`, and
