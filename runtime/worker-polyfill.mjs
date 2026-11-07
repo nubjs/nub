@@ -327,14 +327,17 @@ export function installWorkerPolyfill() {
       // that inherits drops it silently, so drop the ones that came from this
       // process and retry; one the caller passed still throws, as Node's does.
       // Node stops reading flags at a stray value, so a retry can surface more.
+      // Only the flags Node named count against the caller: a dropped separate value
+      // never starts with `-`, and may equal one of the caller's own values.
       const given = Array.isArray(options.execArgv) ? options.execArgv : [];
+      const callerPassed = arg => arg.startsWith("-") && given.includes(arg);
       for (;;) {
         try {
           this.#worker = new NodeWorker(spawnTarget, nodeOptions);
           break;
         } catch (error) {
           const retry = withoutRefusedExecArgv(nodeOptions.execArgv, error);
-          if (retry === null || retry.refused.some(arg => given.includes(arg))) throw error;
+          if (retry === null || retry.refused.some(callerPassed)) throw error;
           nodeOptions.execArgv = retry.kept;
         }
       }

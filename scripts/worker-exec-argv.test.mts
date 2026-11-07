@@ -3,6 +3,7 @@
 // the list. Each file carries its own copy of the parser, so each is driven here
 // with the refusals the running Node actually produces.
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test, { describe } from "node:test";
 import { Worker } from "node:worker_threads";
@@ -63,6 +64,35 @@ function conditionsInWorker(execArgv: string[]): Promise<string[]> {
     worker.once("error", reject);
   }).finally(() => worker.terminate());
 }
+
+// The global Worker merges the caller's list onto the parent's, so only the flags
+// Node names may count against the caller, never a dropped value of the parent's.
+describe("the global Worker under a parent started with --title demo", () => {
+  const polyfill = new URL("worker-polyfill.mjs", runtime).href;
+  const start = (execArgv: string[]) => {
+    const code =
+      `const { installWorkerPolyfill } = await import(${JSON.stringify(polyfill)});\n` +
+      `installWorkerPolyfill();\n` +
+      `let out = "started";\n` +
+      `try { new Worker("data:text/javascript,0", { execArgv: ${JSON.stringify(execArgv)} }).terminate(); }\n` +
+      `catch (error) { out = error.code; }\n` +
+      `console.log(out);\nprocess.exit(0);\n`;
+    const child = spawnSync(
+      process.execPath,
+      ["--title", "demo", "--input-type=module", "-e", code],
+      { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8", timeout: 30_000 },
+    );
+    return `${child.stdout.trim()}${child.stderr ? ` (stderr: ${child.stderr.trim()})` : ""}`;
+  };
+
+  test("starts when a caller's value equals the parent's dropped value", () => {
+    assert.equal(start(["--conditions", "demo"]), "started");
+  });
+
+  test("still refuses a flag the caller passed", () => {
+    assert.equal(start(["--title=explicit"]), "ERR_WORKER_INVALID_EXEC_ARGV");
+  });
+});
 
 for (const file of ["compile-bootstrap.cjs", "compile-sea-loader.cjs", "worker-polyfill.mjs"]) {
   describe(file, () => {
