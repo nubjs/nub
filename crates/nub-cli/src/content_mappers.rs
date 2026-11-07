@@ -175,12 +175,13 @@ pub(crate) fn discover(anchor: &str, explicit: Option<&str>) -> Discovered {
             Some((dir, root)) => match register_of(&resolver, &dir) {
                 None => "no-register",
                 Some(register) => {
-                    // A config's own entry comes before its references', and wins.
+                    // A config's own entry comes before its references', and wins even
+                    // when it has no options.
+                    let first = !out.registers.iter().any(|known| known.path == register);
                     let known = out.add(register, &mapper.extensions);
-                    known.options = known
-                        .options
-                        .take()
-                        .or_else(|| mapper.options.as_ref().map(encode_options));
+                    if first {
+                        known.options = mapper.options.as_ref().map(encode_options);
+                    }
                     out.chain_root = out.chain_root.take().or(root);
                     "registered"
                 }

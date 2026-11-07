@@ -4171,8 +4171,8 @@ fn prepare_preload_chain(
     let mapper_options = runtime
         .content_mappers
         .as_ref()
-        .map(crate::content_mappers::Discovered::options_by_file)
-        .unwrap_or_default();
+        .filter(|_| has_mappers)
+        .map(crate::content_mappers::Discovered::options_by_file);
     let dir = root.join("node_modules").join(".nub");
     let write_to = |dir: &Path| -> Result<(Option<PathBuf>, Option<PathBuf>)> {
         if !cjs.is_empty() || !esm.is_empty() {
@@ -4181,8 +4181,8 @@ fn prepare_preload_chain(
             })?;
         }
         Ok((
-            write_preload_chain(dir, false, &cjs, 0, &Default::default())?,
-            write_preload_chain(dir, true, &esm, mapper_entries, &mapper_options)?,
+            write_preload_chain(dir, false, &cjs, 0, None)?,
+            write_preload_chain(dir, true, &esm, mapper_entries, mapper_options.as_ref())?,
         ))
     };
     // A mapper-only chain holds nothing but absolute paths, so it works from anywhere.
@@ -4233,11 +4233,12 @@ fn continues_parent_invocation(node: &nub_core::node::discovery::ResolvedNode) -
 /// where POSIX would have tolerated it.
 ///
 /// The first `mapper_entries` entries are tsconfig mapper registers, on the ESM side
-/// only, and a chain with any puts a hash of its body in the file name: `preload`
+/// only. `mapper_options` is `Some` when the run has any, even if the user's `preload`
+/// lists them all, and such a chain puts a hash of its body in the file name: `preload`
 /// belongs to the root its file is under, but two workspace members can share one
 /// hoisted `node_modules` and list different mappers, and a long-lived process re-reads
 /// its chainer each time it forks, so a shared name would hand it the other member's
-/// plugins.
+/// plugins. A re-entrant launch also replaces only a hashed chainer.
 ///
 /// Only those entries may fail quietly. A `preload` line is something the user asked
 /// to run, so its failure is theirs to see. Nobody asked for a discovered register on
@@ -4254,7 +4255,7 @@ fn write_preload_chain(
     esm: bool,
     entries: &[String],
     mapper_entries: usize,
-    mapper_options: &std::collections::HashMap<PathBuf, String>,
+    mapper_options: Option<&std::collections::HashMap<PathBuf, String>>,
 ) -> Result<Option<PathBuf>> {
     if entries.is_empty() {
         return Ok(None);
@@ -4268,12 +4269,10 @@ fn write_preload_chain(
         body.push_str("import nodeModule from \"node:module\";\n");
     }
     let resolver = bare_preload_resolver(esm);
-    let mut carries_options = false;
     for (index, spec) in entries.iter().enumerate() {
         let spec = resolve_bare_preload(&resolver, spec);
-        let options = std::fs::canonicalize(&spec)
-            .ok()
-            .and_then(|real| mapper_options.get(&real));
+        let options =
+            mapper_options.and_then(|options| options.get(&std::fs::canonicalize(&spec).ok()?));
         let spec = if esm && Path::new(&spec).is_absolute() {
             nub_core::node::spawn::file_url_for(&spec)
         } else {
@@ -4296,7 +4295,6 @@ fn write_preload_chain(
                 format!("await import({literal});")
             };
             if let Some(options) = options {
-                carries_options = true;
                 let var = crate::content_mappers::OPTIONS_ENV;
                 let value = serde_json::to_string(options)?;
                 body.push_str(&format!(
@@ -4313,7 +4311,7 @@ fn write_preload_chain(
         }
     }
     let extension = if esm { "mjs" } else { "cjs" };
-    let name = if mapper_entries > 0 || carries_options {
+    let name = if mapper_options.is_some() {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         body.hash(&mut hasher);

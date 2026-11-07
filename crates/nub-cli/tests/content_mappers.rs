@@ -224,11 +224,44 @@ fn a_descendant_takes_options_from_its_own_config() {
         root.join("main.mjs"),
         r#"import { spawnSync } from "node:child_process";
 process.stderr.write(spawnSync("node", ["member/main.mjs"], { encoding: "utf8", shell: true }).stderr);
+process.stderr.write(spawnSync(process.execPath, ["-e", ""], { encoding: "utf8" }).stderr);
 "#,
     );
     let log = stderr(&run(root, &["main.mjs"]));
     assert!(log.contains(r#"m: {"from":"root"}"#), "{log}");
     assert!(log.contains(r#"m: {"from":"member"}"#), "{log}");
+
+    // A member listing it with no options has none, even with the register under the
+    // inherited `preload` too, where no mapper entry is left to name the chainer. The
+    // last child re-reads the root's chainer, so the member's must not overwrite it.
+    write(root.join("nub.jsonc"), r#"{ "preload": ["m/register"] }"#);
+    write(
+        root.join("member/tsconfig.json"),
+        r#"{ "contentMappers": [{ "package": "m", "extensions": [".a"] }] }"#,
+    );
+    let log = stderr(&run(root, &["main.mjs"]));
+    assert_eq!(log.matches(r#"m: {"from":"root"}"#).count(), 2, "{log}");
+    assert!(log.contains("m: undefined"), "{log}");
+}
+
+/// A config's own entry decides, so a referenced project's options do not reach it.
+#[test]
+fn the_first_entry_for_a_register_decides_its_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    options_reader(root, "m");
+    write(
+        root.join("tsconfig.json"),
+        r#"{ "contentMappers": [{ "package": "m", "extensions": [".a"] }],
+             "references": [{ "path": "./sub" }] }"#,
+    );
+    write(
+        root.join("sub/tsconfig.json"),
+        r#"{ "contentMappers": [{ "package": "m", "extensions": [".b"], "options": { "from": "sub" } }] }"#,
+    );
+    write(root.join("main.mjs"), "\n");
+    let log = stderr(&run(root, &["main.mjs"]));
+    assert!(log.contains("m: undefined"), "{log}");
 }
 
 /// The entry's own directory picks the tsconfig, and the register's hook sits above
