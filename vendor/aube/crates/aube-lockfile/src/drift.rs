@@ -431,6 +431,77 @@ impl LockfileGraph {
         DriftStatus::Fresh
     }
 
+    /// Stale when a package the install needs has a required dependency with no
+    /// entry of its own, which leaves a tree that cannot load (a mis-resolved git
+    /// conflict, a hand edit). The manifest checks cannot see it, since they compare
+    /// importers and specifiers. pnpm raises `ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY`
+    /// at the same point: a frozen install fails and any other re-resolves.
+    ///
+    /// The walk starts at required direct dependencies and follows required edges,
+    /// so a broken optional subtree cannot fail an install: a false positive here
+    /// rejects a valid frozen install, which costs more than a miss. Yarn lockfiles
+    /// are out of scope: their readers drop the edge, `yarn install --frozen-lockfile`
+    /// does not fail on this, and Nub does not rewrite a classic `yarn.lock`.
+    ///
+    /// An npm lockfile or shrinkwrap is walked from the root package only. `npm ci`
+    /// refuses a missing entry anywhere beneath the root but installs a workspace
+    /// member's subtree without it, and `npm install` leaves that one unrepaired
+    /// too (measured on npm 10.8, 10.9 and 11.21). Real lockfiles carry such holes:
+    /// usebruno/bruno's has no `csstype` for a member's `@types/react`.
+    pub fn check_required_entries(&self, kind: LockfileKind) -> DriftStatus {
+        if matches!(kind, LockfileKind::Yarn | LockfileKind::YarnBerry) {
+            return DriftStatus::Fresh;
+        }
+        let mut queue: Vec<&str> = self
+            .importers
+            .iter()
+            .filter(|(path, _)| {
+                !matches!(kind, LockfileKind::Npm | LockfileKind::NpmShrinkwrap)
+                    || path.as_str() == "."
+            })
+            .flat_map(|(_, deps)| deps)
+            .filter(|dep| dep.dep_type != DepType::Optional)
+            .filter_map(|dep| self.packages.get_key_value(&dep.dep_path))
+            .map(|(key, _)| key.as_str())
+            .collect();
+        let mut seen: BTreeSet<&str> = queue.iter().copied().collect();
+        while let Some(dep_path) = queue.pop() {
+            let Some(pkg) = self.packages.get(dep_path) else {
+                continue;
+            };
+            // A link target's dependencies are installed in the target, not here:
+            // npm records them on the entry and locks none of them.
+            if pkg.in_bundle || matches!(pkg.local_source, Some(LocalSource::Link(_))) {
+                continue;
+            }
+            for (name, tail) in &pkg.dependencies {
+                if pkg.optional_dependencies.contains_key(name)
+                    || pkg.peer_dependencies.contains_key(name)
+                    || pkg.bundled_dependencies.contains(name)
+                    || is_local_source_spec(tail)
+                {
+                    continue;
+                }
+                let Some(child) =
+                    crate::resolve_dep_edge(name, tail, |k| self.packages.contains_key(k))
+                else {
+                    return DriftStatus::Stale {
+                        reason: format!(
+                            "{} depends on {name}@{tail}, which has no entry in the lockfile",
+                            pkg.spec_key()
+                        ),
+                    };
+                };
+                if let Some((key, _)) = self.packages.get_key_value(&child)
+                    && seen.insert(key.as_str())
+                {
+                    queue.push(key.as_str());
+                }
+            }
+        }
+        DriftStatus::Fresh
+    }
+
     /// Compare this lockfile's catalog snapshot against the current
     /// `pnpm-workspace.yaml` catalogs.
     ///
@@ -3149,6 +3220,180 @@ mod drift_tests {
         ) {
             DriftStatus::Stale { reason } => assert!(reason.contains("ms@2.1.3"), "{reason}"),
             other => panic!("expected stale on moved path, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod required_entries_tests {
+    use super::*;
+    use crate::LockedPackage;
+
+    fn package(name: &str, deps: &[(&str, &str)]) -> (String, LockedPackage) {
+        let key = format!("{name}@1.0.0");
+        let pkg = LockedPackage {
+            name: name.to_string(),
+            version: "1.0.0".to_string(),
+            dep_path: key.clone(),
+            dependencies: deps
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        };
+        (key, pkg)
+    }
+
+    fn graph(root_type: DepType, packages: Vec<(String, LockedPackage)>) -> LockfileGraph {
+        LockfileGraph {
+            importers: BTreeMap::from([(
+                ".".to_string(),
+                vec![DirectDep {
+                    name: "root-dep".to_string(),
+                    dep_path: "root-dep@1.0.0".to_string(),
+                    dep_type: root_type,
+                    specifier: None,
+                }],
+            )]),
+            packages: packages.into_iter().collect(),
+            ..Default::default()
+        }
+    }
+
+    fn is_stale(graph: &LockfileGraph, kind: LockfileKind) -> bool {
+        matches!(
+            graph.check_required_entries(kind),
+            DriftStatus::Stale { .. }
+        )
+    }
+
+    #[test]
+    fn a_required_edge_with_no_entry_is_stale_at_any_depth() {
+        let g = graph(
+            DepType::Dev,
+            vec![
+                package("root-dep", &[("mid", "1.0.0")]),
+                package("mid", &[("gone", "^2.0.0")]),
+            ],
+        );
+        assert!(is_stale(&g, LockfileKind::Npm));
+        assert!(is_stale(&g, LockfileKind::Pnpm));
+        assert!(is_stale(&g, LockfileKind::Bun));
+        let DriftStatus::Stale { reason } = g.check_required_entries(LockfileKind::Pnpm) else {
+            unreachable!()
+        };
+        assert!(
+            reason.contains("gone@^2.0.0"),
+            "reason must name it: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_complete_graph_is_fresh() {
+        let g = graph(
+            DepType::Production,
+            vec![
+                package("root-dep", &[("mid", "1.0.0")]),
+                package("mid", &[]),
+            ],
+        );
+        assert!(!is_stale(&g, LockfileKind::Npm));
+    }
+
+    /// The legitimate absences. Each would reject a valid frozen install.
+    #[test]
+    fn an_absent_optional_peer_or_bundled_child_is_fresh() {
+        let edge = [("gone", "^2.0.0")];
+        let mut optional = package("root-dep", &edge);
+        optional.1.optional_dependencies = BTreeMap::from([("gone".into(), "^2.0.0".into())]);
+        let mut peer = package("root-dep", &edge);
+        peer.1.peer_dependencies = BTreeMap::from([("gone".into(), "^2.0.0".into())]);
+        let mut bundled = package("root-dep", &edge);
+        bundled.1.bundled_dependencies = vec!["gone".into()];
+        let mut in_bundle = package("root-dep", &edge);
+        in_bundle.1.in_bundle = true;
+        let mut link_target = package("root-dep", &edge);
+        link_target.1.local_source = Some(LocalSource::Link("../root-dep".into()));
+        for (label, pkg) in [
+            ("optional", optional),
+            ("peer", peer),
+            ("bundled", bundled),
+            ("in bundle", in_bundle),
+            ("link target", link_target),
+        ] {
+            let g = graph(DepType::Production, vec![pkg]);
+            assert!(
+                !is_stale(&g, LockfileKind::Npm),
+                "{label} must not be stale"
+            );
+        }
+    }
+
+    #[test]
+    fn a_broken_optional_subtree_is_fresh() {
+        let g = graph(
+            DepType::Optional,
+            vec![package("root-dep", &[("gone", "^2.0.0")])],
+        );
+        assert!(!is_stale(&g, LockfileKind::Npm));
+    }
+
+    #[test]
+    fn an_npm_workspace_member_subtree_is_not_checked() {
+        let mut g = graph(DepType::Production, vec![package("root-dep", &[])]);
+        g.packages
+            .extend([package("member-dep", &[("gone", "^2.0.0")])]);
+        g.importers.insert(
+            "packages/a".to_string(),
+            vec![DirectDep {
+                name: "member-dep".to_string(),
+                dep_path: "member-dep@1.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: None,
+            }],
+        );
+        assert!(!is_stale(&g, LockfileKind::Npm));
+        assert!(!is_stale(&g, LockfileKind::NpmShrinkwrap));
+        assert!(is_stale(&g, LockfileKind::Pnpm));
+        assert!(is_stale(&g, LockfileKind::Bun));
+    }
+
+    #[test]
+    fn yarn_lockfiles_are_not_checked() {
+        let g = graph(
+            DepType::Production,
+            vec![package("root-dep", &[("gone", "^2.0.0")])],
+        );
+        assert!(!is_stale(&g, LockfileKind::Yarn));
+        assert!(!is_stale(&g, LockfileKind::YarnBerry));
+    }
+
+    /// Each reader has to keep the edge for the check to see it, and they build
+    /// edges differently, so this goes through the real parsers.
+    #[test]
+    fn every_checked_format_reports_a_missing_entry_after_parsing() {
+        const PNPM: &str = "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      parent:\n        specifier: 1.0.0\n        version: 1.0.0\n\npackages:\n  parent@1.0.0:\n    resolution: {integrity: sha512-p}\n\nsnapshots:\n  parent@1.0.0:\n    dependencies:\n      child: 2.0.0\n";
+        const NPM: &str = r#"{"name":"fx","lockfileVersion":3,"packages":{"":{"name":"fx","dependencies":{"parent":"1.0.0"}},"node_modules/parent":{"version":"1.0.0","dependencies":{"child":"^2.0.0"}}}}"#;
+        const BUN: &str = r#"{"lockfileVersion":1,"workspaces":{"":{"name":"fx","dependencies":{"parent":"1.0.0"}}},"packages":{"parent":["parent@1.0.0","",{"dependencies":{"child":"^2.0.0"}},"sha512-p"]}}"#;
+        for (file, body) in [
+            ("pnpm-lock.yaml", PNPM),
+            ("package-lock.json", NPM),
+            ("bun.lock", BUN),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(file), body).unwrap();
+            let manifest = aube_manifest::PackageJson {
+                name: Some("fx".to_string()),
+                dependencies: [("parent".to_string(), "1.0.0".to_string())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            };
+            let (graph, kind) = crate::parse_lockfile_with_kind(dir.path(), &manifest).unwrap();
+            assert!(
+                is_stale(&graph, kind),
+                "{file} must report child as missing"
+            );
         }
     }
 }
