@@ -1326,7 +1326,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             config
                 .runtime_node_options
                 .iter()
-                .map(|opt| node_options_token(opt)),
+                .map(|opt| node_option_token(opt)),
         );
         // Coverage-exclude nub's own runtime (R9) — via NODE_OPTIONS, not just argv.
         // The CLI-arg form at the `cmd.arg(glob)` site above only reaches the DIRECT
@@ -1414,6 +1414,15 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             cmd.env("NODE_PATH", &node_path);
             mark_augmented(&mut cmd, "NODE_PATH", Some(&node_path));
         }
+    }
+
+    if !config.compat_mode
+        && is_reentrant
+        && let Some(node_options) =
+            reentrant_node_options(node_options.as_deref(), config.runtime_node_options)
+    {
+        cmd.env("NODE_OPTIONS", &node_options);
+        mark_augmented(&mut cmd, "NODE_OPTIONS", Some(OsStr::new(&node_options)));
     }
 
     // `preload.is_some()` is kept from the augment block's guard: without our preload
@@ -2322,7 +2331,7 @@ pub fn compute_augmentation_env(
     node_opts_parts.extend(
         runtime_node_options
             .iter()
-            .map(|opt| node_options_token(opt)),
+            .map(|opt| node_option_token(opt)),
     );
     // Web Storage is deliberately NOT pushed here (mirrors `spawn_node`). This env
     // is inherited by the whole script subtree, and the flag's 22.4 floor is above
@@ -3312,6 +3321,17 @@ fn is_reentrant_in(node_options: Option<&str>, preload: Option<&str>) -> bool {
     }
 }
 
+/// Whether a launch of `version` from this process would count as re-entrant in
+/// [`spawn_node`]. A binary that cannot find its preload passes `NODE_OPTIONS` through
+/// untouched, which also continues the parent's invocation.
+pub fn is_reentrant_launch(nub_binary: &Path, version: &NodeVersion) -> bool {
+    let Some(preload) = find_preload(nub_binary) else {
+        return true;
+    };
+    let key = preload_injection(&preload, version).node_options_token();
+    is_reentrant_in(env::var("NODE_OPTIONS").ok().as_deref(), Some(&key))
+}
+
 /// Strip Windows' verbatim / extended-length path prefixes (`\\?\` and
 /// `\\?\UNC\`) that `fs::canonicalize` emits. Node's module loader and NODE_PATH
 /// reject them. Returns a native Windows path (backslashes preserved — valid for
@@ -3486,6 +3506,19 @@ pub fn node_options_token(value: &str) -> String {
     }
 }
 
+/// One complete option for NODE_OPTIONS, quoting its value alone: `--flag="a value"`.
+/// Node's tokenizer accepts a quote anywhere in a token, but the runtime's own scans
+/// (`anotherPreloadMayFollow`, `foreignAsyncLoaderFlagPresent`) look for `--import=` at a
+/// token's start. One they cannot see is a chainer they let the entry run ahead of.
+pub fn node_option_token(option: &str) -> String {
+    match option.split_once('=') {
+        Some((flag, value)) if flag.starts_with("--") && !value.is_empty() => {
+            format!("{flag}={}", node_options_token(value))
+        }
+        _ => node_options_token(option),
+    }
+}
+
 /// Whether a `--require` / `--import` value names one of NUB'S OWN preload entry
 /// points — the runtime preload, or a synthesized preload chainer — rather than a
 /// user's. `value` must already be slash-normalized; a `file://` prefix is
@@ -3521,8 +3554,14 @@ fn is_nub_preload_entry(value: &str) -> bool {
         "preload.mjs" | "preload.cjs" | THREADPOOL_SNAPSHOT_SIDECAR => {
             is_nub_runtime_dir(parent.rsplit('/').next().unwrap_or_default())
         }
-        // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`.
-        "preload-chain.mjs" | "preload-chain.cjs" => parent.ends_with("/.nub"),
+        // The chainer nub synthesizes into `<preload root>/node_modules/.nub/`, whose
+        // name carries a content hash when it holds tsconfig mapper registers. The
+        // runtime's `NUB_CHAIN_MARKER` matches the same `preload-chain.` prefix.
+        _ if file.starts_with("preload-chain.")
+            && (file.ends_with(".mjs") || file.ends_with(".cjs")) =>
+        {
+            parent.ends_with("/.nub")
+        }
         _ => false,
     }
 }
@@ -3634,11 +3673,70 @@ pub fn split_inherited_preloads(value: &str) -> (String, Vec<String>, Vec<String
     (
         passthrough
             .iter()
-            .map(|token| node_options_token(token))
+            .map(|token| node_option_token(token))
             .collect::<Vec<_>>()
             .join(" "),
         requires,
         imports,
+    )
+}
+
+/// The `NODE_OPTIONS` for a re-entrant launch whose entry brought tsconfig mappers the
+/// inherited chainer lacks, or `None` to leave the inherited value alone.
+///
+/// A re-entrant launch otherwise keeps `NODE_OPTIONS` as it is, so a new chainer has to
+/// take the old one's place here or an ordinary spawned grandchild never sees it. It
+/// must REPLACE rather than sit beside the old one: the new chainer holds the whole
+/// effective set in order, and a preload the old one registered first would then be a
+/// module-cache hit, leaving a new mapper above an explicit `preload` entry. Argv was
+/// no alternative, since `spawn` inherits the environment and not `execArgv`. Entries
+/// folded out of the inherited value are in the new chainer too, so they go as well.
+fn reentrant_node_options(existing: Option<&str>, runtime_options: &[String]) -> Option<String> {
+    let chain = runtime_options
+        .iter()
+        .find(|token| {
+            token.strip_prefix("--import=").is_some_and(|value| {
+                let value = value.replace('\\', "/");
+                is_nub_preload_entry(&value) && !value.ends_with("/preload-chain.mjs")
+            })
+        })?
+        .clone();
+    let (rest, _, _) = split_inherited_preloads(existing?);
+    let tokens = split_node_options(&rest);
+    if tokens.contains(&chain) {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::with_capacity(tokens.len() + 1);
+    let mut placed = false;
+    let mut tokens = tokens.into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        let is_chain = |value: &str| {
+            let value = value.replace('\\', "/");
+            is_nub_preload_entry(&value) && value.ends_with(".mjs")
+        };
+        let inherited_chain = match token.strip_prefix("--import=") {
+            Some(value) => is_chain(value),
+            None if token == "--import" && tokens.peek().is_some_and(|v| is_chain(v)) => {
+                tokens.next();
+                true
+            }
+            None => false,
+        };
+        if !inherited_chain {
+            out.push(token);
+        } else if !placed {
+            out.push(chain.clone());
+            placed = true;
+        }
+    }
+    if !placed {
+        out.push(chain);
+    }
+    Some(
+        out.iter()
+            .map(|token| node_option_token(token))
+            .collect::<Vec<_>>()
+            .join(" "),
     )
 }
 
@@ -4221,6 +4319,80 @@ mod tests {
             r#""--conditions=a\"b""#
         );
         assert_eq!(node_options_token(""), r#""""#);
+    }
+
+    #[test]
+    fn a_reentrant_launch_replaces_the_chainer_only_when_mappers_change_it() {
+        let ours = "--require=/nub/runtime/preload.cjs";
+        let hashed = "--import=file:///p/node_modules/.nub/preload-chain.aaaa.mjs";
+        let new = "--import=file:///p/node_modules/.nub/preload-chain.bbbb.mjs";
+        let fixed = "--import=file:///p/node_modules/.nub/preload-chain.mjs";
+        let options = |token: &str| vec!["--conditions=nub".to_string(), token.to_string()];
+
+        // In place, with the rest kept and an already-folded entry gone.
+        assert_eq!(
+            reentrant_node_options(
+                Some(&format!(
+                    "{ours} {hashed} --max-old-space-size=99 --import=/agent.mjs"
+                )),
+                &options(new)
+            )
+            .as_deref(),
+            Some(format!("{ours} {new} --max-old-space-size=99").as_str())
+        );
+        // The inherited chainer may be the fixed-name one, or absent.
+        assert_eq!(
+            reentrant_node_options(Some(&format!("{ours} {fixed}")), &options(new)).as_deref(),
+            Some(format!("{ours} {new}").as_str())
+        );
+        assert_eq!(
+            reentrant_node_options(Some(ours), &options(new)).as_deref(),
+            Some(format!("{ours} {new}").as_str())
+        );
+        // Unchanged, or no mappers in the new chainer: the inherited value stands.
+        assert_eq!(
+            reentrant_node_options(Some(&format!("{ours} {new}")), &options(new)),
+            None
+        );
+        assert_eq!(reentrant_node_options(Some(ours), &options(fixed)), None);
+
+        // A space in the project's path: quoted once, as one token.
+        let spaced = "--import=file:///sp ace/node_modules/.nub/preload-chain.bbbb.mjs";
+        assert_eq!(
+            reentrant_node_options(Some(ours), &options(spaced)).as_deref(),
+            Some(format!("{ours} --import=\"{}\"", &spaced[9..]).as_str())
+        );
+    }
+
+    #[test]
+    fn windows_spelled_nub_tokens_are_not_folded_and_the_chainer_is_replaced() {
+        let chain = |hash: &str| {
+            format!(
+                "--import=file:///C:/Users/RUNNER~1/AppData/Local/Temp/.tmpAb/node_modules/.nub/preload-chain.{hash}.mjs"
+            )
+        };
+        let inherited = format!(
+            r"--require=D:\a\nub\nub\runtime\preload.cjs --conditions=nub {}",
+            chain("15e604a265d9faa0")
+        );
+        let (rest, requires, imports) = split_inherited_preloads(&inherited);
+        assert!(
+            requires.is_empty() && imports.is_empty(),
+            "{requires:?} {imports:?}"
+        );
+        assert_eq!(rest, inherited);
+
+        let quoted = r#"--require="C:\\Program Files\\nub\\runtime\\preload.cjs""#;
+        let (_, requires, _) = split_inherited_preloads(quoted);
+        assert!(requires.is_empty(), "{requires:?}");
+
+        assert_eq!(
+            reentrant_node_options(Some(&inherited), &[chain("97573208cbce4ee3")]),
+            Some(format!(
+                r"--require=D:\a\nub\nub\runtime\preload.cjs --conditions=nub {}",
+                chain("97573208cbce4ee3")
+            ))
+        );
     }
 
     #[test]

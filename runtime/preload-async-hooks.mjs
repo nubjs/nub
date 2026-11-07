@@ -30,7 +30,7 @@ import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, CLOBBER_MAP, dataExtsFor,
   extname, isFileUrl, resolveSpec, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
-  noteRuntimeV8FlagSource, outerHookOwnsFormat,
+  noteRuntimeV8FlagSource, outerHookOwnsFormat, explainMappedExtension,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -188,5 +188,10 @@ async function loadInner(url, context, nextLoad) {
   // Data-format imports. dataExtsFor pins node_modules to nub's BUILT-IN loaders, so
   // the project's `loader` config can't redefine how a dependency's imports load.
   if (ext in dataExtsFor(url)) return loadData(url, ext);
-  return nextLoad(url, context);
+  try {
+    return await nextLoad(url, context);
+  } catch (err) {
+    explainMappedExtension(err, url);
+    throw err;
+  }
 }

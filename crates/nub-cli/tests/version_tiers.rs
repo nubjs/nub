@@ -543,6 +543,68 @@ fn data_handlers_do_not_join_extensionless_resolution() {
     }
 }
 
+/// A tsconfig mapper's register written for `registerHooks` cannot run on this tier,
+/// and nobody asked for it on this run, so it must not stop a file that imports nothing
+/// mapped. Importing its extension then fails naming the cause. Both shapes real
+/// registers use are listed: a call on the default export throws when it runs, a named
+/// import is a link error. The fixture is built here because `node_modules` is ignored.
+#[test]
+fn a_register_needing_registerhooks_is_skipped_on_the_compat_tier() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for (name, source) in [
+        (
+            "called",
+            "import m from 'node:module'; m.registerHooks({});\n",
+        ),
+        (
+            "linked",
+            "import { registerHooks } from 'node:module'; registerHooks({});\n",
+        ),
+    ] {
+        let package = root.join("node_modules").join(name);
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            format!(r#"{{ "name": "{name}", "exports": {{ "./register": "./register.mjs" }} }}"#),
+        )
+        .unwrap();
+        std::fs::write(package.join("register.mjs"), source).unwrap();
+    }
+    std::fs::write(
+        root.join("tsconfig.json"),
+        r#"{ "contentMappers": [
+            { "package": "called", "extensions": [".one"] },
+            { "package": "linked", "extensions": [".two"] }
+        ] }"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("plain.mjs"), "console.log('plain ran');\n").unwrap();
+    std::fs::write(root.join("a.two"), "x\n").unwrap();
+    std::fs::write(root.join("mapped.mjs"), "await import('./a.two');\n").unwrap();
+
+    let fixture = root.to_str().unwrap();
+    let deadline = Duration::from_secs(120);
+    let Some((stdout, stderr, code)) =
+        run_nub_args_against_node((22, 13, 0), fixture, &["plain.mjs"], deadline)
+    else {
+        eprintln!(
+            "skipping: Node 22.13.0 not installed (set TEST_NODE_BIN_22_13_0 or nvm install)"
+        );
+        return;
+    };
+    assert_eq!(code, Some(0), "stderr={stderr}");
+    assert!(stdout.contains("plain ran"), "stdout={stdout:?}");
+
+    let (_, stderr, code) =
+        run_nub_args_against_node((22, 13, 0), fixture, &["mapped.mjs"], deadline).unwrap();
+    assert_ne!(code, Some(0), "stderr={stderr}");
+    assert!(
+        stderr.contains(r#"by "linked", whose "./register" did not load it on Node v22.13.0"#),
+        "the error must name the mapper: stderr={stderr}"
+    );
+}
+
 /// Import Text on the FAST tier where the flag does NOT exist (Node 24.4.0): sync
 /// `module.registerHooks`, but native `--experimental-import-text` is absent — it landed
 /// at 26.5.0 and was backported no lower than 24.19.0 — so nub serves text imports via

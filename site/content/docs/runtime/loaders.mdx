@@ -29,6 +29,88 @@ Nub picks the loader by file extension. Plain `.json` is not in the set, because
 | `.yaml`, `.yml` | YAML, parsed |
 | `.txt` | a string, unparsed |
 
+## Content mappers
+
+TypeScript 7.1's [content mappers](https://github.com/microsoft/typescript-go/pull/4712) type-check other file types, but TypeScript never runs them. The runtime half is the package's `./register` export, which Nub preloads for every package your tsconfig lists.
+
+```jsonc title="tsconfig.json"
+{
+  // ...
+  "contentMappers": [
+    { "package": "motherload", "extensions": [".toml", ".yaml"] }
+  ]
+}
+```
+
+```ts title="main.ts"
+import config from "./config.yaml"; // loaded by motherload/register
+```
+
+```sh
+nub main.ts
+```
+
+There is no `--import` to pass and nothing to add to `nub.jsonc`. A mapper takes precedence over Nub's own loaders.
+
+- **Which tsconfig:** the nearest to the entry file, or to the package for `nub run`. `extends` and `references` are followed, and each `package` resolves from the config that declares it.
+- **Order:** the longest extension answers first, as in TypeScript, so `.schema.jsonc` wins over `.jsonc`. A [`preload`](/docs/config#preload) entry answers before any mapper.
+- **No runtime:** a package that is not installed, has no `./register` export, or whose register needs a newer Node is skipped. Importing one of its extensions fails, and the error names the package.
+
+`--node` and `NODE_COMPAT` load no registers.
+
+### Options
+
+An entry's `options` reach its register as JSON in the `CONTENT_MAPPER_OPTIONS` environment variable.
+
+```jsonc title="tsconfig.json"
+{
+  "contentMappers": [
+    {
+      "package": "sql-mapper",
+      "extensions": [".sql"],
+      "options": { "dialect": "postgres" }
+    }
+  ]
+}
+```
+
+The variable is set only while that register's module evaluates, so it never reaches your application or the processes it starts.
+
+### Package authors
+
+A package takes part by exporting `./register` beside its content mapper. Importing that module registers the runtime hooks, and it reads its options at the top level.
+
+```json title="package.json"
+{
+  "name": "sql-mapper",
+  "exports": { "./register": "./register.mjs" },
+  "typescript": { "contentMapper": { "exec": ["node", "mapper.mjs"] } }
+}
+```
+
+```js title="register.mjs"
+import { registerHooks } from "node:module";
+import { fileURLToPath } from "node:url";
+import { compile } from "./compile.mjs";
+
+const options = JSON.parse(process.env.CONTENT_MAPPER_OPTIONS ?? "{}");
+
+registerHooks({
+  load(url, context, next) {
+    if (!url.endsWith(".sql")) return next(url, context);
+    const source = compile(fileURLToPath(url), options);
+    return { format: "module", source, shortCircuit: true };
+  },
+});
+```
+
+The same export runs under plain Node, where the variable is yours to set:
+
+```sh
+CONTENT_MAPPER_OPTIONS='{"dialect":"postgres"}' \
+  node --import sql-mapper/register main.ts
+```
+
 ## Default export
 
 A data module has a single default export, the parsed value, like Node's own JSON modules. There are no named exports, so destructure the default to pull out top-level keys.
