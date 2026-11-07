@@ -96,6 +96,13 @@ async fn fixture() -> Fixture {
         serde_json::to_vec(&make_packument("opt-registry", &["1.0.0"], "1.0.0")).unwrap(),
     );
     routes.insert(
+        "/peer-a.tgz".to_string(),
+        tgz(
+            serde_json::json!({ "name": "peer-a", "version": "1.0.0" }),
+            0,
+        ),
+    );
+    routes.insert(
         "/peer-a".to_string(),
         serde_json::to_vec(&make_packument("peer-a", &["1.0.0"], "1.0.0")).unwrap(),
     );
@@ -149,11 +156,11 @@ async fn fixture() -> Fixture {
     }
 }
 
-async fn resolve(fx: &Fixture, accept_all: bool) -> LockfileGraph {
+fn client(fx: &Fixture) -> Arc<aube_registry::client::RegistryClient> {
     use aube_registry::config::{FetchPolicy, NpmConfig, normalize_registry_url_pub};
     // No retries: the truncated tarball would otherwise sit through the
     // client's backoff before its failure reaches the resolver.
-    let client = Arc::new(
+    Arc::new(
         aube_registry::client::RegistryClient::from_config_with_policy(
             NpmConfig {
                 registry: normalize_registry_url_pub(&format!("{}/", fx.base)),
@@ -164,8 +171,11 @@ async fn resolve(fx: &Fixture, accept_all: bool) -> LockfileGraph {
                 ..Default::default()
             },
         ),
-    );
-    let mut resolver = Resolver::new(client)
+    )
+}
+
+async fn resolve(fx: &Fixture, accept_all: bool) -> LockfileGraph {
+    let mut resolver = Resolver::new(client(fx))
         .with_supported_architectures(SupportedArchitectures {
             accept_all,
             ..Default::default()
@@ -263,5 +273,89 @@ async fn portable_lockfile_records_other_platform_url_optionals_with_integrity()
         "an optional whose download fails is skipped, not fatal"
     );
     assert!(package(&graph, "native-any").unwrap().integrity.is_some());
+    fx.server.abort();
+}
+
+// A registry package's lockfile edge to a peer holds what the peer resolved to,
+// here the URL the root pins it to. Reusing the lockfile read that edge as the
+// package's own URL dependency, which `blockExoticSubdeps` refuses, so every
+// resolve after the first failed (nubjs/nub#1108).
+#[tokio::test]
+async fn a_peer_the_root_pins_to_a_url_does_not_block_the_next_resolve() {
+    let fx = fixture().await;
+    let url = format!("{}/peer-a.tgz", fx.base);
+    let lockfile = format!(
+        r#"lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      consumer:
+        specifier: 1.0.0
+        version: 1.0.0(peer-a@{url})
+      peer-a:
+        specifier: {url}
+        version: {url}
+
+packages:
+
+  consumer@1.0.0:
+    resolution: {{integrity: sha512-consumer}}
+    peerDependencies:
+      peer-a: ^1.0.0
+
+  peer-a@{url}:
+    resolution: {{integrity: sha512-peer-a, tarball: {url}}}
+    version: 1.0.0
+
+snapshots:
+
+  consumer@1.0.0(peer-a@{url}):
+    dependencies:
+      peer-a: {url}
+
+  peer-a@{url}: {{}}
+"#
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pnpm-lock.yaml");
+    std::fs::write(&path, lockfile).unwrap();
+    let existing = aube_lockfile::pnpm::parse(&path).unwrap();
+
+    let mut consumer = make_packument("consumer", &["1.0.0"], "1.0.0");
+    consumer
+        .versions
+        .get_mut("1.0.0")
+        .unwrap()
+        .peer_dependencies
+        .insert("peer-a".to_string(), "^1.0.0".to_string());
+    let mut resolver = Resolver::new(client(&fx));
+    resolver.cache.insert("consumer".to_string(), consumer);
+    let mut manifest = PackageJson::default();
+    manifest
+        .dependencies
+        .insert("peer-a".to_string(), url.clone());
+    manifest
+        .dependencies
+        .insert("consumer".to_string(), "1.0.0".to_string());
+
+    let graph = resolver
+        .resolve(&manifest, Some(&existing))
+        .await
+        .expect("the consumer's peer edge is not a dependency of its own");
+
+    let peer = package(&graph, "peer-a").expect("peer-a resolved");
+    assert!(
+        matches!(&peer.local_source, Some(LocalSource::RemoteTarball(t)) if t.url == url),
+        "the peer is the root's URL package: {:?}",
+        peer.local_source
+    );
+    let consumer = package(&graph, "consumer").expect("consumer resolved");
+    assert!(
+        consumer.dependencies.contains_key("peer-a"),
+        "the consumer's peer is linked beside it: {:?}",
+        consumer.dependencies
+    );
     fx.server.abort();
 }
