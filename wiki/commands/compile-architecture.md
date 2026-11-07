@@ -16,7 +16,14 @@ The runtime is still more than a bare script spawn. Official, unpatched Node run
 
 The preamble is injected into the main root and each supported static worker root. It installs feature-detected polyfills, including the supported Web Storage surface for `sessionStorage`. A polyfill the target Node ships natively is stripped from the bundle before it is built; one the target lacks — Temporal, URLPattern, Float16Array — is bundled but installed as a lazy global, so its package evaluates on the first read of the global rather than at every start. That storage is process-local and does not add browser-origin sharing or unsupported Web Storage APIs.
 
-Static workers must use a file-backed `new Worker(new URL("./worker.js", import.meta.url))` shape through the global `Worker` or a named ESM import from `node:worker_threads`. Statically recognized data URLs, blob URLs, `{ eval: true }`, and CommonJS `require("node:worker_threads")` worker bindings are refused because the compiler cannot turn them into preamble-bearing roots.
+A static worker is a file-backed `new Worker(new URL("./worker.js", import.meta.url))` written through the global `Worker` or a named ESM import from `node:worker_threads`, and it becomes a preamble-bearing root. Every other worker runs as Node's own entry, with the preamble preloaded ahead of it as `nub <file>` preloads its runtime. That covers a `data:` or `blob:` URL and a shipped file reached through a URL built elsewhere.
+
+- The compile bootstrap, or the single-executable loader, replaces `worker_threads.Worker` before the ESM graph links, so a static `import { Worker }` and the global `Worker` both reach it.
+- Each such worker gets one more `--import` at the front of its `execArgv`: a generated module that installs the bootstrap record and any `--external` hook, then loads a preamble-only chunk. In a single-executable the `--import` is a `data:` URL that reinstalls the payload's module hooks first.
+- The preamble-only chunk is a separate bundle rather than a second root, which keeps the program in one entry chunk. A second root split the preamble into a shared chunk, and that cost a program naming `Worker` 2.3 ms of every start. Traced roots are left out, so no worker loads both copies.
+- A payload whose app can name `Worker` carries that chunk, so `--smol` extracts it rather than running it inline.
+
+Statically recognized `{ eval: true }` workers are refused, because Node runs no `--import` ahead of eval source. CommonJS `require("node:worker_threads")` worker bindings are refused because the compiler cannot tie them to Node's Worker.
 
 ## Two shapes
 

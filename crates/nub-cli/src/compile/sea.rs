@@ -406,6 +406,7 @@ pub fn payload(
     files: &[nub_core::compile::AppFile<Vec<u8>>],
     entry: &str,
     workers: &[String],
+    worker_scope: Option<&str>,
     app_sha: &str,
     neutralize_localstorage: bool,
 ) -> Result<Payload> {
@@ -443,7 +444,12 @@ pub fn payload(
     if !names.iter().any(|name| name == entry) {
         bail!("the compiled entry {entry:?} is not among the emitted chunks");
     }
-    if let Some(missing) = workers.iter().find(|name| !names.contains(name)) {
+    if let Some(missing) = workers
+        .iter()
+        .map(String::as_str)
+        .chain(worker_scope)
+        .find(|name| !names.iter().any(|known| known == name))
+    {
         bail!("the compiled worker entry {missing:?} is not among the emitted chunks");
     }
     Ok(Payload {
@@ -452,6 +458,7 @@ pub fn payload(
             entry,
             &names,
             workers,
+            worker_scope,
             app_sha,
             neutralize_localstorage,
         )?,
@@ -475,6 +482,7 @@ fn main_source(
     entry: &str,
     files: &[String],
     workers: &[String],
+    worker_scope: Option<&str>,
     app_sha: &str,
     neutralize_localstorage: bool,
 ) -> Result<Vec<u8>> {
@@ -495,6 +503,10 @@ fn main_source(
         .replace(
             "__NUB_SEA_WORKERS__",
             &serde_json::to_string(workers).expect("payload names serialize"),
+        )
+        .replace(
+            "__NUB_SEA_WORKER_SCOPE__",
+            &serde_json::to_string(&worker_scope).expect("a payload name serializes"),
         )
         .replace(
             "\"__NUB_SEA_COMPILE_CACHE__\"",
@@ -559,6 +571,9 @@ pub struct Inputs<'a> {
     /// worker target — reading `node:worker_threads` to install the replacement
     /// costs 1.4 ms that a payload with no worker should not pay.
     pub workers: &'a [String],
+    /// The payload name of the generated worker-scope module, which the loader
+    /// preloads into every worker that is not one of `workers`.
+    pub worker_scope: Option<&'a str>,
     pub app_sha: &'a str,
     pub node_license: &'a [u8],
     /// The EXACT Node this artifact embeds. Decides the blob's header layout and
@@ -574,6 +589,7 @@ pub fn build_blob(inputs: &Inputs<'_>) -> Result<Vec<u8>> {
         inputs.app_files,
         inputs.entry,
         inputs.workers,
+        inputs.worker_scope,
         inputs.app_sha,
         nub_core::node::flags::should_inject_experimental_webstorage(
             inputs.node_version,
@@ -1062,7 +1078,7 @@ mod tests {
             file("package.json", b"{\"type\":\"module\"}"),
         ];
 
-        let split = payload(&files, "app.mjs", &[], "0123456789abcdef0123", false).unwrap();
+        let split = payload(&files, "app.mjs", &[], None, "0123456789abcdef0123", false).unwrap();
         assert_eq!(
             split
                 .assets
@@ -1093,6 +1109,7 @@ mod tests {
             "\"__NUB_SEA_ENTRY__\"",
             "__NUB_SEA_FILES__",
             "__NUB_SEA_WORKERS__",
+            "__NUB_SEA_WORKER_SCOPE__",
             "\"__NUB_SEA_COMPILE_CACHE__\"",
             "__NUB_SEA_NEUTRALIZE_LOCALSTORAGE__",
         ] {
@@ -1103,7 +1120,15 @@ mod tests {
         }
 
         assert!(
-            payload(&files, "missing.mjs", &[], "0123456789abcdef0123", false).is_err(),
+            payload(
+                &files,
+                "missing.mjs",
+                &[],
+                None,
+                "0123456789abcdef0123",
+                false
+            )
+            .is_err(),
             "an entry that is not among the chunks is a build failure"
         );
         // The loader accepts a `new Worker(...)` target ONLY from this list, so a
@@ -1114,6 +1139,7 @@ mod tests {
                 &files,
                 "app.mjs",
                 &["worker-a.mjs".to_string()],
+                None,
                 "0123456789abcdef0123",
                 false
             )
@@ -1124,15 +1150,31 @@ mod tests {
             &files,
             "app.mjs",
             &["app.mjs".to_string()],
+            Some("app.mjs"),
             "0123456789abcdef0123",
             false,
         )
         .unwrap();
+        let main = String::from_utf8(with_worker.main).unwrap();
         assert!(
-            String::from_utf8(with_worker.main)
-                .unwrap()
-                .contains("const WORKERS = [\"app.mjs\"];"),
+            main.contains("const WORKERS = [\"app.mjs\"];"),
             "the loader is told which payload names a worker may name"
+        );
+        assert!(
+            main.contains("const WORKER_SCOPE = \"app.mjs\";"),
+            "and which module loads the preamble into every other worker"
+        );
+        assert!(
+            payload(
+                &files,
+                "app.mjs",
+                &[],
+                Some("scope.mjs"),
+                "0123456789abcdef0123",
+                false
+            )
+            .is_err(),
+            "a worker-scope module that is not among the chunks is a build failure"
         );
     }
 

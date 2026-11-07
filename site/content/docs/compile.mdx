@@ -442,13 +442,20 @@ const { Worker: Spawn } = globalThis;
 const Spawn = globalThis.Worker ?? NodeWorker; // every arm is a Worker
 ```
 
-The URL itself is read only where it is written inline, as above. A specifier computed into a variable first is not bundled.
+The URL itself is read only where it is written inline, as above. A specifier computed into a variable first is not bundled, and neither is a `data:` or `blob:` URL. Those workers still get the preamble, which the artifact loads ahead of their own entry, but their code runs as written. It is not transpiled, and a file it names has to exist at run time.
+
+```ts
+new Worker("data:text/javascript,postMessage(typeof self)"); // "object"
+const start = (url: URL) => new Worker(url);
+// ships as a file, runs as written
+start(new URL("./worker.mjs", import.meta.url));
+```
 
 Anything else that looks like a worker fails the build rather than shipping its entry as data, which would run untranspiled and outside the compiled runtime:
 
 - A `Worker` property on any other object, including one from `require("node:worker_threads")`.
 - A binding assigned more than once, or an arm of a `??` guard that resolves to something else.
-- A `data:` URL, a `blob:` URL, or source text with `{ eval: true }`, none of which have a module root to hold the preamble.
+- Source text with `{ eval: true }`, which Node runs before anything can be loaded ahead of it.
 
 Name the constructor directly — the global, a property of `globalThis`, or an import from `node:worker_threads` — and it compiles.
 
@@ -993,7 +1000,7 @@ The `child_process.fork()` function uses the underlying Node when `options.execP
 
 Forks prepend the private compiled bootstrap exactly once. When `execArgv` is omitted or falsy, the child otherwise inherits the parent's actual Node flags. An explicit `execArgv` array keeps its authored order after that bootstrap.
 
-For `node:worker_threads`, an explicit `execArgv` keeps Node's replacement semantics. Compiled static workers use a generated wrapper that installs the private bootstrap independently. The global `Worker` API instead merges explicit flags after the inherited flags and keeps one bootstrap at the front.
+Every worker that is not a traced entry gets one more flag at the front of its `execArgv`, an `--import` of the generated module that loads the preamble. Apart from that flag, an explicit `execArgv` for `node:worker_threads` keeps Node's replacement semantics, and an omitted one inherits the parent's flags. Compiled static workers use a generated wrapper that installs the private bootstrap independently. The global `Worker` API instead merges explicit flags after the inherited flags and keeps one bootstrap at the front.
 
 ## Related
 

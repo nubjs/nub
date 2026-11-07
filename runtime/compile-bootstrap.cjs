@@ -28,6 +28,12 @@ needsChildProcess = true;
 // #region nub:compile:worker
 needsWorker = true;
 // #endregion
+// Filled in by `nub compile` for a payload that can name Worker, as payload names
+// relative to this file: the generated module that loads the preamble into a
+// worker started on anything but a traced entry, and the traced entries' own
+// wrappers, which import the program's preamble and so are left alone.
+const workerScope = undefined;
+const tracedWorkers = [];
 const descriptor = Object.getOwnPropertyDescriptor(process, key);
 const existing = descriptor?.value;
 let validExisting = false;
@@ -87,6 +93,124 @@ if (!validExisting) {
   if (needsChildProcess) {
     installCompiledForkIdentity(getBuiltin("node:child_process"), process.execPath);
   }
+  // Only where the bootstrap is a file: the module it names sits beside this one.
+  // A single executable installs the same thing from its own loader, and the
+  // inline shape declines to inline any payload that carries the module.
+  if (needsWorker && requireArg !== undefined && workerScope !== undefined) {
+    const path = getBuiltin("node:path");
+    const url = getBuiltin("node:url");
+    let traced;
+    installCompiledWorkerScope(
+      getBuiltin("node:worker_threads"),
+      () => `--import=${url.pathToFileURL(path.join(__dirname, workerScope)).href}`,
+      (target) => {
+        traced ??= new Set(tracedWorkers.map((name) => path.join(__dirname, name)));
+        const file =
+          target instanceof URL
+            ? target.protocol === "file:" && url.fileURLToPath(target)
+            : typeof target === "string" && path.resolve(target);
+        return typeof file === "string" && traced.has(file);
+      },
+    );
+  }
+}
+
+// `nub <file>` hands every worker its preload, so a `data:`, `blob:` or untraced
+// file worker sees `self`, `postMessage` and the polyfilled globals. A compiled
+// artifact has no preload to inherit: only a traced worker's own wrapper imports
+// the preamble. So every other worker is started with one more `--import`, the
+// generated module that loads the preamble, ahead of its entry — which still runs
+// as Node's own entry, so its module format, `require.main` and error frames are
+// the ones `node` gives it.
+//
+// Replaced HERE, before the ESM graph, because a static `import { Worker }` binds
+// the builtin's ESM facade when the graph links, and only a replacement made
+// earlier reaches it. The global Worker polyfill constructs through this too.
+//
+// An omitted `execArgv` means "inherit", which an added flag cannot express, so it
+// becomes this process's flags. Node accepts per-process flags such as
+// `--max-old-space-size` only by inheritance, and refuses them in a list, naming
+// each; those are dropped, with any separate value, since a worker takes none of
+// them from its parent's list either. Should Node still refuse, or name them in a
+// way that does not line up with the list, the worker starts as it would have,
+// without the preamble. `eval: true` is left alone: Node runs no `--import`
+// before eval source.
+function installCompiledWorkerScope(threads, scopeArgFor, isTraced) {
+  const OriginalWorker = threads.Worker;
+  let scopeArg;
+  class Worker extends OriginalWorker {
+    constructor(target, options) {
+      const given = options?.execArgv;
+      if (options?.eval === true || (given !== undefined && !Array.isArray(given))) {
+        super(target, options);
+        return;
+      }
+      scopeArg ??= scopeArgFor();
+      const inherited = given ?? process.execArgv;
+      const rest = inherited.filter((arg) => arg !== scopeArg);
+      // A traced entry's wrapper loads the program's preamble, so it must not
+      // also inherit the scope module from an untraced parent: the second copy
+      // would read the first's lazy globals and evaluate them.
+      let execArgv;
+      if (!isTraced(target)) execArgv = [scopeArg, ...rest];
+      else if (rest.length < inherited.length) execArgv = rest;
+      else {
+        super(target, options);
+        return;
+      }
+      // Node stops reading flags at a stray value, so a retry can surface more.
+      for (;;) {
+        try {
+          super(target, { ...options, execArgv });
+          return;
+        } catch (error) {
+          if (given !== undefined || error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") throw error;
+          const retry = withoutRefusedExecArgv(execArgv, error);
+          if (retry === null) break;
+          execArgv = retry.kept;
+        }
+      }
+      super(target, options);
+    }
+  }
+  threads.Worker = Worker;
+}
+
+// Node names the flags it refused in one message, joined with ", ", and a flag
+// whose value is a separate token by the flag alone (`--title` for
+// `--title demo`). So the report is matched against `execArgv` in order rather
+// than split: a refused flag takes its operand with it, and a report that does
+// not line up with the list returns null. Copied verbatim into
+// compile-sea-loader.cjs and worker-polyfill.mjs, which cannot share a module
+// with this file; scripts/worker-exec-argv.test.mts drives all three.
+function withoutRefusedExecArgv(execArgv, error) {
+  if (error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") return null;
+  const report = String(error.message);
+  const start = report.indexOf(": ");
+  if (start === -1) return null;
+  let cursor = start + 2;
+  const kept = [];
+  const refused = [];
+  for (let i = 0; i < execArgv.length; i++) {
+    const arg = execArgv[i];
+    const end = cursor + arg.length;
+    if (
+      arg !== "" &&
+      report.startsWith(arg, cursor) &&
+      (end === report.length || report.startsWith(", ", end))
+    ) {
+      refused.push(arg);
+      cursor = end === report.length ? end : end + 2;
+      const next = execArgv[i + 1];
+      if (!arg.includes("=") && next !== undefined && !next.startsWith("-")) {
+        refused.push(next);
+        i++;
+      }
+    } else {
+      kept.push(arg);
+    }
+  }
+  return cursor === report.length && refused.length > 0 ? { kept, refused } : null;
 }
 
 // A compiled artifact publishes the outer executable as `process.execPath`, and

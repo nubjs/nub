@@ -238,6 +238,9 @@ pub struct BundleResult {
     /// bundled implementation chunk.  Compile writes a tiny public wrapper for
     /// each pair after it knows whether a runtime resolve hook is needed.
     pub worker_roots: Vec<WorkerRoot>,
+    /// Whether an application module (or native island) can name `Worker`, so the
+    /// artifact needs the preamble-only chunk [`bundle_worker_scope`] builds.
+    pub uses_worker: bool,
     /// The `--metafile` report, serialized. `None` unless
     /// [`BundleOptions::metafile`] asked for one.
     pub metafile: Option<metafile::Metafile>,
@@ -277,6 +280,102 @@ pub fn bundle_for_compile(
     launch_root: &Path,
 ) -> Result<BundleResult> {
     bundle_inner(entry_abs, opts, Some(launch_root), &BTreeMap::new())
+}
+
+/// The preamble-only chunk a worker started on anything but a traced entry
+/// preloads, through the generated wrapper [`WORKER_SCOPE_NAME`] at the payload
+/// root. `compile-bootstrap.cjs` and the single-executable loader name both.
+pub const WORKER_SCOPE_CHUNK: &str = "__nub_worker_scope-code.mjs";
+pub const WORKER_SCOPE_NAME: &str = "__nub_worker_scope.mjs";
+
+/// Bundle the compile preamble ALONE, as [`WORKER_SCOPE_CHUNK`].
+///
+/// A build of its own rather than a second root in the program's. A second root
+/// moves the preamble out of the entry chunk into one both share, and that split
+/// cost a program naming `Worker` 2.3 ms of every start (child CPU, darwin-arm64,
+/// Node 26.13) whether or not it ever started one. A copy in its own file costs
+/// payload bytes instead. The two copies never meet: a worker that loads this one
+/// is never a traced entry, which carries the program's.
+///
+/// Built from the program's options so the preamble is stripped for the same
+/// target, minus everything that only describes the program's own graph.
+pub fn bundle_worker_scope(opts: &BundleOptions) -> Result<Vec<u8>> {
+    let dir = tempfile::tempdir().context("staging the worker-scope entry")?;
+    let entry = dir.path().join(WORKER_SCOPE_CHUNK);
+    std::fs::write(&entry, "export {};\n").context("staging the worker-scope entry")?;
+    let scope = BundleOptions {
+        module_mirror: ModuleMirror::default(),
+        minify: opts.minify,
+        keep_names: opts.keep_names,
+        sourcemap: SourcemapMode::None,
+        sources_content: false,
+        define: opts.define.clone(),
+        auto_define: opts.auto_define.clone(),
+        tree_shake: opts.tree_shake,
+        ignore_annotations: opts.ignore_annotations,
+        alias: Vec::new(),
+        conditions: opts.conditions.clone(),
+        external: Vec::new(),
+        unbundled: Vec::new(),
+        bundled: Vec::new(),
+        allow_dynamic_import: Vec::new(),
+        tsconfig: None,
+        loaders: Vec::new(),
+        native_target: opts.native_target,
+        drop_console: opts.drop_console,
+        drop_debugger: opts.drop_debugger,
+        metafile: false,
+        target_node: opts.target_node,
+        eager_startup: opts.eager_startup,
+    };
+    let built = bundle_inner(&entry, &scope, Some(dir.path()), &BTreeMap::new())
+        .context("bundling the worker scope")?;
+    match built.files.as_slice() {
+        [chunk] if chunk.name == WORKER_SCOPE_CHUNK && built.assets.is_empty() => {
+            Ok(chunk.bytes.clone())
+        }
+        files => bail!(
+            "the worker scope bundled into {:?} rather than one chunk",
+            files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>()
+        ),
+    }
+}
+
+/// Name the worker-scope module and the traced worker wrappers in the bootstrap.
+///
+/// `compile-bootstrap.cjs` declares both empty; a payload that can name `Worker`
+/// gets them filled in, as payload names relative to the bootstrap. The traced
+/// wrappers are named so the bootstrap can leave them out: each already imports
+/// the program's preamble, and loading the scope's copy as well would install
+/// the worker scope twice.
+pub fn configure_bootstrap_worker_scope(bootstrap: &[u8], traced: &[String]) -> Result<Vec<u8>> {
+    // One declaration per needle, without its line ending: a Windows checkout
+    // gives the runtime files CRLF.
+    let text = std::str::from_utf8(bootstrap).context("the compile bootstrap is not utf-8")?;
+    let declarations = [
+        (
+            "const workerScope = undefined;",
+            format!(
+                "const workerScope = {};",
+                serde_json::to_string(WORKER_SCOPE_NAME)?
+            ),
+        ),
+        (
+            "const tracedWorkers = [];",
+            format!("const tracedWorkers = {};", serde_json::to_string(traced)?),
+        ),
+    ];
+    let mut filled = text.to_string();
+    for (needle, value) in &declarations {
+        if filled.matches(needle).count() != 1 {
+            bail!(
+                "the compile bootstrap no longer declares its worker scope the way the \
+                 compiler expects, so nub cannot name it"
+            );
+        }
+        filled = filled.replacen(needle, value, 1);
+    }
+    Ok(filled.into_bytes())
 }
 
 fn bundle_inner(
@@ -845,6 +944,7 @@ fn bundle_inner(
         external_imports,
         shipped_sources,
         worker_roots: new_urls.worker_roots(),
+        uses_worker: prelude.app_uses_worker.load(AtomicOrdering::Relaxed),
         metafile,
     })
 }
@@ -3722,10 +3822,11 @@ fn reject_unsupported_workers(refusals: &mut Vec<WorkerRefusal>) -> Result<()> {
     bail!(
         "nub compile cannot augment these worker sources in v1:\n{}\n\n\
          \x20\x20Compile can inject its ESM prelude into file-backed workers written as\n\
-         \x20\x20new Worker(new URL(\"./worker.js\", import.meta.url)). `data:`, `blob:`,\n\
-         \x20\x20and `{{ eval: true }}` workers execute code without a module root, so there is\n\
-         \x20\x20no safe place to install the prelude. Move the worker body into a file-backed\n\
-         \x20\x20module. A constructor compile cannot tie to Node's Worker is refused rather\n\
+         \x20\x20new Worker(new URL(\"./worker.js\", import.meta.url)), and loads it ahead of\n\
+         \x20\x20any other worker's entry. `{{ eval: true }}` workers execute source text before\n\
+         \x20\x20anything can be loaded ahead of it, so there is no safe place to install the\n\
+         \x20\x20prelude. Move the worker body into a file-backed module, or a `data:` URL.\n\
+         \x20\x20A constructor compile cannot tie to Node's Worker is refused rather\n\
          \x20\x20than shipped as data: reach it through the global Worker, globalThis.Worker,\n\
          \x20\x20or an import from node:worker_threads, and bind it with a plain const.\n\
          \x20\x20Dynamic or unresolved file worker specifiers keep their existing behavior.",
@@ -3977,8 +4078,7 @@ fn scan_new_urls(id: &str, source: &str) -> NewUrlScan {
                 self.worker_aliases,
             );
             if callee == WorkerCallee::Proven
-                && let Some(reason) =
-                    unsupported_worker_reason(it, self.semantic, self.node_builtins)
+                && let Some(reason) = unsupported_worker_reason(it)
             {
                 self.worker_refusals.push(WorkerRefusal {
                     source: self.module.clone(),
@@ -4517,40 +4617,13 @@ fn is_compiler_builtin(
 /// deliberately a positive, syntactic check: a computed path or an ordinary
 /// unresolved worker without `{ eval: true }` stays on the compiler's existing
 /// policy instead of being rejected merely because this pass cannot prove it.
-fn unsupported_worker_reason(
-    expr: &NewExpression<'_>,
-    semantic: &oxc_semantic::Semantic<'_>,
-    node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
-) -> Option<String> {
-    if worker_options_enable_eval(expr) {
-        return Some("`new Worker(..., { eval: true })` executes arbitrary source text".into());
-    }
-    let first = expr.arguments.first()?.as_expression()?;
-    let specifier = match first.get_inner_expression() {
-        Expression::NewExpression(url) if is_url_constructor(url, semantic, node_builtins) => {
-            static_specifier(url.arguments.first()?.as_expression()?)?
-        }
-        other => static_specifier(other)?,
-    };
-    inline_worker_scheme(&specifier)
-        .then(|| format!("`new Worker({specifier:?})` has no file-backed module root"))
-}
-
-fn is_url_constructor(
-    expr: &NewExpression<'_>,
-    semantic: &oxc_semantic::Semantic<'_>,
-    node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
-) -> bool {
-    matches!(&expr.callee, Expression::Identifier(callee) if is_compiler_builtin(callee, "URL", semantic, node_builtins))
-}
-
-fn inline_worker_scheme(specifier: &str) -> bool {
-    specifier
-        .get(..5)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
-        || specifier
-            .get(..5)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("blob:"))
+/// `data:` and `blob:` workers are not refused: the artifact preloads the
+/// preamble into every worker that is not a traced entry (`compile-bootstrap.cjs`,
+/// `installCompiledWorkerScope`). Node runs no `--import` before eval source, so
+/// `{ eval: true }` is the one form that preload cannot reach.
+fn unsupported_worker_reason(expr: &NewExpression<'_>) -> Option<String> {
+    worker_options_enable_eval(expr)
+        .then(|| "`new Worker(..., { eval: true })` executes arbitrary source text".into())
 }
 
 fn worker_options_enable_eval(expr: &NewExpression<'_>) -> bool {
@@ -10463,25 +10536,21 @@ console.log('ESM_ENTRY_MARK', path.sep);
     }
 
     #[test]
-    fn inline_worker_forms_are_refused_but_dynamic_file_workers_remain_unresolved() {
-        let forbidden = [
+    fn eval_workers_are_refused_but_url_and_dynamic_workers_compile() {
+        for (tag, source) in [
             ("data", "new Worker('data:text/javascript,postMessage(1)')"),
-            (
-                "blob",
-                "new Worker(new URL('blob:opaque', import.meta.url))",
-            ),
-            ("eval", "new Worker(source, { eval: true })"),
-        ];
-        let mut refusals = Vec::new();
-        for (tag, source) in forbidden {
+            ("blob", "new Worker(URL.createObjectURL(blob))"),
+        ] {
             let scan = scan_new_urls(&format!("/tmp/{tag}.ts"), source);
-            assert_eq!(scan.worker_refusals.len(), 1, "{tag}: {scan:?}");
-            refusals.extend(scan.worker_refusals);
+            assert!(scan.worker_refusals.is_empty(), "{tag}: {scan:?}");
         }
+        let mut refusals =
+            scan_new_urls("/tmp/eval.ts", "new Worker(source, { eval: true })").worker_refusals;
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
         let err = reject_unsupported_workers(&mut refusals)
-            .expect_err("inline worker forms must fail compilation with an actionable diagnostic");
+            .expect_err("an eval worker must fail compilation with an actionable diagnostic");
         let message = format!("{err:#}");
-        assert!(message.contains("data:") && message.contains("blob:") && message.contains("eval"));
+        assert!(message.contains("eval"), "{message}");
         assert!(message.contains("file-backed module"), "{message}");
         let dynamic = scan_new_urls("/tmp/dynamic.ts", "new Worker(workerPath)");
         assert!(dynamic.worker_refusals.is_empty());
@@ -12119,6 +12188,36 @@ after
         );
         cluster.note_island_usage(b"require('cluster')");
         assert!(!cluster.bootstrap_optional());
+    }
+
+    /// The compiler fills the worker scope into the bootstrap the runtime ships,
+    /// and refuses one whose declaration moved rather than shipping it unnamed.
+    #[test]
+    fn the_bootstrap_names_the_worker_scope_and_the_traced_workers() {
+        let shipped = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime/compile-bootstrap.cjs"),
+        )
+        .expect("the compile bootstrap ships in the runtime directory");
+        let filled = configure_bootstrap_worker_scope(&shipped, &["src/w-1.mjs".to_string()])
+            .expect("the shipped bootstrap carries the declaration");
+        let filled = String::from_utf8(filled).unwrap();
+        assert!(
+            filled.contains(&format!("const workerScope = \"{WORKER_SCOPE_NAME}\";"))
+                && filled.contains("const tracedWorkers = [\"src/w-1.mjs\"];"),
+            "{filled}"
+        );
+        let crlf = String::from_utf8(shipped)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .replace('\n', "\r\n");
+        let filled_crlf = configure_bootstrap_worker_scope(crlf.as_bytes(), &[]).unwrap();
+        assert!(
+            String::from_utf8(filled_crlf)
+                .unwrap()
+                .contains(&format!("const workerScope = \"{WORKER_SCOPE_NAME}\";\r\n")),
+            "a CRLF checkout of the bootstrap must be filled in too"
+        );
+        assert!(configure_bootstrap_worker_scope(b"const workerScope = 1;\n", &[]).is_err());
     }
 
     /// The bootstrap keeps an eager builtin load exactly when the app graph names
