@@ -32,12 +32,12 @@ on:
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 jobs:
   install:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: install + PATH (${{ matrix.os }})
@@ -88,7 +88,7 @@ jobs:
   # global PATH was actually re-pointed (not the runner's preinstalled default).
   # A setup-node control job runs the identical assertions as a sanity reference.
   path-parity:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: bare node/npm/npx == specified version (${{ matrix.os }})
@@ -134,7 +134,7 @@ jobs:
           echo "PATH parity OK"
 
   path-parity-control:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: setup-node control — bare node == 20.x (${{ matrix.os }})
@@ -161,7 +161,7 @@ jobs:
           echo "setup-node control OK"
 
   bare-run:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: nub provisions Node + installs unaided (${{ matrix.os }})
@@ -187,7 +187,7 @@ jobs:
           nub main.ts
 
   pre-provision:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: node-version pre-provision + output (${{ matrix.os }})
@@ -220,7 +220,7 @@ jobs:
           STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
   eager-provision:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: eager provision (no input) installs the project pin (${{ matrix.os }})
@@ -255,7 +255,7 @@ jobs:
           STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
   no-pin:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: no project pin does not fail the action (${{ matrix.os }})
@@ -290,7 +290,7 @@ jobs:
           STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
   cache:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: cache round-trip (${{ matrix.os }})
@@ -326,7 +326,7 @@ jobs:
       # of this workflow exercises the warm path. Informational here.
 
   cache-default-on:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: caching auto-enables by default on a lockfile project (${{ matrix.os }})
@@ -365,7 +365,7 @@ jobs:
           STEPS_NUB_OUTPUTS_CACHE_HIT: ${{ steps.nub.outputs.cache-hit }}
 
   cache-disable:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: package-manager-cache=false disables caching (${{ matrix.os }})
@@ -399,7 +399,7 @@ jobs:
           STEPS_NUB_OUTPUTS_CACHING_ENABLED: ${{ steps.nub.outputs.caching-enabled }}
 
   auth-npmrc:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: registry .npmrc shape, existing lines kept (${{ matrix.os }})
@@ -435,7 +435,7 @@ jobs:
           grep -q '^fund=false' "$npmrc"
 
   auth-npmrc-bare-scope:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: bare scope + path registry .npmrc shape (${{ matrix.os }})
@@ -472,7 +472,7 @@ jobs:
           ! grep -q '^always-auth=' "$npmrc" || { echo "::error::a stale always-auth line survived"; exit 1; }
 
   range:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: nub-version semver range resolves to its highest release (${{ matrix.os }})
@@ -498,7 +498,7 @@ jobs:
           STEPS_NUB_OUTPUTS_NUB_VERSION: ${{ steps.nub.outputs.nub-version }}
 
   shim-default:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: shims by default — pinned pnpm runs, npm falls through to the fronted Node (${{ matrix.os }})
@@ -541,7 +541,7 @@ jobs:
           [[ "$v" == "10.15.1" ]] || { echo "::error::expected the pinned pnpm 10.15.1, got $v"; exit 1; }
 
   shim-off:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: shim false leaves the runner's package managers alone
@@ -561,7 +561,7 @@ jobs:
           if command -v pnpm >/dev/null 2>&1; then echo "::error::pnpm on PATH with shim: false, on a runner that ships none"; exit 1; fi
 
   runner-node-kept:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: the runner's Node satisfies the pin — kept, nothing fetched (${{ matrix.os }})
@@ -603,7 +603,7 @@ jobs:
           STEPS_BEFORE_OUTPUTS_VERSION: ${{ steps.before.outputs.version }}
 
   pin-unprovisionable:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: a project pin no release satisfies fails the action (ubuntu-latest)
@@ -624,7 +624,7 @@ jobs:
           STEPS_NUB_OUTCOME: ${{ steps.nub.outcome }}
 
   alias:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: "node-version: lts/* resolves through the dist index, with no node on PATH (ubuntu-latest)"
@@ -661,7 +661,7 @@ jobs:
           STEPS_NUB_OUTPUTS_NODE_VERSION: ${{ steps.nub.outputs.node-version }}
 
   multi-dep-path:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: newline-delimited cache-dependency-path keys the cache (ubuntu-latest)
@@ -688,7 +688,7 @@ jobs:
           STEPS_SETUP_OUTPUTS_CACHING_ENABLED: ${{ steps.setup.outputs.caching-enabled }}
 
   additive:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: beside setup-node — nub install from package-lock.json (${{ matrix.os }})
@@ -745,7 +745,7 @@ jobs:
   # npm ci line replaced by this action. setup-node's cache is forced to a
   # miss so its post step meets an npm cache directory nub never wrote.
   install-dropin:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: after setup-node with cache npm, in place of npm ci (${{ matrix.os }})
@@ -792,7 +792,7 @@ jobs:
   # plus the guarantees the action states — npm's hoisted layout, the lockfile
   # untouched, npm's flags, and a loud failure for every input it refuses.
   npm-ci-dropin:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: "npm-ci: after setup-node, in place of npm ci (${{ matrix.os }})"
@@ -847,7 +847,7 @@ jobs:
           echo "OK: $OUT_NUB installed the lockfile ($OUT_SHA), hoisted, node $nv"
 
   npm-ci-omit-dev:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: "npm-ci: args --omit=dev leaves devDependencies out; a user's routing marker stays (ubuntu-latest)"
@@ -879,7 +879,7 @@ jobs:
   # npm 6 wrote lockfileVersion 1; the engine lifts its nested graph, so the
   # action installs it like any other.
   npm-ci-v1:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: "npm-ci: a lockfileVersion 1 lockfile installs (ubuntu-latest)"
@@ -920,7 +920,7 @@ jobs:
   # install instead, a package.json out of step with the lockfile, and an npm
   # flag the engine does not honor (which must never quietly run npm instead).
   npm-ci-refusals:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: "npm-ci: refuses a missing, misnamed or stale lockfile and an unknown flag (ubuntu-latest)"
@@ -990,7 +990,7 @@ jobs:
           echo "OK: every refusal failed loudly"
 
   install-not-frozen:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: frozen-lockfile false installs without a lockfile (ubuntu-latest)
@@ -1014,7 +1014,7 @@ jobs:
   # A pnpm lockfile, and the pinned pnpm provisioned for later steps by the
   # shim: no pnpm/action-setup, no corepack.
   install-pnpm:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: pnpm-lock.yaml, then the pinned pnpm through the shim (${{ matrix.os }})
@@ -1053,7 +1053,7 @@ jobs:
   # The store cache round-trips. A per-run file in the key makes the seed a
   # miss and the second job an exact hit, whose install then runs offline.
   install-cache-seed:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: cache seed, a miss (ubuntu-latest)
@@ -1078,7 +1078,7 @@ jobs:
           STEPS_INSTALL_OUTPUTS_CACHE_HIT: ${{ steps.install.outputs.cache-hit }}
 
   install-cache-hit:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
       contents: read
     name: cache hit, then an offline install from the restored store (ubuntu-latest)

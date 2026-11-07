@@ -24,7 +24,7 @@ on:
       - "npm-ci/**"
       - ".github/workflows/npm-corpus.yml"
   pull_request:
-    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    # Not part of plain `ci`: request a run with `gh pr edit <n> --add-label ci-full`. Rationale: ci.yml.
     types: [labeled]
     branches: [main]
     paths:
@@ -59,13 +59,13 @@ permissions: {}
 # The push and schedule triggers share refs/heads/main, so a nightly cancels an in-flight
 # push run; the gate below accepts `cancelled` for exactly that reason.
 concurrency:
-  group: npm-corpus-${{ github.ref }}
+  group: npm-corpus-${{ github.ref }}${{ github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 jobs:
   plan:
     name: Plan
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -93,7 +93,7 @@ jobs:
 
   build:
     name: Build nub (once)
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -135,7 +135,7 @@ jobs:
   corpus:
     name: ${{ matrix.repo }} (node ${{ matrix.node }}, ${{ matrix.mode }})
     needs: [plan, build]
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     permissions:
@@ -172,7 +172,7 @@ jobs:
   npm-corpus-gate:
     name: npm corpus gate
     needs: [plan, build, corpus]
-    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
+    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci-full')
     runs-on: ubuntu-latest
     permissions: {}
     steps:

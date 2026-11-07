@@ -8,9 +8,15 @@ on:
     # opening a PR and pushing to it start nothing. A run is asked for explicitly with
     # `gh pr edit <n> --add-label ci`; ci-optin.yml strips the label again the moment it
     # fires, so that same one command re-triggers and the label is a button rather than
-    # a state. Every job below repeats the matching `github.event.label.name == 'ci'`
-    # guard, because a `labeled` event fires for ANY label — without it, adding
-    # `bug` would launch the matrix. WHY: review rounds re-ran and then cancelled the
+    # a state. Every job below repeats the matching label-name guard, because a `labeled`
+    # event fires for ANY label — without it, adding `bug` would launch the matrix.
+    # `ci-full` is the same button plus seven workflows that plain `ci` leaves to main and
+    # the nightly: compile-native, daily-driver, docker-smoke, lockfile-roundtrip,
+    # npm-corpus, verb-dispatch and wpt-worker. Over four weeks of pull requests none of
+    # them reported a failure that another workflow did not report too, and they took
+    # about half of PR CI's hours. Ask for `ci-full` when a change touches resolution,
+    # the linker, the launcher's payload format, a shared type, or one of those
+    # workflows' own files or harnesses. WHY: review rounds re-ran and then cancelled the
     # whole cross-platform matrix on every push, which is where most of the runner pool
     # went. push:main and the nightly schedule are untouched, so trunk keeps full
     # automatic coverage and trunk-red.yml still reports anything a skipped PR run
@@ -34,8 +40,11 @@ permissions: {}
 # schedule run. rust-cache saves in a post-step that a cancelled job never reaches,
 # and 34 of the last 39 push:main runs were cancelled by the next push — so the
 # nightly is the one run guaranteed to refresh every trunk-scoped cache key.
+# The label suffix keeps a label this workflow ignores out of the group. A `labeled` run
+# whose jobs all skip still cancels the run in progress, so tagging a pull request `bug`
+# would otherwise kill its CI.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 env:
@@ -55,7 +64,7 @@ jobs:
   # instead of duplicating workflow files or hand-maintaining parallel matrices.
   matrix-plan:
     name: Plan matrices
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -207,7 +216,7 @@ jobs:
   check:
     name: Check
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -264,7 +273,7 @@ jobs:
   clippy:
     name: Clippy
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -357,7 +366,7 @@ jobs:
   embed-runtime:
     name: embed-runtime verify (${{ matrix.os }})
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -412,7 +421,7 @@ jobs:
   windows-embed-roundtrip:
     name: Windows embedded runtime and compile
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: windows-latest
     permissions:
       contents: read
@@ -824,7 +833,7 @@ jobs:
     name: macOS embed round-trip (TEMPORARY, PR #175)
     needs: matrix-plan
     if: >-
-      (github.event_name != 'pull_request' || github.event.label.name == 'ci') &&
+      (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') &&
       needs.matrix-plan.outputs.run_rust == 'true' &&
       (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     runs-on: macos-15
@@ -1049,7 +1058,7 @@ jobs:
   compile-code-cache:
     name: Compile code cache (${{ matrix.os }}, node 26)
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     permissions:
@@ -1073,7 +1082,7 @@ jobs:
   native-web-worker:
     name: Native Web Worker (${{ matrix.os }}, node 26)
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
     permissions:
@@ -1094,7 +1103,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }}, node ${{ matrix.node }})
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -1509,7 +1518,7 @@ jobs:
   pnp:
     name: Yarn PnP (${{ matrix.os }}, node ${{ matrix.node }})
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -1589,7 +1598,7 @@ jobs:
   fmt:
     name: Format
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1611,7 +1620,7 @@ jobs:
     # The @nubjs/types declarations live under npm/nub-types/**; skip the tsc
     # fixtures when only docs/site/Rust changed. run_rust includes .github/** so
     # a CI edit still re-runs them.
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_types == 'true' || needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_types == 'true' || needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1638,7 +1647,7 @@ jobs:
   test262:
     name: Test262 polyfills (Node ${{ matrix.node }})
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && needs.matrix-plan.outputs.run_scripts == 'true'
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && needs.matrix-plan.outputs.run_scripts == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -1673,7 +1682,7 @@ jobs:
     # touches NEITHER group — the ci-gate aggregator treats a skip as success.
     # A `rust-toolchain*` edit deliberately lands in both `rust` and `scripts`,
     # so it runs here too: `tools:check` is what pins that file.
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_site == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_site == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1741,7 +1750,7 @@ jobs:
     # This is the backstop, not the primary defence: it only fires for PRs into
     # main, and the branches that broke are pushed directly and never PR'd.
     # The .githooks/pre-push hook is what covers those.
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_site == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_site == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1784,7 +1793,7 @@ jobs:
   # on every event costs seconds.
   oxc-lockstep:
     name: oxc lockstep
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -1803,7 +1812,7 @@ jobs:
   # Cargo.toml, runtime/version.mjs and the published schema snapshots at once.
   version-consistency:
     name: Version consistency
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1825,7 +1834,7 @@ jobs:
     # Path-gated on BOTH groups: the governor itself is scripts/**, which lives
     # in the `scripts` filter, while the harness is tests/**, which lives in
     # `rust` — neither group alone covers this job. Same shape as docs-links.
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
     # Both platforms: the governor is only ever INSTALLED on the maintainer's
     # darwin host (bash-3.2 /bin/sh, BSD ps/awk), while ubuntu's dash + procps
     # is the other dialect the same POSIX script must keep speaking.
@@ -1859,7 +1868,7 @@ jobs:
     # Path-gated on BOTH groups, like the other scripts gates: the collector is
     # scripts/**, its harness tests/**. Ubuntu and macOS because the script must
     # keep speaking both the BSD and GNU stat/date/find dialects.
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true' || needs.matrix-plan.outputs.run_scripts == 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -1885,7 +1894,7 @@ jobs:
   nubr-script:
     name: Runner script contract (${{ matrix.os }})
     needs: matrix-plan
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (needs.matrix-plan.outputs.run_rust == 'true')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     strategy:
       fail-fast: false
       matrix:
@@ -1905,7 +1914,7 @@ jobs:
 
   ci-gate:
     name: CI gate
-    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
+    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full')
     needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, compile-code-cache, native-web-worker, test, pnp, fmt, types-fixtures, test262, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots, nubr-script]
     runs-on: ubuntu-latest
     steps:

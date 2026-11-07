@@ -53,7 +53,7 @@ on:
       - .github/workflows/verify-install.yml
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 permissions:
@@ -64,7 +64,7 @@ jobs:
   # A site deploy with a stale installer is a silent regression — users hit a broken
   # script while the root copy looks fine. This job catches that on every push.
   drift-guard:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     name: drift-guard (root ↔ site/public)
     runs-on: ubuntu-latest
     steps:
@@ -87,7 +87,7 @@ jobs:
           echo "install.ps1: in sync ✓"
 
   ps1:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     name: install.ps1 · ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -176,7 +176,7 @@ jobs:
           nub --version
 
   sh:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     name: install.sh · ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -228,7 +228,7 @@ jobs:
             || { echo "install.sh did not add ~/.nub/bin to any shell rc"; exit 1; }
 
   musl:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     name: install.sh · linux-${{ matrix.arch }}-musl
     strategy:
       fail-fast: false
@@ -280,7 +280,7 @@ jobs:
   # the only job that validates the branch's own script changes end-to-end (the
   # curl-based jobs above fetch from `source`, which defaults to main).
   harness:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     name: install.sh harness · ${{ matrix.os }}
     strategy:
       fail-fast: false

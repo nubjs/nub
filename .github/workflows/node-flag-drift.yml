@@ -41,14 +41,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: node-flag-drift-${{ github.ref }}
+  group: node-flag-drift-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 jobs:
   # Deterministic per-PR check: regenerate the inventory on the EXACT Node the snapshot
   # was captured on and assert byte-identity. Skipped on the nightly schedule.
   snapshot-check:
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name != 'schedule')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (github.event_name != 'schedule')
     name: Snapshot matches pinned Node
     runs-on: ubuntu-latest
     steps:
@@ -71,7 +71,7 @@ jobs:
   # Early-warning against Node's pre-release lines. Downloads the latest nightly (and RC,
   # when one is published) straight from nodejs.org and diffs its flag set vs the snapshot.
   nightly-drift:
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     name: Drift vs ${{ matrix.channel }}
     runs-on: ubuntu-latest
     strategy:

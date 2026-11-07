@@ -53,7 +53,7 @@ on:
 # and 34 of the last 39 push:main runs were cancelled by the next push — so the
 # nightly is the one run guaranteed to refresh every trunk-scoped cache key.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 permissions: {}
@@ -64,7 +64,7 @@ env:
 jobs:
   aube-parity:
     name: aube cargo test (ubuntu)
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     # ubuntu-latest only for now; macOS legs come later (10×-billed runners,
     # same budgeting rationale as release.yml's linux_only debug mode).
     runs-on: ubuntu-latest
@@ -96,7 +96,7 @@ jobs:
 
   aube-clippy:
     name: aube clippy (ubuntu)
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     # vendor/aube is a path dependency, so ci.yml's root clippy never lints its
     # test targets and never reads its workspace lints.
     runs-on: ubuntu-latest
@@ -121,7 +121,7 @@ jobs:
 
   aube-parity-windows:
     name: aube cargo test (windows)
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     # UNLIKE the conformance Windows leg below, this one DOES gate pull
     # requests. The linker's Windows arm is a genuinely separate
     # implementation — NTFS junctions instead of symlinks, reparse-point
@@ -158,7 +158,7 @@ jobs:
 
   aube-bats-nub:
     name: aube bats, nub-adapted (ubuntu)
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     # Runs the curated install-family subset of aube's own bats e2e suite
     # against NUB's PM surface (tests/aube-bats/run.sh: an `aube` shim that
     # exec's nub, the offline Verdaccio registry, and the two skip lists —
@@ -188,7 +188,7 @@ jobs:
 
   aube-conformance:
     name: lockfile conformance, real PMs (ubuntu)
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     # nub writes each foreign lockfile format in a hermetic sandbox and the
     # REAL pinned package manager judges it (tests/aube-conformance/run.sh):
     # pnpm/npm frozen-accept + zero-churn rewrite, bun frozen-accept, and the
@@ -226,7 +226,7 @@ jobs:
     # Gated off pull_request to keep Windows runners off the PR hot path; runs on
     # push (main / aube-integration, on a vendor/aube bump) and the nightly
     # schedule. The Linux conformance legs above still gate every PR.
-    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci') && (github.event_name != 'pull_request')
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (github.event_name != 'pull_request')
     # Windows leg of the conformance matrix (the maintainer 2026-06-10). Budgeted
     # subset: the pnpm + npm judge legs over the simple, peer-heavy, and
     # workspace fixtures — the signal is lockfile semantics crossed with

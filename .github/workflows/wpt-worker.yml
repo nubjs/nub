@@ -30,7 +30,7 @@ on:
       - "*.md"
       - ".claude/**"
   pull_request:
-    # PR CI is opt-in — request a run with `gh pr edit <n> --add-label ci`. Rationale: ci.yml.
+    # Not part of plain `ci`: request a run with `gh pr edit <n> --add-label ci-full`. Rationale: ci.yml.
     types: [labeled]
     branches: [main]
     paths-ignore:
@@ -41,7 +41,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 permissions: {}
@@ -52,7 +52,7 @@ env:
 jobs:
   build:
     name: Build nub (WPT)
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -119,7 +119,7 @@ jobs:
   conformance:
     name: WPT (node ${{ matrix.node }})
     needs: [build]
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -150,7 +150,7 @@ jobs:
   wpt-worker-gate:
     name: WPT Worker gate
     needs: [conformance]
-    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci')
+    if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci-full')
     runs-on: ubuntu-latest
     steps:
       - shell: bash

@@ -72,7 +72,7 @@ on:
         required: true
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}${{ github.event.label.name != 'ci' && github.event.label.name != 'ci-full' && github.event.label.name || '' }}
   cancel-in-progress: true
 
 # packages: write is required for the GHCR push leg — the default GITHUB_TOKEN is
@@ -85,7 +85,7 @@ permissions:
 jobs:
   build:
     name: Build + smoke (${{ matrix.variant }})
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
