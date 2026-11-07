@@ -442,14 +442,24 @@ impl LockfileGraph {
     /// rejects a valid frozen install, which costs more than a miss. Yarn lockfiles
     /// are out of scope: their readers drop the edge, `yarn install --frozen-lockfile`
     /// does not fail on this, and Nub does not rewrite a classic `yarn.lock`.
+    ///
+    /// An npm lockfile or shrinkwrap is walked from the root package only. `npm ci`
+    /// refuses a missing entry anywhere beneath the root but installs a workspace
+    /// member's subtree without it, and `npm install` leaves that one unrepaired
+    /// too (measured on npm 10.8, 10.9 and 11.21). Real lockfiles carry such holes:
+    /// usebruno/bruno's has no `csstype` for a member's `@types/react`.
     pub fn check_required_entries(&self, kind: LockfileKind) -> DriftStatus {
         if matches!(kind, LockfileKind::Yarn | LockfileKind::YarnBerry) {
             return DriftStatus::Fresh;
         }
         let mut queue: Vec<&str> = self
             .importers
-            .values()
-            .flatten()
+            .iter()
+            .filter(|(path, _)| {
+                !matches!(kind, LockfileKind::Npm | LockfileKind::NpmShrinkwrap)
+                    || path.as_str() == "."
+            })
+            .flat_map(|(_, deps)| deps)
             .filter(|dep| dep.dep_type != DepType::Optional)
             .filter_map(|dep| self.packages.get_key_value(&dep.dep_path))
             .map(|(key, _)| key.as_str())
@@ -3326,6 +3336,26 @@ mod required_entries_tests {
             vec![package("root-dep", &[("gone", "^2.0.0")])],
         );
         assert!(!is_stale(&g, LockfileKind::Npm));
+    }
+
+    #[test]
+    fn an_npm_workspace_member_subtree_is_not_checked() {
+        let mut g = graph(DepType::Production, vec![package("root-dep", &[])]);
+        g.packages
+            .extend([package("member-dep", &[("gone", "^2.0.0")])]);
+        g.importers.insert(
+            "packages/a".to_string(),
+            vec![DirectDep {
+                name: "member-dep".to_string(),
+                dep_path: "member-dep@1.0.0".to_string(),
+                dep_type: DepType::Production,
+                specifier: None,
+            }],
+        );
+        assert!(!is_stale(&g, LockfileKind::Npm));
+        assert!(!is_stale(&g, LockfileKind::NpmShrinkwrap));
+        assert!(is_stale(&g, LockfileKind::Pnpm));
+        assert!(is_stale(&g, LockfileKind::Bun));
     }
 
     #[test]
