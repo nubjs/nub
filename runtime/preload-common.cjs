@@ -508,7 +508,8 @@ function installAsyncTierCjsSource() {
           result = next(url, context);
         } catch (err) {
           if (strict && err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
-              RegExpPrototypeTest(ASYNC_TIER_NO_SOURCE, err.message) && isFileUrl(url)) {
+              RegExpPrototypeTest(ASYNC_TIER_NO_SOURCE, err.message) &&
+              context.format !== "module" && isFileUrl(url)) {
             return { format: "commonjs", source: readSource(url), shortCircuit: true };
           }
           throw err;

@@ -231,8 +231,9 @@ nodeModule.registerHooks?.({ load: (url, context, next) => next(url, context) })
     }
 }
 
-/// `foreign.mjs` registers an async loader answering `/rejected.cjs` with `source: 42`
-/// and `/nullish.cjs` with `source: null`, both as `format: "module"`, beside a register.
+/// `foreign.mjs` registers an async loader answering `/rejected.cjs` with `source: 42`,
+/// and `/nullish.cjs` and `/nullish-esm.mjs` with `source: null`, all as
+/// `format: "module"`, beside a register.
 fn foreign_loader_fixture() -> tempfile::TempDir {
     let dir = fixture();
     let root = dir.path();
@@ -250,10 +251,12 @@ if (nodeModule.registerHooks) await import("./static.mjs");
         r#"export async function load(url, context, next) {
   if (url.endsWith("/rejected.cjs")) return { format: "module", source: 42, shortCircuit: true };
   if (url.endsWith("/nullish.cjs")) return { format: "module", source: null, shortCircuit: true };
+  if (url.endsWith("/nullish-esm.mjs")) return { format: "module", source: null, shortCircuit: true };
   return next(url, context);
 }
 "#,
     );
+    write(root, "nullish-esm.mjs", "console.log('raw file ran');\n");
     for stem in ["rejected", "nullish"] {
         write(
             root,
@@ -293,6 +296,11 @@ fn a_foreign_loaders_invalid_source_still_fails_the_run() {
     );
 
     assert_loader_error(&nub(root, &["--import", "./foreign.mjs", "rejected.mjs"]));
+    // An ES module's missing source is never CommonJS to read from disk.
+    assert_loader_error(&nub(
+        root,
+        &["--import", "./foreign.mjs", "nullish-esm.mjs"],
+    ));
 }
 
 /// Where Node's validator is permissive the recovery has no failure of Node's to answer,
