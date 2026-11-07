@@ -6165,6 +6165,19 @@ enum StreamMode {
 /// relocates `nub.exe`. Must match `SHELL_SUBDIR` in `npm/nub/bin/launch.js`.
 const NUB_SHELL_SUBDIR: &str = "nub-sh";
 
+/// How the bundled busybox runs a script body: its `sh` applet, which a multi-call
+/// binary needs named ahead of `-c`, and `-X`.
+///
+/// Without `-X`, busybox-w32's `ash` rewrites `\` to `/` in every variable it
+/// imports, and the program it starts inherits the rewritten value. npm, pnpm, yarn
+/// and bun all hand a script's children the environment as Windows set it. The
+/// rewrite gave them `os.homedir()` as `C:/Users/me`, and it broke Nub's own
+/// plumbing, which reads back what it wrote: the preload in `NODE_OPTIONS` no longer
+/// matched the re-entrancy key, so every `node` a script started augmented a second
+/// time. The cost is busybox's convenience for a body that globs through a variable
+/// (`$TEMP/*.log`), which cmd.exe never offered either.
+pub(crate) const BUSYBOX_SH_ARGS: [&str; 3] = ["sh", "-X", "-c"];
+
 /// Resolve the bundled busybox-w32 POSIX-`sh` sidecar that backs every script body
 /// nub runs on Windows — `nub run` here, and dependency lifecycle scripts through the
 /// engine-context default `pm_engine` installs (`apply_lifecycle_script_shell`).
@@ -6336,7 +6349,7 @@ fn build_script_command(
     // script body runs identically on macOS/Linux/Windows and a future OS sandbox
     // can confine it (an in-process interpreter could do neither). This replaces
     // the former implicit `cmd.exe` default. busybox is a multi-call binary, so
-    // its `sh` applet name precedes `-c`; every other shell here takes plain `-c`.
+    // it runs as [`BUSYBOX_SH_ARGS`]; every other shell here takes plain `-c`.
     // The engine's dependency-lifecycle spawn resolves the same sidecar the same
     // way (`pm_engine::apply_lifecycle_script_shell`), so one POSIX script body
     // behaves identically whether `nub run` or a `postinstall` runs it.
@@ -6345,7 +6358,7 @@ fn build_script_command(
         .or_else(|| nub_core::workspace::scripts::script_shell(&project.root));
     let (shell, shell_args): (String, Vec<&str>) = match custom_shell {
         Some(ref s) => (s.clone(), vec!["-c"]),
-        None if cfg!(windows) => (resolve_bundled_busybox()?, vec!["sh", "-c"]),
+        None if cfg!(windows) => (resolve_bundled_busybox()?, BUSYBOX_SH_ARGS.to_vec()),
         None => ("sh".to_string(), vec!["-c"]),
     };
     // Only the bundled busybox needs the casing prologue below: a `--script-shell`

@@ -2171,7 +2171,7 @@ fn apply_lifecycle_script_shell() {
 fn busybox_script_shell(busybox: &str) -> aube_util::ScriptShell {
     aube_util::ScriptShell {
         program: PathBuf::from(busybox),
-        args: vec!["sh".to_string(), "-c".to_string()],
+        args: crate::cli::BUSYBOX_SH_ARGS.map(str::to_string).to_vec(),
         // busybox-w32 up-cases every environment name it loads.
         restore_env_casing: true,
     }
@@ -5683,10 +5683,11 @@ mod tests {
         assert_eq!(spec.program, PathBuf::from(r"C:\nub\bin\busybox.exe"));
         assert_eq!(
             spec.args,
-            ["sh", "-c"],
+            ["sh", "-X", "-c"],
             "busybox dispatches on argv[0] or a leading applet name, so spawned as \
              `busybox.exe` it needs `sh` before `-c` — `busybox.exe -c <body>` runs \
-             no shell. This test exists because that mistake is invisible off Windows."
+             no shell — and `-X`, without which it rewrites `\\` to `/` in the \
+             environment every build tool inherits. Both mistakes are invisible off Windows."
         );
         assert!(
             spec.restore_env_casing,

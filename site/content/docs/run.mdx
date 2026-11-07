@@ -274,7 +274,7 @@ Read the [full docs](https://docs.npmjs.com/cli/v11/using-npm/scripts#environmen
 
 Nub runs every script body through a POSIX `sh`, so one script behaves the same on macOS, Linux, and Windows. Operators such as `&&`, pipes, `$(…)`, `${PORT:-3000}`, and inline `NODE_ENV=production` assignments work everywhere.
 
-On macOS and Linux the shell is the system `/bin/sh`. Windows has no POSIX shell, so Nub ships busybox next to its binary and uses it instead of `cmd.exe`. Dependency install scripts run through the same shell during `nub install`.
+On macOS and Linux the shell is the system `/bin/sh`. Windows has no POSIX shell, so Nub ships busybox next to its binary and uses it instead of `cmd.exe`. Dependency install scripts run through the same shell during `nub install`. Environment variables reach the script and every program it starts as Windows set them, so a path such as `$USERPROFILE` keeps its backslashes.
 
 The shell is POSIX `sh`, not bash. Bash-only syntax such as `[[ … ]]`, arrays, and `${VAR^^}` is not guaranteed. That is the same contract `npm` gives, whose `sh -c` is dash on Debian and Ubuntu.
 

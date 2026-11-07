@@ -1485,8 +1485,9 @@ fn npmrc_node_options_reach_nub_run_without_displacing_augmentation() {
         options.contains("--trace-warnings"),
         "a multi-flag value must split into separate tokens, not one quoted blob: {options}"
     );
+    // Windows emits `runtime\preload.cjs`.
     assert!(
-        options.contains("runtime/preload"),
+        options.replace('\\', "/").contains("runtime/preload"),
         "nub's own preload must survive alongside it — nub appends where npm assigns: {options}"
     );
 
