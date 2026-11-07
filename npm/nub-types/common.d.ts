@@ -403,3 +403,13 @@ declare module "@nubjs/types" {
     fetch: FetchHandler;
   }
 }
+
+// Canonical locale variant subtags; absent when the locale has no variants.
+declare namespace Intl {
+  interface LocaleOptions {
+    variants?: string | undefined;
+  }
+  interface Locale {
+    readonly variants: string | undefined;
+  }
+}
