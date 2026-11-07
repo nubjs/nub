@@ -34,7 +34,7 @@
 //! successfully" mean the output is at least loadable.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet, HashMap, btree_map::Entry};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -4792,17 +4792,22 @@ fn effective_jsx_setting(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> 
 /// of those packages is not one of them.
 ///
 /// A package in a global store is named `node_modules/<pkg>/<file>`, as
-/// [`store_relative`] defines it. Two versions in one build would then share a name,
-/// and Node finds a mapped source's text by the first `sources` entry with that name,
-/// so a stack frame in one would print the other's line. Those keep the version:
-/// `node_modules/<pkg>@<version>/<file>`.
+/// [`store_relative`] defines it. Two copies in one build would then share a name, and
+/// Node finds a mapped source's text by the first `sources` entry with that name, so a
+/// stack frame in one would print the other's line. So versions tell copies apart,
+/// `node_modules/<pkg>@<version>/<file>`, and two git or tarball copies of one version
+/// add a short id from their store directory's name:
+/// `node_modules/<pkg>@<version>-<id>/<file>`. That name hashes the package's identity
+/// and dependencies, not where the store or the project is, so a build stays
+/// byte-identical across locations.
 #[derive(Debug)]
 struct ModuleNames {
     roots: Vec<(PathBuf, String)>,
     launch_root: PathBuf,
-    /// Store packages present in more than one directory. Known once a chunk renders,
-    /// which comes before any map is written.
-    duplicated: OnceLock<HashSet<String>>,
+    /// What each copy of a package with more than one store directory is called, by
+    /// package and directory. Known once a chunk renders, which comes before any map is
+    /// written.
+    copies: OnceLock<HashMap<(String, PathBuf), String>>,
 }
 
 impl ModuleNames {
@@ -4831,7 +4836,7 @@ impl ModuleNames {
         Self {
             roots,
             launch_root: launch_root.to_path_buf(),
-            duplicated: OnceLock::new(),
+            copies: OnceLock::new(),
         }
     }
 
@@ -4861,20 +4866,12 @@ impl ModuleNames {
 
     fn store_name(&self, path: &Path) -> Option<String> {
         let name = store_relative(path, &self.launch_root)?;
-        let versioned = store_package(&name)
-            .filter(|(package, _)| {
-                self.duplicated
-                    .get()
-                    .is_some_and(|duplicated| duplicated.contains(*package))
-            })
-            .and_then(|(package, file)| {
-                let tree = native::install_tree_root(path)?;
-                let manifest = std::fs::read(tree.join(package).join("package.json")).ok()?;
-                let manifest: serde_json::Value = serde_json::from_slice(&manifest).ok()?;
-                let version = manifest["version"].as_str()?;
-                Some(format!("{package}@{version}/{file}"))
-            });
-        Some(versioned.unwrap_or(name))
+        let renamed = store_package(&name).and_then(|(package, file)| {
+            let tree = native::install_tree_root(path)?;
+            let copy = self.copies.get()?.get(&(package.to_string(), tree))?;
+            Some(format!("{copy}/{file}"))
+        });
+        Some(renamed.unwrap_or(name))
     }
 
     /// Runs once, over the whole module graph, so a name does not depend on which chunk
@@ -4884,9 +4881,8 @@ impl ModuleNames {
         Ids: IntoIterator,
         Ids::Item: AsRef<str>,
     {
-        self.duplicated.get_or_init(|| {
-            let mut directories: HashMap<String, PathBuf> = HashMap::new();
-            let mut duplicated = HashSet::new();
+        self.copies.get_or_init(|| {
+            let mut directories: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
             for id in ids() {
                 let path = Path::new(id.as_ref());
                 if self.runtime_name(path).is_some() {
@@ -4894,19 +4890,65 @@ impl ModuleNames {
                 }
                 let inner = store_relative(path, &self.launch_root);
                 let package = inner.as_deref().and_then(store_package);
-                let (Some((package, _)), Some(tree)) = (package, native::install_tree_root(path))
-                else {
-                    continue;
-                };
-                if directories
-                    .insert(package.to_string(), tree.clone())
-                    .is_some_and(|other| other != tree)
+                if let (Some((package, _)), Some(tree)) = (package, native::install_tree_root(path))
                 {
-                    duplicated.insert(package.to_string());
+                    directories
+                        .entry(package.to_string())
+                        .or_default()
+                        .insert(tree);
                 }
             }
-            duplicated
+            let mut copies = HashMap::new();
+            for (package, trees) in directories {
+                if trees.len() > 1 {
+                    name_store_copies(&package, trees, &mut copies);
+                }
+            }
+            copies
         });
+    }
+}
+
+fn name_store_copies(
+    package: &str,
+    trees: BTreeSet<PathBuf>,
+    copies: &mut HashMap<(String, PathBuf), String>,
+) {
+    let mut by_version: BTreeMap<Option<String>, Vec<PathBuf>> = BTreeMap::new();
+    for tree in trees {
+        let manifest = std::fs::read(tree.join(package).join("package.json")).ok();
+        let manifest: Option<serde_json::Value> =
+            manifest.and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        let version = manifest.and_then(|m| m["version"].as_str().map(str::to_owned));
+        by_version.entry(version).or_default().push(tree);
+    }
+    for (version, trees) in by_version {
+        let leaf = |tree: &PathBuf| {
+            tree.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let short = |tree: &PathBuf| {
+            let leaf = leaf(tree);
+            let id = leaf.rsplit('-').next().unwrap_or_default();
+            id.chars().take(8).collect::<String>()
+        };
+        // A store that names its directories otherwise may share that tail, and then
+        // only the whole name tells them apart.
+        let distinct = trees.iter().map(short).collect::<BTreeSet<_>>().len() == trees.len();
+        let shared = trees.len() > 1;
+        for tree in trees {
+            let mut name = package.to_string();
+            if let Some(version) = &version {
+                name = format!("{name}@{version}");
+            }
+            if shared {
+                let id = if distinct { short(&tree) } else { leaf(&tree) };
+                name = format!("{name}-{id}");
+            }
+            copies.insert((package.to_string(), tree), name);
+        }
     }
 }
 
@@ -6496,6 +6538,10 @@ mod tests {
         package("store/ms@2.0.0-aaa", "ms", "2.0.0");
         package("store/ms@2.1.3-bbb", "ms", "2.1.3");
         package("store/@s+solo@1.0.0-ccc", "@s/solo", "1.0.0");
+        package("store/git@1.0.0-aaaa1111ffff", "git", "1.0.0");
+        package("store/git@1.0.0-bbbb2222ffff", "git", "1.0.0");
+        package("cache/odd-one-copy.zip", "odd", "1.0.0");
+        package("cache/odd-two-copy.zip", "odd", "1.0.0");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(root.join("repo/packages/lib/node_modules")).unwrap();
         std::fs::write(root.join("repo/packages/lib/package.json"), "{}").unwrap();
@@ -6515,6 +6561,10 @@ mod tests {
                 "store/ms@2.1.3-bbb/node_modules/ms/index.js",
                 "store/ms@2.1.3-bbb/node_modules/ms/lib/util.js",
                 "store/@s+solo@1.0.0-ccc/node_modules/@s/solo/lib/index.js",
+                "store/git@1.0.0-aaaa1111ffff/node_modules/git/index.js",
+                "store/git@1.0.0-bbbb2222ffff/node_modules/git/index.js",
+                "cache/odd-one-copy.zip/node_modules/odd/index.js",
+                "cache/odd-two-copy.zip/node_modules/odd/index.js",
                 "repo/packages/lib/node_modules/ms/index.js",
                 "repo/packages/app/node_modules/.pnpm/ms@1.0.0/node_modules/ms/index.js",
             ]
@@ -6536,6 +6586,22 @@ mod tests {
             (
                 "store/@s+solo@1.0.0-ccc/node_modules/@s/solo/lib/index.js",
                 Some("node_modules/@s/solo/lib/index.js"),
+            ),
+            (
+                "store/git@1.0.0-aaaa1111ffff/node_modules/git/index.js",
+                Some("node_modules/git@1.0.0-aaaa1111/index.js"),
+            ),
+            (
+                "store/git@1.0.0-bbbb2222ffff/node_modules/git/index.js",
+                Some("node_modules/git@1.0.0-bbbb2222/index.js"),
+            ),
+            (
+                "cache/odd-one-copy.zip/node_modules/odd/index.js",
+                Some("node_modules/odd@1.0.0-odd-one-copy.zip/index.js"),
+            ),
+            (
+                "cache/odd-two-copy.zip/node_modules/odd/index.js",
+                Some("node_modules/odd@1.0.0-odd-two-copy.zip/index.js"),
             ),
             ("repo/packages/lib/node_modules/ms/index.js", None),
             ("repo/packages/lib/index.js", None),
@@ -6594,6 +6660,20 @@ mod tests {
             "dup two",
         );
         package(
+            store.join("twin@1.0.0-aaaa1111ffff0000/node_modules/twin"),
+            "twin",
+            "1.0.0",
+            "index.mjs",
+            "twin first",
+        );
+        package(
+            store.join("twin@1.0.0-bbbb2222ffff0000/node_modules/twin"),
+            "twin",
+            "1.0.0",
+            "index.mjs",
+            "twin second",
+        );
+        package(
             store.join("@scope+solo@3.0.0-cccc/node_modules/@scope/solo"),
             "@scope/solo",
             "3.0.0",
@@ -6607,7 +6687,9 @@ mod tests {
              import { tag as one } from \"../store/v1/dup@1.0.0-aaaa/node_modules/dup/index.mjs\";\n\
              import { tag as two } from \"../store/v1/dup@2.0.0-bbbb/node_modules/dup/index.mjs\";\n\
              import { tag as solo } from \"../store/v1/@scope+solo@3.0.0-cccc/node_modules/@scope/solo/lib/index.mjs\";\n\
-             console.log(tag, one, two, solo);\n",
+             import { tag as first } from \"../store/v1/twin@1.0.0-aaaa1111ffff0000/node_modules/twin/index.mjs\";\n\
+             import { tag as second } from \"../store/v1/twin@1.0.0-bbbb2222ffff0000/node_modules/twin/index.mjs\";\n\
+             console.log(tag, one, two, solo, first, second);\n",
         )
         .unwrap();
 
@@ -6650,6 +6732,8 @@ mod tests {
                     "node_modules/@scope/solo/lib/index.mjs",
                     "node_modules/dup@1.0.0/index.mjs",
                     "node_modules/dup@2.0.0/index.mjs",
+                    "node_modules/twin@1.0.0-aaaa1111/index.mjs",
+                    "node_modules/twin@1.0.0-bbbb2222/index.mjs",
                 ],
                 "minify={minify}, the runtime's: {runtime:?}"
             );
@@ -6664,6 +6748,8 @@ mod tests {
             for (name, tag) in [
                 ("node_modules/dup@1.0.0/index.mjs", "dup one"),
                 ("node_modules/dup@2.0.0/index.mjs", "dup two"),
+                ("node_modules/twin@1.0.0-aaaa1111/index.mjs", "twin first"),
+                ("node_modules/twin@1.0.0-bbbb2222/index.mjs", "twin second"),
             ] {
                 let at = sources.iter().position(|source| *source == name).unwrap();
                 let text = map["sourcesContent"][at].as_str().unwrap();
@@ -6687,6 +6773,8 @@ mod tests {
                     "node_modules/jsbi/index.mjs",
                     "node_modules/dup@1.0.0/index.mjs",
                     "node_modules/dup@2.0.0/index.mjs",
+                    "node_modules/twin@1.0.0-aaaa1111/index.mjs",
+                    "node_modules/twin@1.0.0-bbbb2222/index.mjs",
                     "node_modules/@scope/solo/lib/index.mjs",
                 ] {
                     assert!(
