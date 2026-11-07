@@ -28,6 +28,12 @@ needsChildProcess = true;
 // #region nub:compile:worker
 needsWorker = true;
 // #endregion
+// Filled in by `nub compile` for a payload that can name Worker, as payload names
+// relative to this file: the generated module that loads the preamble into a
+// worker started on anything but a traced entry, and the traced entries' own
+// wrappers, which import the program's preamble and so are left alone.
+const workerScope = undefined;
+const tracedWorkers = [];
 const descriptor = Object.getOwnPropertyDescriptor(process, key);
 const existing = descriptor?.value;
 let validExisting = false;
@@ -87,6 +93,78 @@ if (!validExisting) {
   if (needsChildProcess) {
     installCompiledForkIdentity(getBuiltin("node:child_process"), process.execPath);
   }
+  // Only where the bootstrap is a file: the module it names sits beside this one.
+  // A single executable installs the same thing from its own loader, and the
+  // inline shape declines to inline any payload that carries the module.
+  if (needsWorker && requireArg !== undefined && workerScope !== undefined) {
+    const path = getBuiltin("node:path");
+    const url = getBuiltin("node:url");
+    let traced;
+    installCompiledWorkerScope(
+      getBuiltin("node:worker_threads"),
+      () => `--import=${url.pathToFileURL(path.join(__dirname, workerScope)).href}`,
+      (target) => {
+        traced ??= new Set(tracedWorkers.map((name) => path.join(__dirname, name)));
+        const file =
+          target instanceof URL
+            ? target.protocol === "file:" && url.fileURLToPath(target)
+            : typeof target === "string" && path.resolve(target);
+        return typeof file === "string" && traced.has(file);
+      },
+    );
+  }
+}
+
+// `nub <file>` hands every worker its preload, so a `data:`, `blob:` or untraced
+// file worker sees `self`, `postMessage` and the polyfilled globals. A compiled
+// artifact has no preload to inherit: only a traced worker's own wrapper imports
+// the preamble. So every other worker is started with one more `--import`, the
+// generated module that loads the preamble, ahead of its entry — which still runs
+// as Node's own entry, so its module format, `require.main` and error frames are
+// the ones `node` gives it.
+//
+// Replaced HERE, before the ESM graph, because a static `import { Worker }` binds
+// the builtin's ESM facade when the graph links, and only a replacement made
+// earlier reaches it. The global Worker polyfill constructs through this too.
+//
+// An omitted `execArgv` means "inherit", which an added flag cannot express, so it
+// becomes this process's flags. Node accepts per-process flags such as
+// `--max-old-space-size` only by inheritance, and refuses them in a list, naming
+// each; those are dropped, since a worker takes none of them from its parent's
+// list either. Should Node still refuse, the worker starts as it would have,
+// without the preamble. `eval: true` is left alone: Node runs no `--import`
+// before eval source.
+function installCompiledWorkerScope(threads, scopeArgFor, isTraced) {
+  const OriginalWorker = threads.Worker;
+  let scopeArg;
+  class Worker extends OriginalWorker {
+    constructor(target, options) {
+      const given = options?.execArgv;
+      if (
+        options?.eval === true ||
+        (given !== undefined && !Array.isArray(given)) ||
+        isTraced(target)
+      ) {
+        super(target, options);
+        return;
+      }
+      scopeArg ??= scopeArgFor();
+      const execArgv = [scopeArg, ...(given ?? process.execArgv).filter((arg) => arg !== scopeArg)];
+      try {
+        super(target, { ...options, execArgv });
+      } catch (error) {
+        if (given !== undefined || error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") throw error;
+        // Node names the flags it refused, after the message's colon.
+        const refused = error.message.slice(error.message.indexOf(": ") + 2).split(", ");
+        try {
+          super(target, { ...options, execArgv: execArgv.filter((arg) => !refused.includes(arg)) });
+        } catch {
+          super(target, options);
+        }
+      }
+    }
+  }
+  threads.Worker = Worker;
 }
 
 // A compiled artifact publishes the outer executable as `process.execPath`, and
