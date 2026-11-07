@@ -282,6 +282,11 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
                     let optional = !entry.meta.dependencies.contains_key(dep_name);
                     crate::unsupported_edge(u, optional, path)?;
                 }
+            } else if let Some(range) = entry.meta.dependencies.get(dep_name) {
+                // A required child with no entry: the lockfile is broken. Keep the
+                // edge, pointing at nothing, as the pnpm and npm readers do, so the
+                // drift check can see it and a re-resolve fetches the child.
+                resolved.insert(dep_name.clone(), range.clone());
             }
         }
         // bun writes no edge for a peer: the package finds it by node

@@ -850,6 +850,72 @@ fn fix_lockfile_follows_a_retargeted_alias() {
     );
 }
 
+/// A lockfile missing a required child's entry reads as broken rather than up to
+/// date: a plain install repairs it, and a frozen one fails instead of exiting 0
+/// with a tree that cannot load.
+#[test]
+fn a_missing_required_entry_is_repaired_or_refused() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY unset");
+        return;
+    }
+    let dir = pm_tmpdir("missingentry");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"missingentry","version":"1.0.0","packageManager":"npm@10.8.2","dependencies":{"is-odd":"0.1.2"}}"#,
+    )
+    .unwrap();
+    let (_, stderr, code) = run_install(&dir, &["install", "--lockfile-only"]);
+    assert_eq!(code, 0, "generating the lockfile failed: {stderr}");
+
+    let lockfile = dir.join("package-lock.json");
+    let mut lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
+    lock["packages"]
+        .as_object_mut()
+        .unwrap()
+        .remove("node_modules/is-number")
+        .expect("is-number is in the lockfile");
+    let broken = serde_json::to_string_pretty(&lock).unwrap();
+
+    for args in [&["install", "--frozen-lockfile"][..], &["ci"][..]] {
+        std::fs::write(&lockfile, &broken).unwrap();
+        let (_, stderr, code) = run_install(&dir, args);
+        assert_ne!(code, 0, "{args:?} must refuse a broken lockfile: {stderr}");
+        assert!(
+            stderr.contains("ERR_NUB_OUTDATED_LOCKFILE") && stderr.contains("is-number"),
+            "{args:?} must name the missing entry: {stderr}"
+        );
+        assert!(
+            !dir.join("node_modules/is-odd").exists(),
+            "{args:?} must link nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&lockfile).unwrap(),
+            broken,
+            "{args:?} must not write the lockfile"
+        );
+    }
+
+    // Explicit, because a plain install is frozen when `CI` is set.
+    std::fs::write(&lockfile, &broken).unwrap();
+    let (_, stderr, code) = run_install(&dir, &["install", "--prefer-frozen-lockfile"]);
+    assert_eq!(code, 0, "a plain install must repair it: {stderr}");
+    let fixed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
+    assert_eq!(
+        fixed["packages"]["node_modules/is-number"]["version"], "3.0.0",
+        "the entry must come back: {}",
+        fixed["packages"]
+    );
+    let parent = std::fs::canonicalize(dir.join("node_modules/is-odd")).unwrap();
+    assert!(
+        parent.with_file_name("is-number/package.json").exists(),
+        "the child must be linked beside {}",
+        parent.display()
+    );
+}
+
 /// A package-lock.json missing a required child's entry gets the child back from
 /// `--fix-lockfile`, in the lockfile and on disk, with the parent's edge intact.
 #[test]
