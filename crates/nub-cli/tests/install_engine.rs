@@ -897,8 +897,9 @@ fn a_missing_required_entry_is_repaired_or_refused() {
         );
     }
 
+    // Explicit, because a plain install is frozen when `CI` is set.
     std::fs::write(&lockfile, &broken).unwrap();
-    let (_, stderr, code) = run_install(&dir, &["install"]);
+    let (_, stderr, code) = run_install(&dir, &["install", "--prefer-frozen-lockfile"]);
     assert_eq!(code, 0, "a plain install must repair it: {stderr}");
     let fixed: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&lockfile).unwrap()).unwrap();
