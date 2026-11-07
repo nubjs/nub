@@ -4797,8 +4797,9 @@ fn effective_jsx_setting(entry_abs: &Path, explicit_tsconfig: Option<&Path>) -> 
 /// stack frame in one would print the other's line. So versions tell copies apart,
 /// `node_modules/<pkg>@<version>/<file>`, and two git or tarball copies of one version
 /// add a short id from their store directory's name:
-/// `node_modules/<pkg>@<version>-<id>/<file>`. That name hashes the package's identity
-/// and dependencies, not where the store or the project is, so a build stays
+/// `node_modules/<pkg>@<version>_<id>/<file>`. No version can hold a `_`, so that
+/// name never matches another copy's version. The directory name hashes the package's
+/// identity and dependencies, not where the store or the project is, so a build stays
 /// byte-identical across locations.
 #[derive(Debug)]
 struct ModuleNames {
@@ -4945,7 +4946,7 @@ fn name_store_copies(
             }
             if shared {
                 let id = if distinct { short(&tree) } else { leaf(&tree) };
-                name = format!("{name}-{id}");
+                name = format!("{name}_{id}");
             }
             copies.insert((package.to_string(), tree), name);
         }
@@ -6540,6 +6541,11 @@ mod tests {
         package("store/@s+solo@1.0.0-ccc", "@s/solo", "1.0.0");
         package("store/git@1.0.0-aaaa1111ffff", "git", "1.0.0");
         package("store/git@1.0.0-bbbb2222ffff", "git", "1.0.0");
+        package(
+            "store/git@1.0.0-aaaa1111-cccc3333ffff",
+            "git",
+            "1.0.0-aaaa1111",
+        );
         package("cache/odd-one-copy.zip", "odd", "1.0.0");
         package("cache/odd-two-copy.zip", "odd", "1.0.0");
         std::fs::create_dir_all(&project).unwrap();
@@ -6563,6 +6569,7 @@ mod tests {
                 "store/@s+solo@1.0.0-ccc/node_modules/@s/solo/lib/index.js",
                 "store/git@1.0.0-aaaa1111ffff/node_modules/git/index.js",
                 "store/git@1.0.0-bbbb2222ffff/node_modules/git/index.js",
+                "store/git@1.0.0-aaaa1111-cccc3333ffff/node_modules/git/index.js",
                 "cache/odd-one-copy.zip/node_modules/odd/index.js",
                 "cache/odd-two-copy.zip/node_modules/odd/index.js",
                 "repo/packages/lib/node_modules/ms/index.js",
@@ -6589,19 +6596,23 @@ mod tests {
             ),
             (
                 "store/git@1.0.0-aaaa1111ffff/node_modules/git/index.js",
-                Some("node_modules/git@1.0.0-aaaa1111/index.js"),
+                Some("node_modules/git@1.0.0_aaaa1111/index.js"),
             ),
             (
                 "store/git@1.0.0-bbbb2222ffff/node_modules/git/index.js",
-                Some("node_modules/git@1.0.0-bbbb2222/index.js"),
+                Some("node_modules/git@1.0.0_bbbb2222/index.js"),
+            ),
+            (
+                "store/git@1.0.0-aaaa1111-cccc3333ffff/node_modules/git/index.js",
+                Some("node_modules/git@1.0.0-aaaa1111/index.js"),
             ),
             (
                 "cache/odd-one-copy.zip/node_modules/odd/index.js",
-                Some("node_modules/odd@1.0.0-odd-one-copy.zip/index.js"),
+                Some("node_modules/odd@1.0.0_odd-one-copy.zip/index.js"),
             ),
             (
                 "cache/odd-two-copy.zip/node_modules/odd/index.js",
-                Some("node_modules/odd@1.0.0-odd-two-copy.zip/index.js"),
+                Some("node_modules/odd@1.0.0_odd-two-copy.zip/index.js"),
             ),
             ("repo/packages/lib/node_modules/ms/index.js", None),
             ("repo/packages/lib/index.js", None),
@@ -6674,6 +6685,13 @@ mod tests {
             "twin second",
         );
         package(
+            store.join("twin@1.0.0-aaaa1111-cccc3333ffff0000/node_modules/twin"),
+            "twin",
+            "1.0.0-aaaa1111",
+            "index.mjs",
+            "twin prerelease",
+        );
+        package(
             store.join("@scope+solo@3.0.0-cccc/node_modules/@scope/solo"),
             "@scope/solo",
             "3.0.0",
@@ -6689,7 +6707,8 @@ mod tests {
              import { tag as solo } from \"../store/v1/@scope+solo@3.0.0-cccc/node_modules/@scope/solo/lib/index.mjs\";\n\
              import { tag as first } from \"../store/v1/twin@1.0.0-aaaa1111ffff0000/node_modules/twin/index.mjs\";\n\
              import { tag as second } from \"../store/v1/twin@1.0.0-bbbb2222ffff0000/node_modules/twin/index.mjs\";\n\
-             console.log(tag, one, two, solo, first, second);\n",
+             import { tag as pre } from \"../store/v1/twin@1.0.0-aaaa1111-cccc3333ffff0000/node_modules/twin/index.mjs\";\n\
+             console.log(tag, one, two, solo, first, second, pre);\n",
         )
         .unwrap();
 
@@ -6733,7 +6752,8 @@ mod tests {
                     "node_modules/dup@1.0.0/index.mjs",
                     "node_modules/dup@2.0.0/index.mjs",
                     "node_modules/twin@1.0.0-aaaa1111/index.mjs",
-                    "node_modules/twin@1.0.0-bbbb2222/index.mjs",
+                    "node_modules/twin@1.0.0_aaaa1111/index.mjs",
+                    "node_modules/twin@1.0.0_bbbb2222/index.mjs",
                 ],
                 "minify={minify}, the runtime's: {runtime:?}"
             );
@@ -6748,8 +6768,12 @@ mod tests {
             for (name, tag) in [
                 ("node_modules/dup@1.0.0/index.mjs", "dup one"),
                 ("node_modules/dup@2.0.0/index.mjs", "dup two"),
-                ("node_modules/twin@1.0.0-aaaa1111/index.mjs", "twin first"),
-                ("node_modules/twin@1.0.0-bbbb2222/index.mjs", "twin second"),
+                ("node_modules/twin@1.0.0_aaaa1111/index.mjs", "twin first"),
+                ("node_modules/twin@1.0.0_bbbb2222/index.mjs", "twin second"),
+                (
+                    "node_modules/twin@1.0.0-aaaa1111/index.mjs",
+                    "twin prerelease",
+                ),
             ] {
                 let at = sources.iter().position(|source| *source == name).unwrap();
                 let text = map["sourcesContent"][at].as_str().unwrap();
@@ -6773,8 +6797,9 @@ mod tests {
                     "node_modules/jsbi/index.mjs",
                     "node_modules/dup@1.0.0/index.mjs",
                     "node_modules/dup@2.0.0/index.mjs",
+                    "node_modules/twin@1.0.0_aaaa1111/index.mjs",
+                    "node_modules/twin@1.0.0_bbbb2222/index.mjs",
                     "node_modules/twin@1.0.0-aaaa1111/index.mjs",
-                    "node_modules/twin@1.0.0-bbbb2222/index.mjs",
                     "node_modules/@scope/solo/lib/index.mjs",
                 ] {
                     assert!(
