@@ -11,6 +11,9 @@ PROFILE ?= release
 BIN_DIR ?= /usr/local/bin
 RUST_BUILD = $(CURDIR)/scripts/rust-build.sh
 TARGET   = target/$(PROFILE)/nub
+MBX_BIN ?= $(shell command -v mbx 2>/dev/null || { command -v mise >/dev/null 2>&1 && { mbx_root=$$(mise where mr-boxington 2>/dev/null) && test -x "$$mbx_root/mbx" && printf '%s' "$$mbx_root/mbx"; }; })
+BLAZE_BIN ?= $(shell command -v blaze 2>/dev/null || test ! -x "$${CARGO_HOME:-$$HOME/.cargo}/bin/blaze" || printf '%s' "$${CARGO_HOME:-$$HOME/.cargo}/bin/blaze")
+MBX_BLAZE_CPUS ?= 2
 
 # PROFILE names a cargo profile AND the target/<dir> the copy steps read from, so
 # the two must agree. `debug` is the odd one out: cargo's profile is named `dev`
@@ -25,7 +28,7 @@ else
   CARGO_FLAGS = --profile $(PROFILE)
 endif
 
-.PHONY: build addon addon-fast install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify fix test-node-matrix bench clean npm-build npm-publish npm-publish-dry
+.PHONY: build addon addon-fast addon-dev blaze-ready install-dev uninstall-dev qos-global build-status build-slots-off build-slots-on target-gc test-target-gc test test-build-slots verify fix test-node-matrix bench clean npm-build npm-publish npm-publish-dry
 
 build: addon
 	$(CARGO) build $(CARGO_FLAGS)
@@ -52,17 +55,15 @@ addon:
 	 echo "Warning: could not find nub-native library"
 	@echo "Built: runtime/addons/nub-native.node"
 
-# Dev install uses the `fast` profile (no LTO, cgu=256), NOT release: nub-dev is
-# the iteration binary, and the release profile's lto=thin + cgu=1 makes every
-# rebuild re-LTO-codegen the whole binary (the ~300s nub-cli critical-path tail).
-# The fast profile rebuilds it in a fraction of that. addon-fast builds the
-# native addon under the same profile so a single `cargo build --profile fast`
-# pass serves both.
+# Dev install uses Cargo's default `dev` profile with the fast profile's
+# iteration settings. Blaze v2 builds the workspace directly, and MBX reserves
+# CPU capacity while its compiler runs. Release builds retain their separate
+# LTO profile.
 # Builds through scripts/rust-build.sh and symlinks to the target dir IT picked.
 # Hardcoding $(CURDIR)/target left nub-dev pointing at a stale binary: every
 # documented rebuild path (the post-merge refresh, the dev-loop) goes through the
 # wrapper, which normally writes to the SHARED dir, so nothing updated
-# ./target/fast/nub and `nub-dev` silently served whatever was built last time
+# ./target/debug/nub and `nub-dev` silently served whatever was built last time
 # make ran.
 #
 # The path comes from NUB_BUILD_TARGET_OUT — the dir THIS build resolved — not
@@ -70,32 +71,53 @@ addon:
 # landing on the shared tree during the build moves the content key, and the
 # symlink then names a bucket the build never wrote to (nub-dev dangling, seen
 # on a 27-minute rebuild that overlapped a merge). One build, one resolution.
-install-dev: addon-fast qos-global
+install-dev: blaze-ready addon-dev
 	@tf=$$(mktemp); \
-	  NUB_BUILD_TARGET_OUT=$$tf scripts/rust-build.sh build --profile fast || { rm -f $$tf; exit 1; }; \
+	  mkdir -p "$(BIN_DIR)" && \
+	  MBX_BIN="$(MBX_BIN)" BLAZE_BIN="$(BLAZE_BIN)" MBX_BLAZE_CPUS="$(MBX_BLAZE_CPUS)" NUB_CARGO_COMMAND="$(CURDIR)/scripts/mbx-blaze.sh" \
+	  CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_DEV_CODEGEN_UNITS=256 \
+	  CARGO_PROFILE_DEV_INCREMENTAL=true NUB_BUILD_TARGET_OUT=$$tf \
+	  scripts/rust-build.sh build -p nub-cli || { rm -f $$tf; exit 1; }; \
 	  t=$$(cat $$tf); rm -f $$tf; \
-	  test -x $$t/fast/nub || { echo "install-dev: no binary at $$t/fast/nub" >&2; exit 1; }; \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nub-dev && \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nubx-dev && \
-	  ln -sf $$t/fast/nub $(BIN_DIR)/nubr-dev || \
+	  test -x $$t/debug/nub || { echo "install-dev: no binary at $$t/debug/nub" >&2; exit 1; }; \
+	  ln -sf $$t/debug/nub $(BIN_DIR)/nub-dev && \
+	  ln -sf $$t/debug/nub $(BIN_DIR)/nubx-dev && \
+	  ln -sf $$t/debug/nub $(BIN_DIR)/nubr-dev || \
 	  { echo "install-dev: cannot link into $(BIN_DIR); pass a writable BIN_DIR=<dir> on PATH" >&2; exit 1; }; \
-	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/fast/nub"; \
-	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/fast/nub"; \
-	  echo "Installed: $(BIN_DIR)/nubr-dev -> $$t/fast/nub"
+	  echo "Installed: $(BIN_DIR)/nub-dev -> $$t/debug/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubx-dev -> $$t/debug/nub"; \
+	  echo "Installed: $(BIN_DIR)/nubr-dev -> $$t/debug/nub"
 	@echo ""
-	@nub-dev --version
+	@$(BIN_DIR)/nub-dev --version
 
-# Native addon built under the `fast` profile (mirrors `addon`, which is release).
-# See `addon` for the rm-before-cp code-signing rationale.
-addon-fast:
-	cd crates/nub-native && $(CARGO) build --profile fast
+# TODO: Remove this pin after Blaze PR #1876 fixes heap-backed proc-macro statics:
+# https://github.com/indexable-inc/blaze/pull/1876
+# Dev builds require MBX 1.29.2 and Blaze 0.20261030.1 or newer. Fail before
+# compilation so an incomplete setup cannot quietly use another build path.
+blaze-ready:
+	@test -x "$(MBX_BIN)" || { echo "install-dev requires mr-boxington 1.29.2 or newer (mbx on PATH or installed by mise)" >&2; exit 1; }
+	@version=$$("$(MBX_BIN)" --version | sed -n '1p'); awk -v version="$$version" 'BEGIN { split(version, f, /[[:space:]]+/); split(f[2], v, /[.]/); if (v[1] + 0 > 1) ok = 1; if (v[1] + 0 == 1 && v[2] + 0 > 29) ok = 1; if (v[1] + 0 == 1 && v[2] + 0 == 29 && v[3] + 0 >= 2) ok = 1; exit !ok }' || { echo "install-dev requires mr-boxington 1.29.2 or newer" >&2; exit 1; }
+	@test -x "$(BLAZE_BIN)" || { echo "install-dev requires Blaze 0.20261030.1 or newer on PATH or in CARGO_HOME/bin" >&2; exit 1; }
+	@version=$$("$(BLAZE_BIN)" --version | sed -n '1p'); awk -v version="$$version" 'BEGIN { split(version, f, /[[:space:]]+/); split(f[2], v, /[.]/); if (v[1] + 0 > 0) ok = 1; if (v[1] + 0 == 0 && v[2] + 0 > 20261030) ok = 1; if (v[1] + 0 == 0 && v[2] + 0 == 20261030 && v[3] + 0 >= 1) ok = 1; exit !ok }' || { echo "install-dev requires Blaze 0.20261030.1 or newer" >&2; exit 1; }
+
+# Native addon in the same Blaze dev profile as nub-dev.
+# Keep this workspace's explicit output in the root target/ used by the addon
+# staging and cleanup scripts.
+addon-dev: blaze-ready
+	@cd crates/nub-native && MBX_BIN="$(MBX_BIN)" BLAZE_BIN="$(BLAZE_BIN)" MBX_BLAZE_CPUS="$(MBX_BLAZE_CPUS)" CARGO_TARGET_DIR="$(CURDIR)/target" \
+	  CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_DEV_CODEGEN_UNITS=256 \
+	  CARGO_PROFILE_DEV_INCREMENTAL=true NUB_BUILD_FG="$${NUB_BUILD_FG:-}" \
+	  "$(CURDIR)/scripts/mbx-blaze.sh" build
 	@mkdir -p runtime/addons
 	@rm -f runtime/addons/nub-native.node
-	@cp target/fast/libnub_native.dylib runtime/addons/nub-native.node 2>/dev/null || \
-	 cp target/fast/libnub_native.so runtime/addons/nub-native.node 2>/dev/null || \
-	 cp target/fast/nub_native.dll runtime/addons/nub-native.node 2>/dev/null || \
-	 echo "Warning: could not find nub-native library"
-	@echo "Built: runtime/addons/nub-native.node (fast profile)"
+	@cp target/debug/libnub_native.dylib runtime/addons/nub-native.node 2>/dev/null || \
+	 cp target/debug/libnub_native.so runtime/addons/nub-native.node 2>/dev/null || \
+	 cp target/debug/nub_native.dll runtime/addons/nub-native.node 2>/dev/null || \
+	 echo "Warning: could not find dev-profile native library"
+	@echo "Built: runtime/addons/nub-native.node (Blaze dev profile)"
+
+# Keep the existing addon command on the Blaze-enabled developer path.
+addon-fast: addon-dev
 
 # Machine-global rustc governor: every cargo invocation on this host — any
 # worktree, clone, or direct `cargo` call — compiles at utility QoS, waits its

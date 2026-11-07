@@ -4,8 +4,9 @@ description: >-
   Build and test nub during development. Invoke (via the Skill tool) whenever
   you need to compile the dev `nub` binary, set up a worktree for fast
   incremental iteration, run a specific test file or a single test, or get
-  oriented in the codebase (the crate map). Encodes the measured fast-build
-  loop: the `fast` profile built through `scripts/rust-build.sh`, which shares
+  oriented in the codebase (the crate map). Encodes the stable Rust 1.99.0
+  MBX + Blaze dev loop and the `fast` profile built through
+  `scripts/rust-build.sh`, which shares
   ONE CARGO_TARGET_DIR across worktrees (`~/.cache/nub/shared-target`) so deps
   are reused and only the workspace crates recompile — but auto-isolates a
   worktree to a private target dir the moment it diverges a depended-on crate
@@ -31,7 +32,7 @@ metadata:
 
 nub is a Rust workspace — `nub-cli`, `nub-core`, `nub-native` plus the vendored aube PM engine (`vendor/aube`, plain in-tree files, its own Cargo workspace, linked in-process as a library).
 
-**The rule that makes iteration fast:** build with `--profile fast` (never `release`), through `scripts/rust-build.sh`, which points `CARGO_TARGET_DIR` at the shared dir `~/.cache/nub/shared-target` — cold ≈ 3 min, every rebuild after ≈ 5s. Don't clean the shared dir between iterations.
+**The installed dev loop uses MBX + Blaze on stable Rust 1.99.0:** run `mbx setup` once and keep the prebuilt `ra-jit` binary in `PATH` or `$CARGO_HOME/bin`, then use `make install-dev`. It uses the default dev profile with the same iteration settings as `fast`, through `scripts/rust-build.sh`'s content-keyed target selection. Direct `--profile fast` builds remain available for CI-equivalent commands and tools that expect `target/fast/nub`.
 
 **Use the wrapper, not a raw `export CARGO_TARGET_DIR`.** The shared dir is safe only while every worktree agrees on the depended-on crates; two that diverge the same one (classically `vendor/aube`) clobber each other's rlib and fail with a phantom `E0063`-class error on correct source. The wrapper auto-isolates exactly then. **The `rust-build` skill owns the target-dir decision.**
 
@@ -46,21 +47,21 @@ scripts/rust-build.sh build -p nub-cli --profile fast          # shared cache; a
 
 Two sharing worktrees serialize on cargo's build lock — a latency cost, never a correctness one.
 
-## Step 2 — Build the dev binary (the `fast` profile)
+## Step 2 — Build the dev binary with Blaze
 
 ```bash
-# The dev CLI binary -> target/fast/nub. This is the iteration build.
+# The CI-equivalent fast-profile binary -> target/fast/nub.
 cargo build -p nub-cli --profile fast
 
 # Full dev binary + N-API addon, symlinked on PATH as nub-dev / nubx-dev:
-make install-dev        # addon-fast, then `scripts/rust-build.sh build --profile fast`, then symlinks
-                        # nub-dev/nubx-dev -> $(scripts/rust-build.sh --print-target)/fast/nub — the
+make install-dev        # addon-dev and nub-cli through MBX + Blaze, then symlinks
+                        # nub-dev/nubx-dev -> $(scripts/rust-build.sh --print-target)/debug/nub — the
                         # wrapper's hashed bucket under ~/.cache/nub/, NOT the repo's target/. The bucket
                         # id tracks depended-on crate content, so a change under vendor/aube or nub-core
                         # moves it: re-run install-dev or nub-dev keeps resolving to the previous bucket.
 
-# Just the native addon (oxc transpiler), fast profile:
-make addon-fast         # -> runtime/addons/nub-native.node
+# Just the native addon (oxc transpiler) through Blaze:
+make addon-fast         # compatibility alias for addon-dev; -> runtime/addons/nub-native.node
 # Release-profile addon (only when you specifically need release behavior):
 make addon
 ```
@@ -71,7 +72,7 @@ There is **no `nub build` command**.
 
 - **The machine-wide governor does the clamping, not you.** `~/.cargo/config.toml` binds `scripts/rustc-qos.sh` as the rustc wrapper (`make qos-global`; `install-dev` re-runs it), which runs every rustc at utility QoS, lets at most two builds compile at once (the rest queue first-come-first-served), and caps the host at six rustc. So a build that sits at `Compiling` with no CPU is queued, not hung: `make build-status` shows who holds the slots and who is waiting. Do not wrap builds in `taskpolicy`/`nice` yourself, and never set `NUB_BUILD_FG=1` or blank `RUSTC_WRAPPER` from an agent — the `rust-build-hygiene` skill has the rules. `~/.cargo/config.toml` also pins `[build] jobs = 6`; CI is unaffected. Leave both in place.
 
-**Why `fast`, never `release`, for iteration** (measured, macOS arm64):
+**Why the dev profile, never `release`, for iteration** (historical `fast` Cargo measurements, macOS arm64):
 
 | build | wall time |
 |---|---|
@@ -80,7 +81,7 @@ There is **no `nub build` command**.
 | `--profile fast`, rebuild after a 1-file change, same target dir | **~5s** |
 | `--profile release`, cold | **~15 min** (and re-LTOs the whole binary on every change) |
 
-`fast` (defined in `Cargo.toml`) inherits `dev` — debug-assertions + overflow checks stay on — drops LTO, uses `codegen-units=256`, line-tables-only debuginfo, `incremental=true`. `release` is a ship profile.
+`fast` (defined in `Cargo.toml`) inherits `dev` — debug-assertions + overflow checks stay on — drops LTO, uses `codegen-units=256`, line-tables-only debuginfo, `incremental=true`. `make install-dev` applies the same settings to the plain dev profile so MBX routes it through Blaze. `release` is a ship profile.
 
 **sccache is NOT used** — measured at a 0% Rust cache-hit rate across separate target dirs (rustc embeds per-target-dir artifact paths in its cache keys; `--remap-path-prefix` + `CARGO_INCREMENTAL=0` doesn't fix it). One shared target dir sidesteps it entirely.
 
@@ -193,10 +194,11 @@ cd ~/.cache/nub/worktrees/<slug>
 scripts/rust-build.sh build -p nub-cli --profile fast
 scripts/rust-build.sh test  -p nub-cli --test <file_stem>
 
-# build (fast profile)
+# build (fast profile, direct Cargo path)
 cargo build -p nub-cli --profile fast          # -> target/fast/nub  (~3 min cold, ~5s incremental)
-make install-dev                                # full binary + addon on PATH as nub-dev/nubx-dev
-make addon-fast                                 # native addon only
+make install-dev                                # MBX + Blaze binary + addon on PATH as nub-dev/nubx-dev
+                                                # needs `mbx setup` and prebuilt `ra-jit` in PATH/CARGO_HOME
+make addon-fast                                 # native addon only, through MBX + Blaze
 
 # test
 cargo test -p nub-cli --test <file_stem>        # one file

@@ -1,0 +1,7 @@
+# blaze.lock: what blaze builds this workspace with besides the crates in Cargo.lock.
+# blaze writes it (`blaze lock`); commit it. docs/cargo.md, "Lock files".
+version = 1
+
+[blaze]
+release = "0.20261030.1"
+toolchain = "nightly-2026-10-27"

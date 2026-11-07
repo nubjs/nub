@@ -5,13 +5,10 @@
 # (resolver.incompatible-publish-age defaults to "deny").
 #
 # min-publish-age is an [unstable] feature, so it is honored ONLY under a
-# nightly cargo and silently ignored elsewhere. The repo deliberately does
-# NOT pin a nightly toolchain: a repo-root rust-toolchain.toml outranks
-# `rustup default`, which would silently redirect the version-pinned CI
-# jobs (the MSRV Check legs) and build released binaries on nightly. So the
-# soak is applied at the one moment it decides versions — dependency
-# updates — where scripts/soak/update-deps.mts invokes `cargo +nightly`.
-# Everything else, including every shipped binary, builds on stable.
+# nightly cargo and silently ignored elsewhere. Everyday builds use the
+# repository's pinned stable toolchain in rust-toolchain.toml. The MSRV CI
+# job explicitly selects 1.95.0, and dependency updates invoke `cargo +nightly`
+# in scripts/soak/update-deps.mts so the soak is active when versions are chosen.
 [unstable]
 min-publish-age = true
 

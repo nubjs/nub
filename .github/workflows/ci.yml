@@ -218,6 +218,10 @@ jobs:
     needs: matrix-plan
     if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
     runs-on: ubuntu-latest
+    # The repository defaults to stable 1.99.0. This job is the explicit MSRV
+    # check, so override the rust-toolchain.toml pin for every Cargo command.
+    env:
+      RUSTUP_TOOLCHAIN: "1.95.0"
     permissions:
       contents: read
     steps:
@@ -229,8 +233,6 @@ jobs:
       # requires rustc 1.95 — so nub-phantom no longer holds a 1.93 floor and the
       # whole check runs on a single 1.95 toolchain.
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # 1.95.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-        with:
-          toolchain: 1.95.0
       # shared-key (stable across runs, NOT per-ref) so PRs restore the warm cache
       # main saves; save-if gates writes to main only, so PRs/tags are read-only and
       # don't churn the 10GB/repo budget (the default per-(job,ref) key let every PR
@@ -265,6 +267,109 @@ jobs:
       # nub-phantom (above) stays too — its workspace defines no `fast` profile.
       - run: cargo check --all-targets --profile fast
       - run: cd crates/nub-native && cargo check --locked --all-targets --all-features --profile fast
+
+  blaze-dev:
+    name: Blaze dev build (MBX 1.29.2 + Blaze v2)
+    needs: matrix-plan
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && (needs.matrix-plan.outputs.run_rust == 'true')
+    runs-on: macos-15
+    permissions:
+      contents: read
+    env:
+      NUB_SHARED_TARGET: ${{ github.workspace }}/target
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_CODEGEN_UNITS: "256"
+      CARGO_PROFILE_DEV_INCREMENTAL: "true"
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6af9a09a9f985be78d729e2c9b2440bdb0314675  # master revision with explicit toolchain input
+        with:
+          toolchain: 1.99.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
+        with:
+          shared-key: ci-blaze
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: |
+            ~/.blaze
+            ~/.cache/blaze
+          key: blaze-v2-macos-15-${{ hashFiles('Cargo.lock', 'crates/nub-native/Cargo.lock') }}-0.20261030.1
+          restore-keys: |
+            blaze-v2-macos-15-${{ hashFiles('Cargo.lock', 'crates/nub-native/Cargo.lock') }}-
+      - name: Install prebuilt MBX and Blaze tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/rust-tools"
+          mkdir -p "$tools/blaze"
+          curl -fsSL https://github.com/jdx/mr-boxington/releases/download/v1.29.2/mbx-aarch64-apple-darwin.tar.gz -o "$RUNNER_TEMP/mbx.tar.gz"
+          echo '621ce235d8f241c5a3728ca03d34b9864f466f4e8b3307d8a6d7101a24a71a60  '"$RUNNER_TEMP/mbx.tar.gz" | shasum -a 256 --check
+          tar -xzf "$RUNNER_TEMP/mbx.tar.gz" -C "$tools"
+          curl -fsSL https://github.com/indexable-inc/blaze/releases/download/v0.20261030.1/blaze-v0.20261030.1-aarch64-apple-darwin.tar.gz -o "$RUNNER_TEMP/blaze.tar.gz"
+          echo '63daccdad39bef02c3e0ef2d6ce680014aa03d8e1aba0bd34bb88776d42d1ce0  '"$RUNNER_TEMP/blaze.tar.gz" | shasum -a 256 --check
+          tar -xzf "$RUNNER_TEMP/blaze.tar.gz" -C "$tools/blaze" --strip-components=1
+          echo "$tools" >> "$GITHUB_PATH"
+          echo "$tools/blaze" >> "$GITHUB_PATH"
+          export PATH="$tools/blaze:$tools:$PATH"
+          mbx setup --yes
+          mbx --version
+          blaze --version
+          rustc --version
+      - name: Verify MBX compiler governor with ordinary Cargo
+        shell: bash
+        run: |
+          set -euo pipefail
+          wrappers="$RUNNER_TEMP/nub-governor-probe"
+          fixture="$RUNNER_TEMP/nub-governor-fixture"
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          mkdir -p "$wrappers" "$fixture/src"
+          cat > "$wrappers/rustc-gov.sh" <<'SH'
+          #!/bin/sh
+          printf 'governor\n' >> "$NUB_BUILD_WRAPPER_LOG"
+          exec "$@"
+          SH
+          chmod +x "$wrappers/rustc-gov.sh"
+          mkdir -p "$cargo_home"
+          install "$wrappers/rustc-gov.sh" "$cargo_home/rustc-gov.sh"
+          cat > "$cargo_home/config.toml" <<TOML
+          [build]
+          rustc-wrapper = "$cargo_home/rustc-gov.sh"
+          TOML
+          cat > "$fixture/Cargo.toml" <<'TOML'
+          [package]
+          name = "nub-governor-route-probe"
+          version = "0.1.0"
+          edition = "2024"
+          TOML
+          printf 'fn main() { assert_eq!(6 * 7, 42); }\n' > "$fixture/src/main.rs"
+          cargo_shim=$(mbx setup --status 2>&1 | sed -n 's/^mbx setup is installed and current: //p')
+          export NUB_BUILD_WRAPPER_LOG="$RUNNER_TEMP/nub-governor-wrapper.log"
+          : > "$NUB_BUILD_WRAPPER_LOG"
+          NUB_CARGO_COMMAND="$cargo_shim" \
+            NUB_SHARED_TARGET="$RUNNER_TEMP/nub-governor-target" \
+            scripts/rust-build.sh build --manifest-path "$fixture/Cargo.toml"
+          grep -Fqx governor "$NUB_BUILD_WRAPPER_LOG"
+      - name: Build the developer binary and native addon with Blaze v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_log="$RUNNER_TEMP/nub-blaze-build.log"
+          make install-dev BIN_DIR="$RUNNER_TEMP/nub-bin" 2>&1 | tee "$build_log"
+          grep -F 'Finished `dev` profile' "$build_log"
+          test -x "$RUNNER_TEMP/nub-bin/nub-dev"
+          test -f runtime/addons/nub-native.node
+      - name: Stop Blaze daemon
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/rust-tools"
+          if [[ -x "$tools/blaze/blaze" ]]; then
+            PATH="$tools/blaze:$tools:$PATH" blaze stop || true
+          fi
       # Real Windows compile + test coverage is the windows-latest leg of the
       # `test` job. The previous fast `x86_64-pc-windows-gnu` cross-check needed
       # mingw-w64 + ring's C build, which was fragile on the runner; the native
@@ -290,7 +395,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7  # 1.99.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
@@ -382,7 +487,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7  # 1.99.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: ci-embed-runtime-${{ runner.os }}
@@ -430,7 +535,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7  # 1.99.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       # `save-if: main`, NOT `save-if: false`. This key had no writer anywhere in the
       # repo, so every run — PR and trunk alike — logged "No cache found." and paid a
       # cold ~24 min release build of nub.exe before reaching the first gate. A
@@ -850,7 +955,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7  # 1.99.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: ci-mac-embed-roundtrip
@@ -1189,7 +1294,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7  # 1.99.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       # Keyed by OS only (not the node version) so the 4 ubuntu node-tier legs
       # share ONE cache instead of writing four. save-if:main → read-only on PRs.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
@@ -1539,7 +1644,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7  # 1.99.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
       # Keyed by OS only so the node-tier legs share one cache; save-if:main →
       # PRs restore main's warm cache read-only.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
@@ -1606,7 +1711,7 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
+      - uses: dtolnay/rust-toolchain@ff7f6a3374ce205788da40198ec918bd5d67aea7  # 1.99.0 # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
         with:
           components: rustfmt
       - run: cargo fmt --check
@@ -1915,7 +2020,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full')
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, compile-code-cache, native-web-worker, test, pnp, fmt, types-fixtures, test262, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots, nubr-script]
+    needs: [matrix-plan, check, blaze-dev, clippy, embed-runtime, windows-embed-roundtrip, compile-code-cache, native-web-worker, test, pnp, fmt, types-fixtures, test262, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots, nubr-script]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed
