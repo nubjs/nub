@@ -55,7 +55,7 @@ Never fake-wait on a build with a detached shell + a `sleep`/poll loop.
 ## Performance — reuse the cache, clamp the QoS, cap the jobs
 
 - **Build through `scripts/rust-build.sh`** (drop-in for `cargo`). It picks the right target dir (shared by default, auto-isolates when a worktree diverges a depended-on crate) and applies a darwin QoS clamp (`taskpolicy -c utility`) plus a job cap on big hosts (`CARGO_BUILD_JOBS = ncpu-4`). That job cap bounds ONE build; `make qos-global` is what bounds the fleet.
-- **Use the `fast` profile to iterate** (`--profile fast` → `target/fast/nub`, ~5s incremental), never `release` (its `lto=thin` + `codegen-units=1` re-LTOs the whole binary every change).
+- **Use `make install-dev` for the MBX + Blaze dev loop** on stable Rust 1.99.0. Direct `--profile fast` builds still write `target/fast/nub`; avoid `release` for iteration because its `lto=thin` + `codegen-units=1` re-LTOs the whole binary after changes.
 - **One target dir per CONCURRENTLY-building tree.** Two builds on one target dir serialize on cargo's lock — that IS the contention. A serial multi-phase epic reuses ONE dedicated warm target across its phases; never point two concurrent builds at it. See `rust-build`.
 - **sccache does nothing here** (measured 0% cross-worktree hit — it keys on the rustc command line, which embeds the absolute target path). A stable per-tree target dir is the whole answer.
 
