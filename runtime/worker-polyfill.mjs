@@ -291,7 +291,20 @@ export function installWorkerPolyfill() {
       }
       if (this.#name) nodeOptions.name = this.#name;
 
-      this.#worker = new NodeWorker(spawnTarget, nodeOptions);
+      // Node accepts a per-process flag such as `--max-old-space-size` only by
+      // inheritance, and refuses it in an explicit list, naming each. A worker
+      // that inherits drops it silently, so drop the ones that came from this
+      // process and retry; one the caller passed still throws, as Node's does.
+      try {
+        this.#worker = new NodeWorker(spawnTarget, nodeOptions);
+      } catch (error) {
+        if (error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") throw error;
+        const refused = error.message.slice(error.message.indexOf(": ") + 2).split(", ");
+        const given = Array.isArray(options.execArgv) ? options.execArgv : [];
+        if (refused.some(flag => given.includes(flag) || !execArgv.includes(flag))) throw error;
+        nodeOptions.execArgv = execArgv.filter(flag => !refused.includes(flag));
+        this.#worker = new NodeWorker(spawnTarget, nodeOptions);
+      }
 
       this.#worker.on("message", (data) => {
         this.dispatchEvent(new MessageEvent("message", { data }));

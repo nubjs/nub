@@ -7605,6 +7605,27 @@ fn worker_from_data_url() {
 }
 
 #[test]
+fn worker_starts_under_a_per_process_node_flag() {
+    // A flag such as `--max-old-space-size` reaches the parent's execArgv, which the
+    // global Worker forwards as an explicit list. Node refuses it there, so it must
+    // be dropped the way inheritance drops it, while one the caller passes throws.
+    let fixture = fixtures_dir().join("worker");
+    let output = Command::new(nub_binary())
+        .args(["--max-old-space-size=200", "per-process-flag-main.ts"])
+        .current_dir(&fixture)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "per-process-flag:started:ERR_WORKER_INVALID_EXEC_ARGV",
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn worker_from_blob_url() {
     // WHATWG standard inline mechanism: a `blob:` URL worker via
     // URL.createObjectURL(new Blob([src])). nub wraps createObjectURL so the
