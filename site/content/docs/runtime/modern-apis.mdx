@@ -93,7 +93,7 @@ const allIds = Iterator.concat(primaryIds, archivedIds).toArray();
 
 ### `Iterator.zip()`
 
-The [joint-iteration methods](https://github.com/tc39/proposal-joint-iteration) advance several iterables in step. No Node release ships them yet; Nub polyfills them.
+The [joint-iteration methods](https://github.com/tc39/proposal-joint-iteration) advance several iterables in step. Native from Node 27; Nub polyfills them on older versions.
 
 ```ts
 // yields [id, name] pairs
@@ -107,7 +107,7 @@ for (const row of Iterator.zipKeyed({ id: ids, name: names })) {
 
 ### `Iterator.prototype.chunks()`
 
-These helpers [batch or window an iterator](https://github.com/tc39/proposal-iterator-chunking), [search it for a value](https://github.com/tc39/proposal-iterator-includes), or [join it into a string](https://github.com/tc39/proposal-iterator-join). No Node release ships them yet; Nub polyfills them.
+These helpers [batch or window an iterator](https://github.com/tc39/proposal-iterator-chunking), [search it for a value](https://github.com/tc39/proposal-iterator-includes), or [join it into a string](https://github.com/tc39/proposal-iterator-join). `includes` and `join` are native from Node 27. `chunks` and `windows` ship in no Node release yet. Nub polyfills whichever are missing.
 
 ```ts
 const batches = Iterator.from(records).chunks(100).toArray();
@@ -292,9 +292,19 @@ try {
 }
 ```
 
+### `Intl.Locale.prototype.variants`
+
+The [`variants`](https://tc39.es/ecma402/#sec-get-intl.locale.prototype.variants) getter returns the locale's canonical variant subtags, separated by hyphens, or `undefined` when there are none. The constructor takes a matching `variants` option. Native from Node 27; Nub polyfills both on older versions.
+
+```ts
+new Intl.Locale("sl-rozaj-biske").variants; // "biske-rozaj"
+new Intl.Locale("en-US").variants; // undefined
+new Intl.Locale("sl", { variants: "rozaj" }).toString(); // "sl-rozaj"
+```
+
 ### `Math.sumPrecise()`
 
-The [`Math.sumPrecise()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sumPrecise) method sums numbers without the rounding error and overflow that addition order causes. No Node release ships it yet; Nub polyfills it.
+The [`Math.sumPrecise()`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/sumPrecise) method sums numbers without the rounding error and overflow that addition order causes. Native from Node 27; Nub polyfills it on older versions.
 
 ```ts
 Math.sumPrecise([1, 1e100, 1, -1e100]); // 2

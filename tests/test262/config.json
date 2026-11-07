@@ -1,0 +1,58 @@
+{
+  "revision": "e4fbf57745c6aae3d1f12f181ecef78b1665d812",
+  "harnessVersion": "10.0.0",
+  "suites": [
+    "test/built-ins/Math/sumPrecise",
+    "test/intl402/Locale/prototype/variants",
+    "test/intl402/Locale/constructor-getter-order.js",
+    "test/intl402/Locale/constructor-locale-object.js",
+    "test/intl402/Locale/constructor-newtarget-undefined.js",
+    "test/intl402/Locale/constructor-options-canonicalized.js",
+    "test/intl402/Locale/constructor-options-variants-invalid.js",
+    "test/intl402/Locale/constructor-options-variants-valid.js",
+    "test/intl402/Locale/constructor-tag.js",
+    "test/intl402/Locale/constructor-tag-tostring.js",
+    "test/intl402/Locale/function-prototype.js",
+    "test/intl402/Locale/getters-missing.js",
+    "test/intl402/Locale/instance.js",
+    "test/intl402/Locale/instance-extensibility.js",
+    "test/intl402/Locale/invalid-tag-throws.js",
+    "test/intl402/Locale/length.js",
+    "test/intl402/Locale/name.js",
+    "test/intl402/Locale/prop-desc.js",
+    "test/intl402/Locale/proto-from-ctor-realm.js",
+    "test/intl402/Locale/prototype/constructor/prop-desc.js",
+    "test/intl402/Locale/reject-duplicate-variants.js",
+    "test/intl402/Locale/reject-duplicate-variants-in-tlang.js",
+    "test/intl402/Locale/subclassing.js",
+    "test/built-ins/Iterator/zip",
+    "test/built-ins/Iterator/zipKeyed",
+    "test/built-ins/Iterator/prototype/join",
+    "test/built-ins/Iterator/prototype/includes",
+    "test/built-ins/Iterator/prototype/take",
+    "test/built-ins/Iterator/prototype/drop",
+    "test/built-ins/Iterator/prototype/chunks",
+    "test/built-ins/Iterator/prototype/windows",
+    "test/built-ins/Promise/try",
+    "test/built-ins/AsyncIteratorPrototype/Symbol.asyncDispose"
+  ],
+  "expectedFiles": 355,
+  "expectedScenarios": 710,
+  "polyfillOnly": [
+    "test/built-ins/Iterator/prototype/chunks",
+    "test/built-ins/Iterator/prototype/windows"
+  ],
+  "knownFailures": [
+    {
+      "reason": "The harness resolves %IteratorHelperPrototype% from Iterator while loading its includes, before the prelude installs Iterator on a Node that has none.",
+      "nodeMajors": [
+        18,
+        20
+      ],
+      "files": [
+        "test/built-ins/Iterator/zip/result-is-iterator.js",
+        "test/built-ins/Iterator/zipKeyed/result-is-iterator.js"
+      ]
+    }
+  ]
+}
