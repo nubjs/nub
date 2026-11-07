@@ -264,7 +264,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     // error paths included, so nothing can leave a spinner frozen above a report.
     let live = LiveLine::start();
     live.phase("bundling", &opts.entry);
-    let bundled = bundle::bundle_for_compile(&entry_abs, &opts.bundle, &cwd)?;
+    let mut bundled = bundle::bundle_for_compile(&entry_abs, &opts.bundle, &cwd)?;
     // Written as soon as the bundle exists, not at the end: everything after this
     // point can fail on the network or on the target's launcher, and a report of
     // what the bundler produced is exactly what someone diagnosing a size problem
@@ -309,6 +309,36 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         .iter()
         .map(|(name, _)| layout.bundle_path(name))
         .collect();
+    // The module every OTHER worker preloads: the same wrapper, entering the
+    // preamble bundled on its own. It sits at the payload root beside the
+    // bootstrap, which names it without knowing the layout prefix, and goes in as
+    // a root support file so the collision gates cover it.
+    let worker_scope = if bundled.uses_worker {
+        let chunk = bundle::bundle_worker_scope(&opts.bundle)?;
+        let root = bundle::WorkerRoot {
+            entry: bundle::WORKER_SCOPE_NAME.to_string(),
+            chunk: layout.bundle_path(bundle::WORKER_SCOPE_CHUNK),
+        };
+        let mut wrapper = external::worker_wrappers(&[root], shim_plan.needed(), "")?;
+        let (name, bytes) = wrapper.pop().expect("one root makes one wrapper");
+        bundled.files.push(bundle::BundledFile {
+            name: bundle::WORKER_SCOPE_CHUNK.to_string(),
+            bytes: chunk,
+        });
+        for file in &mut bundled.root_support_files {
+            if file.name == nub_core::compile::COMPILE_BOOTSTRAP_NAME {
+                file.bytes =
+                    bundle::configure_bootstrap_worker_scope(&file.bytes, &worker_entries)?;
+            }
+        }
+        bundled.root_support_files.push(bundle::BundledFile {
+            name: name.clone(),
+            bytes,
+        });
+        Some(name)
+    } else {
+        None
+    };
     let mut entry_name = layout.bundle_path(&bundled.entry);
     let mut app_files = assemble_app(&bundled, &layout, &worker_wrappers, &target)?;
     if shim_plan.needed() {
@@ -341,7 +371,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let no_extract_inputs = inline::Inputs {
         sealed_module_graph,
         worker_roots: bundled.worker_roots.len(),
-        worker_wrappers: worker_wrappers.len(),
+        worker_wrappers: worker_wrappers.len() + usize::from(worker_scope.is_some()),
         // The mode, not whether one was asked for. The single-executable container
         // carries an inline or a detached map; the no-extract launcher carries
         // neither, because it rewrites its chunks after the map is made. Only
@@ -666,6 +696,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
             app_files: &app_files,
             entry: &manifest.entry,
             workers: &worker_entries,
+            worker_scope: worker_scope.as_deref(),
             app_sha: &manifest.app_sha256,
             node_license: &node.license,
             node_version: &node_version,
@@ -5794,6 +5825,7 @@ mod tests {
             external_imports: Vec::new(),
             shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
+            uses_worker: false,
             metafile: None,
         };
         let layout = assets::Layout {
@@ -5872,6 +5904,7 @@ mod tests {
             external_imports: Vec::new(),
             shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
+            uses_worker: false,
             metafile: None,
         };
         let layout = assets::Layout {
@@ -5927,6 +5960,7 @@ mod tests {
             external_imports: Vec::new(),
             shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
+            uses_worker: false,
             metafile: None,
         };
         let files = assemble_app(
@@ -5999,6 +6033,7 @@ mod tests {
             external_imports: Vec::new(),
             shipped_sources: Vec::new(),
             worker_roots: Vec::new(),
+            uses_worker: false,
             metafile: None,
         };
 
@@ -6046,6 +6081,7 @@ mod tests {
                 entry: "worker-a.mjs".into(),
                 chunk: "worker-a-code.mjs".into(),
             }],
+            uses_worker: false,
             metafile: None,
         };
         let wrappers = external::worker_wrappers(&bundled.worker_roots, true, "").unwrap();
@@ -6094,6 +6130,7 @@ mod tests {
                 external_imports: Vec::new(),
                 shipped_sources: Vec::new(),
                 worker_roots: Vec::new(),
+                uses_worker: false,
                 metafile: None,
             },
             assets::Layout {

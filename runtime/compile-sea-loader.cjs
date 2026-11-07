@@ -44,6 +44,9 @@
   // wrapper the compiler emits per traced worker root, and nothing else. A payload
   // with no worker leaves the `Worker` replacement below unbuilt entirely.
   const WORKERS = __NUB_SEA_WORKERS__;
+  // The payload name of the generated module that loads the preamble into any
+  // other worker, or null for a payload whose app never names Worker.
+  const WORKER_SCOPE = __NUB_SEA_WORKER_SCOPE__;
   // Whether this Node's `localStorage` getter throws without a storage file, and
   // so has to be neutralized by the preamble. The launcher sets the same signal in
   // the child's environment; here the artifact sets it on itself, because a SEA
@@ -153,7 +156,7 @@
   // container already carries for the blob's own `execArgv`. In a worker it is
   // also the only route: the bootstrap that publishes that accessor has not run
   // there yet, because this is what starts the module that runs it.
-  function installPayloadContainer(root, names, workerNames) {
+  function installPayloadContainer(root, names, workerNames, scope) {
     const sea = process.getBuiltinModule("node:sea");
     const Module = process.getBuiltinModule("node:module");
     const files = new Set(names);
@@ -233,7 +236,7 @@
     // `node:worker_threads` LOADS it: 1.4 ms on a quiet box, against the ~3.7 ms a
     // whole compiled application costs to start. Same reason the compile bootstrap
     // strips its own `needsWorker` region.
-    if (workerNames.length === 0) return;
+    if (workerNames.length === 0 && scope === null) return;
     const threads = process.getBuiltinModule("node:worker_threads");
     const OriginalWorker = threads.Worker;
     // The payload root as a PATH, derived rather than written down: on Windows
@@ -266,9 +269,11 @@
 
     // Built per construction rather than once, so a payload that never starts a
     // worker does not pay to serialize its own file list.
-    const bootstrapFor = (name) =>
+    const installer = () =>
       `(${installPayloadContainer})(${JSON.stringify(root)}, ${JSON.stringify(names)}, ` +
-      `${JSON.stringify(workerNames)});\n` +
+      `${JSON.stringify(workerNames)}, ${JSON.stringify(scope)});\n`;
+    const bootstrapFor = (name) =>
+      installer() +
       // The entry failing to LOAD is reported the same way a throw inside it is:
       // rethrown out of the microtask queue, so it becomes this thread's uncaught
       // exception and the parent's `error` event. An unhandled rejection would
@@ -276,15 +281,88 @@
       `import(${JSON.stringify(root + name)}).catch((error) => {\n` +
       `  setImmediate(() => {\n    throw error;\n  });\n});\n`;
 
+    // Any other worker keeps its own target and gains one `--import` that installs
+    // this container and then loads the preamble through the generated scope
+    // module — the single-executable counterpart of the compile bootstrap's
+    // `installCompiledWorkerScope`, which carries the reasoning. A `data:` URL
+    // because nothing on disk can be preloaded, and a payload URL cannot resolve
+    // until the hooks it installs exist. Built on first use and kept: the worker
+    // re-creates the identical string, so a nested worker forwarding
+    // `process.execArgv` drops the duplicate.
+    let scopeArg;
+    const scopeArgFor = () =>
+      (scopeArg ??=
+        "--import=data:text/javascript;base64," +
+        Buffer.from(
+          `${installer()}await import(${JSON.stringify(root + scope)});\n`,
+          "utf8",
+        ).toString("base64"));
+
+    // The compile bootstrap's parser, verbatim: this body is serialized into a
+    // worker and can reach nothing outside it.
+    function withoutRefusedExecArgv(execArgv, error) {
+      if (error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") return null;
+      const report = String(error.message);
+      const start = report.indexOf(": ");
+      if (start === -1) return null;
+      let cursor = start + 2;
+      const kept = [];
+      const refused = [];
+      for (let i = 0; i < execArgv.length; i++) {
+        const arg = execArgv[i];
+        const end = cursor + arg.length;
+        if (
+          arg !== "" &&
+          report.startsWith(arg, cursor) &&
+          (end === report.length || report.startsWith(", ", end))
+        ) {
+          refused.push(arg);
+          cursor = end === report.length ? end : end + 2;
+          const next = execArgv[i + 1];
+          if (!arg.includes("=") && next !== undefined && !next.startsWith("-")) {
+            refused.push(next);
+            i++;
+          }
+        } else {
+          kept.push(arg);
+        }
+      }
+      return cursor === report.length && refused.length > 0 ? { kept, refused } : null;
+    }
+
     class Worker extends OriginalWorker {
       constructor(target, options) {
         // `eval: true` means the target is SOURCE rather than a location, so none
         // of this applies to it.
         const name = options?.eval === true ? null : payloadWorker(target);
         if (name === null) {
+          const given = options?.execArgv;
+          if (
+            scope === null ||
+            options?.eval === true ||
+            (given !== undefined && !Array.isArray(given))
+          ) {
+            super(target, options);
+            return;
+          }
+          const arg = scopeArgFor();
+          let execArgv = [arg, ...(given ?? process.execArgv).filter((flag) => flag !== arg)];
+          for (;;) {
+            try {
+              super(target, { ...options, execArgv });
+              return;
+            } catch (error) {
+              if (given !== undefined || error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") throw error;
+              const retry = withoutRefusedExecArgv(execArgv, error);
+              if (retry === null) break;
+              execArgv = retry.kept;
+            }
+          }
           super(target, options);
           return;
         }
+        // A traced entry starts as eval source, and Node runs no `--import` ahead
+        // of that, so a scope module inherited from an untraced parent never loads.
         // `eval` last, so an application that passed `eval: false` beside a payload
         // target cannot turn the generated bootstrap back into a path. Everything
         // else — `workerData`, `env`, `execArgv`, `transferList` — passes through.
@@ -294,7 +372,7 @@
     threads.Worker = Worker;
   }
 
-  installPayloadContainer(ROOT, FILES, WORKERS);
+  installPayloadContainer(ROOT, FILES, WORKERS, WORKER_SCOPE);
 
   // The backstop for the one thing the build-time scan cannot promise.
   //

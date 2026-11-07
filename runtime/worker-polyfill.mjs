@@ -40,6 +40,37 @@
 let _bootstrapCreateRequire = null;
 // Compiled global Workers must carry their fixed-root bootstrap exactly once.
 let _compiledBootstrapRequireArg = null;
+
+// The compile bootstrap's parser, verbatim (compile-bootstrap.cjs carries why).
+function withoutRefusedExecArgv(execArgv, error) {
+  if (error?.code !== "ERR_WORKER_INVALID_EXEC_ARGV") return null;
+  const report = String(error.message);
+  const start = report.indexOf(": ");
+  if (start === -1) return null;
+  let cursor = start + 2;
+  const kept = [];
+  const refused = [];
+  for (let i = 0; i < execArgv.length; i++) {
+    const arg = execArgv[i];
+    const end = cursor + arg.length;
+    if (
+      arg !== "" &&
+      report.startsWith(arg, cursor) &&
+      (end === report.length || report.startsWith(", ", end))
+    ) {
+      refused.push(arg);
+      cursor = end === report.length ? end : end + 2;
+      const next = execArgv[i + 1];
+      if (!arg.includes("=") && next !== undefined && !next.startsWith("-")) {
+        refused.push(next);
+        i++;
+      }
+    } else {
+      kept.push(arg);
+    }
+  }
+  return cursor === report.length && refused.length > 0 ? { kept, refused } : null;
+}
 // The blob-URL registry, supplied by an importer that already holds it. Set only
 // by the compile preamble: a compiled bundle has no sibling files to
 // `createRequire` (see the load below), and it is the ONE importer for which the
@@ -291,7 +322,25 @@ export function installWorkerPolyfill() {
       }
       if (this.#name) nodeOptions.name = this.#name;
 
-      this.#worker = new NodeWorker(spawnTarget, nodeOptions);
+      // Node accepts a per-process flag such as `--max-old-space-size` only by
+      // inheritance, and refuses it in an explicit list, naming each. A worker
+      // that inherits drops it silently, so drop the ones that came from this
+      // process and retry; one the caller passed still throws, as Node's does.
+      // Node stops reading flags at a stray value, so a retry can surface more.
+      // Only the flags Node named count against the caller: a dropped separate value
+      // never starts with `-`, and may equal one of the caller's own values.
+      const given = Array.isArray(options.execArgv) ? options.execArgv : [];
+      const callerPassed = arg => arg.startsWith("-") && given.includes(arg);
+      for (;;) {
+        try {
+          this.#worker = new NodeWorker(spawnTarget, nodeOptions);
+          break;
+        } catch (error) {
+          const retry = withoutRefusedExecArgv(nodeOptions.execArgv, error);
+          if (retry === null || retry.refused.some(callerPassed)) throw error;
+          nodeOptions.execArgv = retry.kept;
+        }
+      }
 
       this.#worker.on("message", (data) => {
         this.dispatchEvent(new MessageEvent("message", { data }));

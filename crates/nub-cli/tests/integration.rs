@@ -779,6 +779,85 @@ named.on("message", (message) => {
     );
 }
 
+/// A worker the compiler did not trace gets the worker scope and the `--external`
+/// hook, as a traced one does.
+///
+/// The target is a shipped file reached through a helper, so it runs as Node's
+/// own entry rather than a bundled one: before the artifact preloaded the
+/// preamble into such a worker it had no `postMessage`, and since module hooks are
+/// per thread its `import("peer")` could not find the external. Each failure
+/// surfaces as a different `worker-error:` line, so the assertion names which.
+#[cfg(feature = "compile")]
+#[test]
+fn an_untraced_worker_gets_the_worker_scope_and_reaches_an_external() {
+    let runtime = compile_test_runtime();
+    let work = unique_test_cache();
+    let package = work.join("node_modules").join("peer");
+    std::fs::create_dir_all(&package).expect("create the installed package dir");
+    std::fs::write(
+        package.join("package.json"),
+        "{ \"name\": \"peer\", \"version\": \"1.0.0\", \"main\": \"index.js\" }\n",
+    )
+    .expect("write the package manifest");
+    std::fs::write(
+        package.join("index.js"),
+        "module.exports = (n) => `peer-answered:${n}`;\n",
+    )
+    .expect("write the package");
+    std::fs::write(
+        work.join("worker.mjs"),
+        "import(\"peer\").then((m) => postMessage(`${typeof self}:${m.default(42)}`));\n",
+    )
+    .expect("write the worker");
+    let entry = work.join("app.mjs");
+    std::fs::write(
+        &entry,
+        r#"const start = (url) => new Worker(url);
+const worker = start(new URL("./worker.mjs", import.meta.url));
+worker.onmessage = (event) => {
+  console.log(event.data);
+  worker.terminate();
+};
+worker.onerror = (event) => {
+  console.log("worker-error:", event.message);
+  worker.terminate();
+};
+"#,
+    )
+    .expect("write entry");
+
+    let artifact = work.join(format!("app{}", std::env::consts::EXE_SUFFIX));
+    let compiled = Command::new(nub_binary())
+        .args(["compile", "--smol", "--target", &runtime.node_target])
+        .args(["--external", "peer", "--out"])
+        .arg(&artifact)
+        .arg(&entry)
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("__NUB_LAUNCHER_TEMPLATE", &runtime.launcher)
+        .output()
+        .expect("spawn nub compile");
+    assert!(
+        compiled.status.success(),
+        "compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let mut command = Command::new(&artifact);
+    command
+        .current_dir(&work)
+        .env("XDG_CACHE_HOME", work.join("artifact-cache"));
+    let ran =
+        run_compiled_artifact_command_with_timeout(command, std::time::Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&ran.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "object:peer-answered:42",
+        "the untraced worker must see `self` and resolve the external; stderr: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// The `sources` of a compiled program's source map, split into nub's own runtime
 /// (`runtime/…`) and everything else, which is sorted.
 #[cfg(feature = "compile")]
@@ -7543,6 +7622,27 @@ fn worker_from_data_url() {
     assert!(
         stdout.contains("data-url:from-data-url"),
         "data: URL worker must execute its inline source and reply: {stdout}"
+    );
+}
+
+#[test]
+fn worker_starts_under_a_per_process_node_flag() {
+    // A flag such as `--max-old-space-size` reaches the parent's execArgv, which the
+    // global Worker forwards as an explicit list. Node refuses it there, so it must
+    // be dropped the way inheritance drops it, while one the caller passes throws.
+    let fixture = fixtures_dir().join("worker");
+    let output = Command::new(nub_binary())
+        .args(["--max-old-space-size=200", "per-process-flag-main.ts"])
+        .current_dir(&fixture)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("failed to spawn nub");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout.trim(),
+        "per-process-flag:started:ERR_WORKER_INVALID_EXEC_ARGV",
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
