@@ -41,10 +41,10 @@ pub(crate) struct Register {
     pub options: Option<String>,
 }
 
-/// JSON text for the runtime snapshot with its `\` and `"` spelled out. Under a Windows
-/// script the snapshot passes through busybox-w32's `ash`, which rewrites `\` to `/` in
-/// every variable it imports, so any JSON escape in a value reaches the descendant
-/// corrupted, and an escaped quote breaks the snapshot's own parse.
+/// JSON text for the runtime snapshot with its `\` and `"` spelled out. A `script-shell`
+/// pointing at busybox-w32 runs without the bundled shell's `-X`, so its `ash` rewrites
+/// `\` to `/` in every variable it imports: any JSON escape in a value would reach the
+/// descendant corrupted, and an escaped quote would break the snapshot's own parse.
 fn encode_options(options: &serde_json::Value) -> String {
     options
         .to_string()
@@ -228,10 +228,10 @@ fn register_of(resolver: &oxc_resolver::Resolver, dir: &Path) -> Option<String> 
     let register = resolver.resolve(dir, &format!("{name}/register")).ok()?;
     // One spelling per file, or a descendant merges a second register for it: two URLs,
     // so it evaluates twice. Hence the real path, whatever the anchor's spelling
-    // (`RUNNER~1`), and forward slashes on Windows: under a script the snapshot passes
-    // through busybox-w32's `ash`, which rewrites `\` to `/` in every variable it imports,
-    // and JSON's `\\` comes out as `//`, which still parses. Windows only, because a
-    // backslash is a legal filename character on POSIX.
+    // (`RUNNER~1`), and forward slashes on Windows: under a `script-shell` pointing at
+    // busybox-w32 the snapshot passes through an `ash` that rewrites `\` to `/` in every
+    // variable it imports, and JSON's `\\` comes out as `//`, which still parses. Windows
+    // only, because a backslash is a legal filename character on POSIX.
     let real = std::fs::canonicalize(register.full_path()).ok()?;
     let path = crate::cli::strip_windows_verbatim_prefix(&real.to_string_lossy());
     Some(if cfg!(windows) {
