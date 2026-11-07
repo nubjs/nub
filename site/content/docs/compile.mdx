@@ -447,7 +447,8 @@ The URL itself is read only where it is written inline, as above. A specifier co
 ```ts
 new Worker("data:text/javascript,postMessage(typeof self)"); // "object"
 const start = (url: URL) => new Worker(url);
-start(new URL("./worker.mjs", import.meta.url));        // ships as a file, runs as written
+// ships as a file, runs as written
+start(new URL("./worker.mjs", import.meta.url));
 ```
 
 Anything else that looks like a worker fails the build rather than shipping its entry as data, which would run untranspiled and outside the compiled runtime:
