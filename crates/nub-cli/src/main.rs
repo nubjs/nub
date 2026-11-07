@@ -13,6 +13,7 @@ mod cli;
 mod compile;
 mod config;
 mod config_fields;
+mod content_mappers;
 mod dynamic_phantom;
 mod env_owner;
 mod init;

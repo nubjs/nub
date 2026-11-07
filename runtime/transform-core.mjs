@@ -166,6 +166,8 @@ if (typeof process.getBuiltinModule === "function") __ensureBuiltins();
 let runtimeConfig = {};
 try { runtimeConfig = JSON.parse(process.env.__NUB_RUNTIME_CONFIG || "{}"); } catch {}
 const RUNTIME_LOADER = runtimeConfig.loader || {};
+// tsconfig `contentMappers` extensions and what became of each package's register.
+const MAPPED_EXTENSIONS = runtimeConfig.contentMappers?.extensions || [];
 const RUNTIME_TSCONFIG = runtimeConfig.tsconfig || undefined;
 // Transform-only TypeScript options may live directly in `nub.jsonc`. They
 // override the selected/nearest tsconfig because the project runtime config is
@@ -238,6 +240,30 @@ for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
   }
 }
 export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
+
+// Node's "Unknown file extension" says nothing about why a file the type checker
+// accepted will not load. `tsc` is satisfied by a mapper alone and never emits for
+// these files, so the gap only shows at runtime: name it. Longest suffix wins, as
+// TypeScript routes. Both `message` and `stack` change because an uncaught error
+// prints the stack, which captured the message when it was created.
+export function explainMappedExtension(err, url) {
+  if (err?.code !== "ERR_UNKNOWN_FILE_EXTENSION" || typeof url !== "string") return;
+  let entry;
+  for (const candidate of MAPPED_EXTENSIONS) {
+    if (url.endsWith(candidate.extension) && !(entry?.extension.length >= candidate.extension.length)) {
+      entry = candidate;
+    }
+  }
+  if (!entry) return;
+  const why = {
+    registered: `whose "./register" did not load it on Node ${process.version}`,
+    missing: `which is not installed`,
+    pnp: `which Nub does not discover under Yarn Plug'n'Play; add "${entry.package}/register" to \`preload\` in nub.jsonc`,
+  }[entry.reason] ?? `which has no "./register" export to load it at runtime`;
+  const message = `${err.message}\n"${entry.extension}" is mapped in ${entry.tsconfig} by "${entry.package}", ${why}.`;
+  if (typeof err.stack === "string") err.stack = err.stack.replace(err.message, message);
+  err.message = message;
+}
 
 // Which data-loader map governs `url`. A project's `loader` config must not reach code
 // the project didn't write — `{".json": "text"}` would otherwise turn every dependency's

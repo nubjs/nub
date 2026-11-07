@@ -103,10 +103,30 @@ struct Loaded {
     matcher: Option<PathsMatcher>,
     /// Merged `compilerOptions.customConditions`, verbatim. Empty when unset.
     custom_conditions: Vec<String>,
+    /// The effective top-level `contentMappers`, see [`content_mappers`].
+    content_mappers: Vec<ContentMapper>,
+    /// This config's own project `references`, resolved to config file paths.
+    references: Vec<String>,
     /// Problems found while parsing this config, already rendered for a user.
     /// Empty on a clean parse. A config that reaches here with entries still
     /// carries whatever options DID resolve — see [`build_loaded`].
     diagnostics: Vec<String>,
+}
+
+/// One effective tsconfig `contentMappers` entry (TypeScript 7.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContentMapper {
+    /// The `package` value as written: a package name, or a directory path.
+    pub package: String,
+    /// The entry's extensions that TypeScript would register: leading `.`, no path
+    /// separator. Invalid ones are dropped here as `tsc` drops them.
+    pub extensions: Vec<String>,
+    /// The config file whose `contentMappers` array this entry came from. TypeScript
+    /// resolves `package` from THIS file, not from the leaf config that inherited the
+    /// array (microsoft/TypeScript#65105).
+    pub declared_in: String,
+    /// The entry's `options` object, which TypeScript hands the mapper in `openProject`.
+    pub options: Option<Value>,
 }
 
 /// A compiled `paths` matcher (get-tsconfig's `createPathsMatcher` closure state).
@@ -176,6 +196,75 @@ pub fn load_tsconfig(dir: &str, explicit: Option<&str>) -> TsconfigResult {
 /// coerced — a malformed value should narrow resolution, never invent a condition.
 pub fn custom_conditions(dir: &str, explicit: Option<&str>) -> Vec<String> {
     load_for_dir(dir, explicit).custom_conditions.clone()
+}
+
+/// The effective `contentMappers` of the tsconfig governing `dir`, in declaration
+/// order. Empty when there is no tsconfig, none is declared, or the config's own body
+/// will not parse.
+///
+/// Inheritance is `tsc`'s (`tsoptions/tsconfigparsing.go`, the `contentMappers` arm of
+/// `applyExtendedConfig`): the array is one value, not merged per entry. A config that
+/// declares the key replaces whatever it extends, an empty array included; otherwise
+/// the LAST `extends` entry that has one wins, and each entry keeps the file that
+/// declared it ([`ContentMapper::declared_in`]). Malformed entries are skipped, which
+/// is where `tsc` reports an error and drops them too.
+///
+/// A config with project `references` also contributes every referenced project's
+/// mappers, recursively, after its own. That is the solution-style layout
+/// (`create-vite`'s templates: a root `tsconfig.json` of `"files": []` plus
+/// `references` to `tsconfig.app.json` and `tsconfig.node.json`), where the
+/// project that owns the source files is a referenced one and the config a
+/// directory walk finds lists nothing. The caller loads a union, which is safe
+/// because each register decides per file from that file's own tsconfig. A
+/// referenced config that will not read contributes nothing and says nothing: it
+/// governs no transform here, so it gets no warning either.
+pub fn content_mappers(dir: &str, explicit: Option<&str>) -> Vec<ContentMapper> {
+    let loaded = load_for_dir(dir, explicit);
+    let mut mappers = loaded.content_mappers.clone();
+    let mut seen: Vec<String> = loaded.path.iter().cloned().collect();
+    let mut pending: Vec<String> = loaded.references.iter().rev().cloned().collect();
+    while let Some(reference) = pending.pop() {
+        let key = slash(&reference);
+        if seen.contains(&key) {
+            continue;
+        }
+        seen.push(key);
+        let Ok(parsed) = parse_tsconfig(&reference, &mut Vec::new()) else {
+            continue;
+        };
+        for mapper in parse_content_mappers(&parsed) {
+            if !mappers.contains(&mapper) {
+                mappers.push(mapper);
+            }
+        }
+        pending.extend(project_references(&parsed, &reference).into_iter().rev());
+    }
+    mappers
+}
+
+/// A config's own `references[].path`, as `tsc`'s `resolveConfigFileProjectName`
+/// reads them: relative to the config's directory, naming a `.json` file or a
+/// directory holding `tsconfig.json`. `extends` never carries `references`.
+fn project_references(config: &Value, config_path: &str) -> Vec<String> {
+    let dir = parent_dir(config_path);
+    config
+        .get("references")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|reference| reference.get("path")?.as_str())
+        .map(|path| {
+            let path = path_resolve(&dir, path);
+            if path.ends_with(".json") {
+                path
+            } else {
+                Path::new(&path)
+                    .join("tsconfig.json")
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        })
+        .collect()
 }
 
 /// Problems found parsing the tsconfig governing `dir`, already rendered for a
@@ -299,6 +388,8 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
             tsconfig_hash: String::new(),
             matcher: None,
             custom_conditions: Vec::new(),
+            content_mappers: Vec::new(),
+            references: Vec::new(),
             diagnostics: Vec::new(),
         };
     };
@@ -319,6 +410,8 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
                 tsconfig_hash: String::new(),
                 matcher: None,
                 custom_conditions: Vec::new(),
+                content_mappers: Vec::new(),
+                references: Vec::new(),
                 diagnostics,
             };
         }
@@ -349,12 +442,17 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
         })
         .unwrap_or_default();
 
+    let content_mappers = parse_content_mappers(&parsed);
+    let references = project_references(&parsed, &config_path);
+
     Loaded {
         path: Some(slash(&config_path)),
         compiler_options,
         tsconfig_hash,
         matcher,
         custom_conditions,
+        content_mappers,
+        references,
         diagnostics,
     }
 }
@@ -573,6 +671,17 @@ fn inner_parse(
     }
     let dir = parent_dir(config_path);
 
+    // `extends` merges top-level keys by shallow spread, so a marker set beside the
+    // array by every file that declares it always travels with that array.
+    if let Some(obj) = config.as_object_mut() {
+        if obj.contains_key("contentMappers") {
+            obj.insert(
+                CONTENT_MAPPERS_FROM.to_string(),
+                Value::String(normalize_lexical(Path::new(config_path))),
+            );
+        }
+    }
+
     // Implicit baseUrl marker: paths set but baseUrl unset → remember the config
     // dir so the matcher resolves substitutions against it. We stash it under a
     // private key the matcher reads (get-tsconfig uses a Symbol; a non-tsc key
@@ -648,6 +757,44 @@ fn inner_parse(
 /// a JS Symbol; we use a key string that can never collide with a real
 /// compilerOption and is filtered out of the hash).
 const IMPLICIT_BASE_URL: &str = "\u{0}implicitBaseUrl";
+
+/// Private top-level key naming the file that declared the effective
+/// `contentMappers` array (see [`inner_parse`]).
+const CONTENT_MAPPERS_FROM: &str = "\u{0}contentMappersFrom";
+
+fn parse_content_mappers(config: &Value) -> Vec<ContentMapper> {
+    let (Some(Value::Array(entries)), Some(Value::String(declared_in))) = (
+        config.get("contentMappers"),
+        config.get(CONTENT_MAPPERS_FROM),
+    ) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let package = entry.get("package")?.as_str().filter(|p| !p.is_empty())?;
+            // `parseStringArrayStrict`: one non-string member invalidates the entry.
+            let extensions = entry
+                .get("extensions")?
+                .as_array()?
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<&str>>>()?;
+            Some(ContentMapper {
+                package: package.to_string(),
+                extensions: extensions
+                    .into_iter()
+                    .filter(|ext| {
+                        ext.len() > 1 && ext.starts_with('.') && !ext.contains(['/', '\\'])
+                    })
+                    .map(str::to_string)
+                    .collect(),
+                declared_in: slash(declared_in),
+                options: entry.get("options").filter(|v| v.is_object()).cloned(),
+            })
+        })
+        .collect()
+}
 
 /// get-tsconfig's extends merge: top-level shallow spread parent-then-child, with
 /// `compilerOptions` (and `watchOptions`) merged NESTED rather than replaced;
@@ -1679,6 +1826,149 @@ mod tests {
         ]);
         assert_eq!(read(&dir), vec!["ok"]);
         assert!(diags(&dir).is_empty());
+    }
+
+    fn mappers(dir: &tempfile::TempDir) -> Vec<(String, Vec<String>, String)> {
+        let root = super::slash(&dir.path().to_string_lossy());
+        super::content_mappers(&dir.path().to_string_lossy(), None)
+            .into_iter()
+            .map(|m| {
+                let from = m
+                    .declared_in
+                    .strip_prefix(&root)
+                    .unwrap_or(&m.declared_in)
+                    .to_string();
+                (m.package, m.extensions, from)
+            })
+            .collect()
+    }
+
+    /// `tsc` inherits the array through any depth of `extends`, a package-name one
+    /// included, and resolves each `package` from the file that declared it — so
+    /// that file is what this has to report, not the leaf.
+    #[test]
+    fn content_mappers_inherit_through_extends_and_name_the_declaring_config() {
+        let dir = project(&[
+            (
+                "node_modules/@acme/tsconfig/package.json",
+                r#"{ "name": "@acme/tsconfig", "exports": { "./base.json": "./base.json" } }"#,
+            ),
+            (
+                "node_modules/@acme/tsconfig/base.json",
+                r#"{
+                    // comments and trailing commas are tsconfig syntax
+                    "contentMappers": [{ "package": "motherload", "extensions": [".toml", ".yaml",] },],
+                }"#,
+            ),
+            (
+                "config/middle.json",
+                r#"{ "extends": "@acme/tsconfig/base.json" }"#,
+            ),
+            ("tsconfig.json", r#"{ "extends": "./config/middle.json" }"#),
+        ]);
+        assert_eq!(
+            mappers(&dir),
+            vec![(
+                "motherload".to_string(),
+                vec![".toml".to_string(), ".yaml".to_string()],
+                "/node_modules/@acme/tsconfig/base.json".to_string(),
+            )],
+        );
+    }
+
+    /// The array is one value: a declaring child replaces it wholesale (an empty
+    /// array switches every mapper off), and across an `extends` array the last
+    /// base that declares one wins.
+    #[test]
+    fn a_declared_content_mappers_array_replaces_the_inherited_one() {
+        let a = r#"{ "contentMappers": [{ "package": "a", "extensions": [".a"] }] }"#;
+        let b = r#"{ "contentMappers": [{ "package": "b", "extensions": [".b"] }] }"#;
+        let none = r#"{ "compilerOptions": {} }"#;
+        let last_wins = project(&[
+            ("a.json", a),
+            ("b.json", b),
+            ("none.json", none),
+            (
+                "tsconfig.json",
+                r#"{ "extends": ["./a.json", "./b.json", "./none.json"] }"#,
+            ),
+        ]);
+        assert_eq!(
+            mappers(&last_wins),
+            vec![(
+                "b".to_string(),
+                vec![".b".to_string()],
+                "/b.json".to_string()
+            )],
+        );
+        let leaf_empty = project(&[
+            ("a.json", a),
+            (
+                "tsconfig.json",
+                r#"{ "extends": "./a.json", "contentMappers": [] }"#,
+            ),
+        ]);
+        assert!(mappers(&leaf_empty).is_empty());
+    }
+
+    /// Where `tsc` reports an entry as malformed it does not register it either.
+    #[test]
+    fn malformed_content_mapper_entries_and_extensions_are_dropped() {
+        let dir = project(&[(
+            "tsconfig.json",
+            r#"{ "contentMappers": [
+                { "extensions": [".x"] },
+                { "package": "mixed", "extensions": [".ok", 3] },
+                { "package": "kept", "extensions": ["noDot", ".a/b", ".", ".good"] }
+            ] }"#,
+        )]);
+        assert_eq!(
+            mappers(&dir),
+            vec![(
+                "kept".to_string(),
+                vec![".good".to_string()],
+                "/tsconfig.json".to_string()
+            )],
+        );
+    }
+
+    /// `create-vite`'s solution layout: the root lists no mappers, the referenced
+    /// app project does (through its own `extends`), and a reference cycle ends.
+    #[test]
+    fn content_mappers_are_collected_from_referenced_projects() {
+        let dir = project(&[
+            (
+                "tsconfig.json",
+                r#"{ "files": [], "references": [{ "path": "./tsconfig.app.json" }, { "path": "./tools" }] }"#,
+            ),
+            (
+                "tsconfig.app.json",
+                r#"{ "extends": "./base.json", "include": ["src"] }"#,
+            ),
+            (
+                "base.json",
+                r#"{ "contentMappers": [{ "package": "app-mapper", "extensions": [".app"] }] }"#,
+            ),
+            (
+                "tools/tsconfig.json",
+                r#"{ "references": [{ "path": "../tsconfig.json" }], "contentMappers": [{ "package": "tool-mapper", "extensions": [".tool"] }] }"#,
+            ),
+        ]);
+        assert_eq!(
+            mappers(&dir),
+            vec![
+                (
+                    "app-mapper".to_string(),
+                    vec![".app".to_string()],
+                    "/base.json".to_string()
+                ),
+                (
+                    "tool-mapper".to_string(),
+                    vec![".tool".to_string()],
+                    "/tools/tsconfig.json".to_string()
+                ),
+            ],
+        );
     }
 
     /// The read failure used to surface as a bare "Cannot resolve tsconfig at path:

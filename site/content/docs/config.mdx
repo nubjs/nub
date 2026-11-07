@@ -103,6 +103,8 @@ The top-level fields configure file runs, package scripts, and watch mode.
 
 Load one or more modules before the entry file. An entry is a path or a bare package specifier, resolved the way an import in your project would be.
 
+Packages your tsconfig lists under [`contentMappers`](/docs/runtime/loaders#content-mappers) load without an entry here. An entry here loads after them and takes precedence.
+
 ```jsonc title="nub.jsonc"
 {
   // ...
