@@ -15,7 +15,7 @@ type Parse = (
 
 const runtime = new URL("../runtime/", import.meta.url);
 
-function parserIn(file: string): Parse {
+async function parserIn(file: string): Promise<Parse> {
   const source = readFileSync(new URL(file, runtime), "utf8");
   const start = source.indexOf("function withoutRefusedExecArgv(");
   assert.notEqual(start, -1, `${file} carries no withoutRefusedExecArgv`);
@@ -23,7 +23,11 @@ function parserIn(file: string): Parse {
   for (let i = source.indexOf("{", start); i < source.length; i++) {
     if (source[i] === "{") depth++;
     else if (source[i] === "}" && --depth === 0) {
-      return new Function(`return ${source.slice(start, i + 1)}`)() as Parse;
+      const module = `export default ${source.slice(start, i + 1)}`;
+      const loaded = (await import(`data:text/javascript,${encodeURIComponent(module)}`)) as {
+        default: Parse;
+      };
+      return loaded.default;
     }
   }
   throw new Error(`${file}: unbalanced withoutRefusedExecArgv`);
@@ -31,7 +35,7 @@ function parserIn(file: string): Parse {
 
 function refusal(execArgv: string[]): unknown {
   try {
-    new Worker("0", { eval: true, execArgv }).terminate();
+    void new Worker("0", { eval: true, execArgv }).terminate();
   } catch (error) {
     return error;
   }
@@ -43,7 +47,7 @@ function accepted(parse: Parse, execArgv: string[]): string[] {
   for (;;) {
     let error: unknown;
     try {
-      new Worker("0", { eval: true, execArgv }).terminate();
+      void new Worker("0", { eval: true, execArgv }).terminate();
       return execArgv;
     } catch (caught) {
       error = caught;
@@ -67,7 +71,7 @@ function conditionsInWorker(execArgv: string[]): Promise<string[]> {
 
 // The global Worker merges the caller's list onto the parent's, so only the flags
 // Node names may count against the caller, never a dropped value of the parent's.
-describe("the global Worker under a parent started with --title demo", () => {
+void describe("the global Worker under a parent started with --title demo", () => {
   const polyfill = new URL("worker-polyfill.mjs", runtime).href;
   const start = (execArgv: string[]) => {
     const code =
@@ -85,20 +89,20 @@ describe("the global Worker under a parent started with --title demo", () => {
     return `${child.stdout.trim()}${child.stderr ? ` (stderr: ${child.stderr.trim()})` : ""}`;
   };
 
-  test("starts when a caller's value equals the parent's dropped value", () => {
+  void test("starts when a caller's value equals the parent's dropped value", () => {
     assert.equal(start(["--conditions", "demo"]), "started");
   });
 
-  test("still refuses a flag the caller passed", () => {
+  void test("still refuses a flag the caller passed", () => {
     assert.equal(start(["--title=explicit"]), "ERR_WORKER_INVALID_EXEC_ARGV");
   });
 });
 
 for (const file of ["compile-bootstrap.cjs", "compile-sea-loader.cjs", "worker-polyfill.mjs"]) {
-  describe(file, () => {
-    const parse = parserIn(file);
+  const parse = await parserIn(file);
+  void describe(file, () => {
 
-    test("drops a refused --flag=value and keeps the rest in order", () => {
+    void test("drops a refused --flag=value and keeps the rest in order", () => {
       const list = ["--enable-source-maps", "--max-old-space-size=200", "--conditions=x"];
       assert.deepEqual(parse(list, refusal(list)), {
         kept: ["--enable-source-maps", "--conditions=x"],
@@ -106,23 +110,23 @@ for (const file of ["compile-bootstrap.cjs", "compile-sea-loader.cjs", "worker-p
       });
     });
 
-    test("drops a refused flag's separate value, so later flags still reach the worker", async () => {
+    void test("drops a refused flag's separate value, so later flags still reach the worker", async () => {
       const list = ["--title", "demo", "--conditions=x"];
       assert.deepEqual(parse(list, refusal(list))?.kept, ["--conditions=x"]);
       assert.ok((await conditionsInWorker(accepted(parse, list))).includes("--conditions=x"));
     });
 
-    test("matches a refused value that itself contains a comma and space", () => {
+    void test("matches a refused value that itself contains a comma and space", () => {
       const list = ["--title=one, two", "--conditions=x"];
       assert.deepEqual(parse(list, refusal(list))?.kept, ["--conditions=x"]);
     });
 
-    test("reaches flags Node only reports once an earlier stray value is gone", () => {
+    void test("reaches flags Node only reports once an earlier stray value is gone", () => {
       const list = ["--stack-size=900", "--title", "a", "--expose-gc", "--conditions=x"];
       assert.deepEqual(accepted(parse, list), ["--conditions=x"]);
     });
 
-    test("returns null for a report that does not line up with the list", () => {
+    void test("returns null for a report that does not line up with the list", () => {
       const error = Object.assign(
         new Error("Initiated Worker with invalid execArgv flags: --not-in-the-list"),
         { code: "ERR_WORKER_INVALID_EXEC_ARGV" },
