@@ -129,6 +129,8 @@ jobs:
             # all. Since that job is their only runner, a PR touching them skipped its own
             # gate entirely and drift surfaced as trunk red on push:main.
             scripts:
+              - 'tests/test262/**'
+              - 'runtime/**'
               - 'scripts/**'
               - 'package.json'
               # skip.test.mjs, the cross-runtime harness's skip classifier
@@ -1638,6 +1640,35 @@ jobs:
         run: node run.mjs
         working-directory: npm/nub-types/test
 
+  test262:
+    name: Test262 polyfills (Node ${{ matrix.node }})
+    needs: matrix-plan
+    if: (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full') && needs.matrix-plan.outputs.run_scripts == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each leg takes a different fallback path: no native iterator helpers (18),
+        # helpers that do not track a running state (24), and helpers that do (26).
+        node: ["18.19.0", "24", "26"]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Cache pinned Test262 checkout
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25  # v5
+        with:
+          path: ${{ runner.temp }}/nub-test262
+          key: test262-${{ runner.os }}-${{ hashFiles('tests/test262/config.json') }}
+      - name: Run the focused conformance suite
+        run: node tests/test262/run.mjs --checkout "$RUNNER_TEMP/nub-test262" --workers 2
+
   docs-links:
     name: Docs links & anchors
     needs: matrix-plan
@@ -1663,6 +1694,15 @@ jobs:
           node-version: "24"
           cache: "pnpm"
           cache-dependency-path: site/pnpm-lock.yaml
+      - uses: ./setup-node
+        with:
+          cache: 'true'
+          provision-node: 'false'
+          shim: 'false'
+      - name: Install runtime packages for shim unit tests
+        run: |
+          nub install --frozen-lockfile --node-linker hoisted
+          node -e "for (const name of ['@js-temporal/polyfill', '@petamoriken/float16', 'urlpattern-polyfill']) require.resolve(name)"
       - name: soak + external-tool pin gates
         run: |
           pnpm run soak
@@ -1757,8 +1797,8 @@ jobs:
           persist-credentials: false
       - run: node scripts/check-oxc-lockstep.mjs
 
-  # `make version-check` also runs in release.yml's verify job, but that fires on
-  # a release dispatch and on the nightly canary — i.e. always AFTER the offending
+  # `make version-check` also runs in release.yml's verify job, but that fires only on
+  # a release dispatch — i.e. always AFTER the offending
   # merge. #735
   # edited site/public/schema/latest.json without refreshing its pinned snapshot,
   # merged green, and surfaced only on main, where it blocked every release until
@@ -1871,7 +1911,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always() && (github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full')
-    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, compile-code-cache, native-web-worker, test, pnp, fmt, types-fixtures, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots, nubr-script]
+    needs: [matrix-plan, check, clippy, embed-runtime, windows-embed-roundtrip, compile-code-cache, native-web-worker, test, pnp, fmt, types-fixtures, test262, docs-links, site-build, oxc-lockstep, version-consistency, target-gc, build-slots, nubr-script]
     runs-on: ubuntu-latest
     steps:
       - name: Verify no required job failed

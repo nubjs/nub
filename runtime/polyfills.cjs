@@ -37,6 +37,86 @@
 // instead of guarding method by method.
 "use strict";
 
+const {
+  SetPrototypeValues,
+  SetIteratorPrototypeNext,
+  SetPrototypeAdd,
+  SetPrototypeDelete,
+  SetPrototypeHas,
+  Object,
+  Symbol,
+  Uint8Array,
+  Int8Array,
+  Int16Array,
+  SyntaxError,
+  ArrayFrom,
+  ArrayPrototypeReverse,
+  ArrayPrototypeSplice,
+  MapPrototypeGet,
+  MapPrototypeSet,
+  MapPrototypeHas,
+  WeakMapPrototypeHas,
+  StringPrototypeSlice,
+  StringPrototypePadStart,
+  StringPrototypeCharCodeAt,
+  StringPrototypeIncludes,
+  NumberPrototypeToString,
+  TypedArrayPrototypeSet,
+  TypedArrayPrototypeSort,
+  TypedArrayPrototypeReverse,
+  JSONStringify,
+  parseInt,
+  Array,
+  ArrayBuffer,
+  DataView,
+  BigInt,
+  Number,
+  String,
+  Map,
+  Set,
+  Error,
+  ArrayPrototypePush,
+  ArrayPrototypeSlice,
+  ArrayPrototypeEvery,
+  StringPrototypeSplit,
+  StringPrototypeToLowerCase,
+  RegExpPrototypeExec,
+  PromiseResolve,
+  ReferenceError,
+  ArrayPrototypeShift,
+  BigIntPrototypeToString,
+  DataViewPrototypeSetFloat64,
+  DataViewPrototypeGetUint32,
+  ArrayIsArray,
+  ArrayPrototypeSort,
+  MathMax,
+  MathMin,
+  MathTrunc,
+  NumberIsInteger,
+  NumberIsNaN,
+  ObjectCreate,
+  ObjectDefineProperty,
+  ObjectFreeze,
+  ObjectGetOwnPropertyDescriptor,
+  ObjectGetPrototypeOf,
+  ObjectIs,
+  ObjectIsFrozen,
+  ObjectKeys,
+  Proxy,
+  RangeError,
+  ReflectApply,
+  ReflectConstruct,
+  ReflectDefineProperty,
+  ReflectGet,
+  ReflectGetOwnPropertyDescriptor,
+  ReflectOwnKeys,
+  ReflectSet,
+  TypeError,
+  WeakMap,
+  WeakMapPrototypeGet,
+  WeakMapPrototypeSet
+} = require("./primordials.cjs");
+
 const compileBootstrap = process[Symbol.for("nub.compile.bootstrap")];
 const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
   ? compileBootstrap.getBuiltin
@@ -100,7 +180,7 @@ function installSyncPolyfills(preloaded) {
   // globals non-enumerably for the same reason. Kept writable+configurable so
   // user code can still override or delete it, matching Node's global descriptors.
   if (typeof globalThis.reportError !== "function") {
-    Object.defineProperty(globalThis, "reportError", {
+    ObjectDefineProperty(globalThis, "reportError", {
       value: (err) => {
         queueMicrotask(() => {
           throw err;
@@ -140,7 +220,7 @@ function installSyncPolyfills(preloaded) {
       const type = opt && typeof opt === "object" ? opt.type : opt;
       const msg = typeof warning === "string" ? warning : (warning && warning.message) || "";
       if (type === "ExperimentalWarning" && /buffer\.(File|Blob)/.test(msg)) return;
-      return origEmitWarning.call(this, warning, ...rest);
+      return ReflectApply(origEmitWarning, this, [warning, ...rest]);
     };
     try {
       const buffer = getBuiltin("node:buffer");
@@ -148,7 +228,7 @@ function installSyncPolyfills(preloaded) {
       for (const name of ["File", "Blob"]) {
         const Ctor = buffer[name];
         if (typeof globalThis[name] === "undefined" && typeof Ctor === "function") {
-          Object.defineProperty(globalThis, name, {
+          ObjectDefineProperty(globalThis, name, {
             value: Ctor,
             enumerable: false,
             writable: true,
@@ -189,15 +269,15 @@ function installSyncPolyfills(preloaded) {
   const nativePortsFrozen = __meMajor > 22 || (__meMajor === 22 && __meMinor >= 3);
   if (!nativePortsFrozen && typeof globalThis.MessageEvent === "function") {
     const proto = globalThis.MessageEvent.prototype;
-    const desc = Object.getOwnPropertyDescriptor(proto, "ports");
+    const desc = ObjectGetOwnPropertyDescriptor(proto, "ports");
     if (desc && typeof desc.get === "function" && desc.configurable && !desc.get.__nubFreezesPorts) {
       const origGet = desc.get;
       const get = function () {
-        const ports = origGet.call(this);
-        return Array.isArray(ports) ? Object.freeze(ports) : ports;
+        const ports = ReflectApply(origGet, this, []);
+        return ArrayIsArray(ports) ? ObjectFreeze(ports) : ports;
       };
       get.__nubFreezesPorts = true;
-      Object.defineProperty(proto, "ports", { ...desc, get });
+      ObjectDefineProperty(proto, "ports", { ...desc, get });
     }
   }
 
@@ -211,6 +291,15 @@ function installSyncPolyfills(preloaded) {
   // Temporal (in no Node version) is installed as a LAZY global by the preload
   // entry after this runs — see preload.cjs / preload.mjs (A37). Touching
   // globalThis.Temporal here would defeat that laziness, so we must not.
+
+  // `--frozen-intrinsics`: every installer below adds a member to a built-in, and
+  // defining one on a frozen object throws, which would stop the program starting.
+  // The globals above are unaffected, because globalThis itself stays extensible.
+  // Math is the signal because a hardening preload that freezes only prototypes,
+  // Object.prototype above all, leaves it alone and these installers still work.
+  if (ObjectIsFrozen(Math)) return;
+
+  installLocaleVariants();
 
   // ── Stage 4 polyfills (native on Node 24+, missing on 22.x) ────────
 
@@ -275,21 +364,23 @@ function installSyncPolyfills(preloaded) {
   // capability comes from NewPromiseCapability(this), so a subclass drives the result
   // and a non-constructor `this` throws synchronously.
   if (typeof Promise.try !== "function") {
+    const promiseResolve = PromiseResolve;
     defBuiltin(Promise, "try", {
       try(callbackfn, ...args) {
         if (!(this !== null && (typeof this === "object" || typeof this === "function"))) {
           throw new TypeError("Promise.try called on a non-object");
         }
-        const { promise, resolve, reject } = newPromiseCapability(this, "try");
         let value;
         try {
           value = callbackfn(...args);
         } catch (e) {
+          const { promise, reject } = newPromiseCapability(this, "try");
           reject(e);
           return promise;
         }
-        resolve(value);
-        return promise;
+        // PromiseResolve preserves an existing promise of this constructor,
+        // including across realms. Do not consult a user-defined ctor.resolve.
+        return ReflectApply(promiseResolve, this, [value]);
       },
     }.try);
   }
@@ -314,6 +405,8 @@ function installSyncPolyfills(preloaded) {
         DataView.prototype.getFloat16 = function (offset, littleEndian) {
           return f16.getFloat16(this, offset, littleEndian);
         };
+      }
+      if (typeof DataView.prototype.setFloat16 !== "function") {
         DataView.prototype.setFloat16 = function (offset, value, littleEndian) {
           f16.setFloat16(this, offset, value, littleEndian);
         };
@@ -342,22 +435,19 @@ function installSyncPolyfills(preloaded) {
 // ── The Iterator surface: constructor, Iterator.from, the 11 sync helpers, and
 //    the newer statics (concat / zip / zipKeyed) plus chunks/windows/includes/join ──
 // Node ships this in layers — helpers and `from` at 22.0, `concat` only at 26, and
-// zip/zipKeyed/chunks/windows/includes/join nowhere yet — so this installer is
+// zip/zipKeyed/includes/join at 27, and chunks/windows are still polyfilled. It is
 // deliberately built as INDEPENDENT per-name guards rather than one all-or-nothing
 // branch. A runtime with native helpers keeps every native method untouched and
 // gains only the names it lacks.
 //
-// FIDELITY LIMIT (inherent, same class as the polyfilled Float16Array not being an
-// ArrayBuffer.isView): where the engine ships some helpers natively, a polyfilled
-// helper's result inherits from this file's own "Iterator Helper" prototype rather
-// than the engine's %IteratorHelperPrototype%, whose methods check internal slots a
-// userland object cannot carry. Iteration, laziness, argument validation and
-// underlying-iterator closing all follow the spec (test262 is the oracle) — only
-// that prototype identity differs, which no realistic consumer inspects.
+// When the host has native helpers, map(identity) supplies their intrinsic
+// prototype and internal slots while delegating iteration and closure to the
+// fallback. Older hosts use the shared userland helper prototype below.
 function installIteratorSurface() {
   // %IteratorPrototype% is reachable from any built-in iterator: array iterator →
   // %ArrayIteratorPrototype% → %IteratorPrototype%.
-  const IteratorProto = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+  const IteratorProto = ObjectGetPrototypeOf(ObjectGetPrototypeOf([][Symbol.iterator]()));
+  const nativeMap = IteratorProto.map;
   const isObject = (v) => v !== null && (typeof v === "object" || typeof v === "function");
 
   if (typeof globalThis.Iterator !== "function") {
@@ -368,7 +458,7 @@ function installIteratorSurface() {
         throw new TypeError("Abstract class Iterator not directly constructable");
       }
     };
-    Object.defineProperty(Iterator, "prototype", {
+    ObjectDefineProperty(Iterator, "prototype", {
       value: IteratorProto,
       writable: false,
       enumerable: false,
@@ -381,9 +471,9 @@ function installIteratorSurface() {
     const setIgnoringPrototype = (obj, key, v) => {
       if (!isObject(obj)) throw new TypeError("setter called on a non-object");
       if (obj === IteratorProto) throw new TypeError(`Cannot assign to Iterator.prototype[${String(key)}]`);
-      const ok = Object.getOwnPropertyDescriptor(obj, key) === undefined
-        ? Reflect.defineProperty(obj, key, { value: v, writable: true, enumerable: true, configurable: true })
-        : Reflect.set(obj, key, v, obj);
+      const ok = ObjectGetOwnPropertyDescriptor(obj, key) === undefined
+        ? ReflectDefineProperty(obj, key, { value: v, writable: true, enumerable: true, configurable: true })
+        : ReflectSet(obj, key, v, obj);
       if (!ok) throw new TypeError(`Cannot assign to ${String(key)}`);
     };
     const accessors = {
@@ -401,10 +491,10 @@ function installIteratorSurface() {
       },
     };
     for (const key of ["constructor", Symbol.toStringTag]) {
-      const { get, set } = Object.getOwnPropertyDescriptor(accessors, key);
-      Object.defineProperty(IteratorProto, key, { get, set, enumerable: false, configurable: true });
+      const { get, set } = ObjectGetOwnPropertyDescriptor(accessors, key);
+      ObjectDefineProperty(IteratorProto, key, { get, set, enumerable: false, configurable: true });
     }
-    Object.defineProperty(globalThis, "Iterator", {
+    ObjectDefineProperty(globalThis, "Iterator", {
       value: Iterator,
       writable: true,
       enumerable: false,
@@ -419,13 +509,27 @@ function installIteratorSurface() {
     const dispose = {
       [Symbol.dispose]() {
         const ret = this.return;
-        if (ret !== undefined && ret !== null) Reflect.apply(ret, this, []);
+        if (ret !== undefined && ret !== null) ReflectApply(ret, this, []);
       },
     }[Symbol.dispose];
     // Node 18-22 define Symbol.dispose themselves with the description
     // "nodejs.dispose", which would otherwise name this "[nodejs.dispose]".
-    Object.defineProperty(dispose, "name", { value: "[Symbol.dispose]" });
+    ObjectDefineProperty(dispose, "name", { value: "[Symbol.dispose]" });
     defBuiltin(IteratorProto, Symbol.dispose, dispose);
+  }
+
+  const AsyncIteratorProto = ObjectGetPrototypeOf(ObjectGetPrototypeOf(
+    ObjectGetPrototypeOf((async function* () {})())
+  ));
+  if (typeof AsyncIteratorProto[Symbol.asyncDispose] !== "function") {
+    const asyncDispose = {
+      async [Symbol.asyncDispose]() {
+        const ret = this.return;
+        if (ret !== undefined && ret !== null) await ReflectApply(ret, this, []);
+      },
+    }[Symbol.asyncDispose];
+    ObjectDefineProperty(asyncDispose, "name", { value: "[Symbol.asyncDispose]" });
+    defBuiltin(AsyncIteratorProto, Symbol.asyncDispose, asyncDispose);
   }
 
   const iterOf = (obj) => {
@@ -442,7 +546,7 @@ function installIteratorSurface() {
   const closeIterator = (iterator) => {
     const ret = iterator.return;
     if (ret === undefined || ret === null) return;
-    if (!isObject(Reflect.apply(ret, iterator, []))) {
+    if (!isObject(ReflectApply(ret, iterator, []))) {
       throw new TypeError("iterator.return() did not return an object");
     }
   };
@@ -450,7 +554,7 @@ function installIteratorSurface() {
   const closeOnError = (iterator, error) => {
     try {
       const ret = iterator.return;
-      if (ret !== undefined && ret !== null) Reflect.apply(ret, iterator, []);
+      if (ret !== undefined && ret !== null) ReflectApply(ret, iterator, []);
     } catch { /* masked by `error`, per IteratorClose */ }
     throw error;
   };
@@ -478,7 +582,7 @@ function installIteratorSurface() {
       while (true) {
         let value;
         try {
-          const r = Reflect.apply(rec.next, rec.iterator, []);
+          const r = ReflectApply(rec.next, rec.iterator, []);
           if (!isObject(r)) throw new TypeError("iterator result is not an object");
           if (r.done) {
             open = false;
@@ -504,11 +608,11 @@ function installIteratorSurface() {
   // `finally`. This wrapper closes it directly in that state.
   const helperState = new WeakMap();
   const stateOf = (h) => {
-    const s = helperState.get(h);
+    const s = WeakMapPrototypeGet(helperState, h);
     if (s === undefined) throw new TypeError("not an Iterator Helper");
     return s;
   };
-  const HelperProto = Object.create(IteratorProto);
+  const HelperProto = ObjectCreate(IteratorProto);
   defBuiltin(HelperProto, "next", {
     next() {
       const s = stateOf(this);
@@ -528,28 +632,62 @@ function installIteratorSurface() {
       return s.gen.return();
     },
   }.return);
-  Object.defineProperty(HelperProto, Symbol.toStringTag, {
+  ObjectDefineProperty(HelperProto, Symbol.toStringTag, {
     value: "Iterator Helper",
     writable: false,
     enumerable: false,
     configurable: true,
   });
+  const nativeHelperState = new WeakMap();
+  const guardedNativeCall = (receiver, method, returning) => {
+    const state = WeakMapPrototypeGet(nativeHelperState, receiver);
+    if (!state || state.completed) return ReflectApply(method, receiver, []);
+    if (state.executing) throw new TypeError("Iterator Helper is already executing");
+    // Suspended-start return is completed BEFORE closing its inputs. Reentrant
+    // calls then return done; suspended-yield cleanup instead stays executing.
+    if (returning && !state.started) {
+      state.completed = true;
+      return ReflectApply(method, receiver, []);
+    }
+    state.started = true;
+    state.executing = true;
+    try {
+      const result = ReflectApply(method, receiver, []);
+      if (result.done) state.completed = true;
+      return result;
+    } catch (error) {
+      state.completed = true;
+      throw error;
+    } finally { state.executing = false; }
+  };
   const makeHelper = (rec, body) => {
-    const h = Object.create(HelperProto);
-    helperState.set(h, { gen: body(), rec, started: false });
-    return h;
+    const h = ObjectCreate(HelperProto);
+    WeakMapPrototypeSet(helperState, h, { gen: body(), rec, started: false });
+    if (typeof nativeMap !== "function") return h;
+    const native = ReflectApply(nativeMap, h, [(value) => value]);
+    const next = native.next;
+    const close = native.return;
+    WeakMapPrototypeSet(nativeHelperState, native, { started: false, completed: false, executing: false });
+    // Older V8 map helpers mark themselves completed before closing their input.
+    // Keep the executing guard around that cleanup too, without changing a native
+    // prototype. Borrowing the host's intrinsic methods directly retains its host
+    // semantics; the new helper's ordinary methods enforce the current spec.
+    defBuiltin(native, "next", { next() { return guardedNativeCall(this, next, false); } }.next);
+    defBuiltin(native, "return", { return() { return guardedNativeCall(this, close, true); } }.return);
+    return native;
   };
 
   // take/drop limit: ToNumber, NaN is a RangeError, then ToIntegerOrInfinity and
   // negative is a RangeError — which is where a naive `Number(x) | 0` diverges.
-  // The later spec step rejecting a finite limit above 2^53-1 is deliberately
-  // absent: native V8 (Node 26.10) still accepts one, and the polyfill must agree
-  // with the helpers it stands in for.
+  // Node 27's spec rejects finite limits above 2^53-1. Existing native helpers
+  // are left alone, including older versions with different limit semantics.
   const toLimit = (v) => {
-    const n = Number(v);
-    if (Number.isNaN(n)) throw new RangeError("limit must not be NaN");
-    const i = n === Infinity ? Infinity : Math.trunc(n) || 0;
-    if (i < 0) throw new RangeError("limit must not be negative");
+    const n = +v;
+    if (NumberIsNaN(n)) throw new RangeError("limit must not be NaN");
+    const i = n === Infinity ? Infinity : MathTrunc(n) || 0;
+    if (i < 0 || (i !== Infinity && i > Number.MAX_SAFE_INTEGER)) {
+      throw new RangeError("limit must be in 0..2^53 - 1 or Infinity");
+    }
     return i;
   };
   const requireFn = (f, what) => {
@@ -557,7 +695,7 @@ function installIteratorSurface() {
   };
   // chunks/windows size: an integral Number with NO coercion, in 1..2^32-1.
   const requireSize = (v, what) => {
-    if (!Number.isInteger(v)) throw new TypeError(`${what} must be an integral Number`);
+    if (!NumberIsInteger(v)) throw new TypeError(`${what} must be an integral Number`);
     if (v < 1 || v > 2 ** 32 - 1) throw new RangeError(`${what} must be between 1 and 2^32 - 1`);
     return v;
   };
@@ -600,14 +738,14 @@ function installIteratorSurface() {
       const n = validate(O, () => toLimit(limit));
       const rec = getIteratorDirect(O);
       return makeHelper(rec, function* () {
-        let left = n;
-        for (const v of asIterable(rec)) {
-          if (left > 0) {
-            left--;
-            continue;
-          }
-          yield v;
+        // IteratorStep, not IteratorStepValue: a skipped value is never read. A
+        // throwing `next` or `done` leaves the source done, so nothing closes it here.
+        for (let left = n; left > 0; left--) {
+          const r = ReflectApply(rec.next, rec.iterator, []);
+          if (!isObject(r)) throw new TypeError("iterator result is not an object");
+          if (r.done) return;
         }
+        for (const v of asIterable(rec)) yield v;
       });
     },
     flatMap(mapper) {
@@ -625,7 +763,7 @@ function installIteratorSurface() {
           const method = mapped[Symbol.iterator];
           let inner = mapped;
           if (method !== undefined && method !== null) {
-            inner = Reflect.apply(method, mapped, []);
+            inner = ReflectApply(method, mapped, []);
             if (!isObject(inner)) throw new TypeError("Symbol.iterator did not return an object");
           }
           for (const x of asIterable(getIteratorDirect(inner))) yield x;
@@ -654,7 +792,7 @@ function installIteratorSurface() {
     toArray() {
       const rec = getIteratorDirect(iterOf(this));
       const out = [];
-      for (const v of asIterable(rec)) out.push(v);
+      for (const v of asIterable(rec)) ArrayPrototypePush(out, v);
       return out;
     },
     some(predicate) {
@@ -697,7 +835,7 @@ function installIteratorSurface() {
       return makeHelper(rec, function* () {
         let buf = [];
         for (const v of asIterable(rec)) {
-          buf.push(v);
+          ArrayPrototypePush(buf, v);
           if (buf.length === n) {
             yield buf;
             buf = [];
@@ -720,9 +858,9 @@ function installIteratorSurface() {
       return makeHelper(rec, function* () {
         const buf = [];
         for (const v of asIterable(rec)) {
-          buf.push(v);
-          if (buf.length > n) buf.shift();
-          if (buf.length === n) yield buf.slice();
+          ArrayPrototypePush(buf, v);
+          if (buf.length > n) ArrayPrototypeShift(buf);
+          if (buf.length === n) yield ArrayPrototypeSlice(buf);
         }
         if (undersized === "allow-partial" && buf.length > 0 && buf.length < n) yield buf;
       });
@@ -736,7 +874,7 @@ function installIteratorSurface() {
         if (skippedElements === undefined) return 0;
         if (
           typeof skippedElements !== "number" ||
-          !(Number.isInteger(skippedElements) || skippedElements === Infinity || skippedElements === -Infinity)
+          !(NumberIsInteger(skippedElements) || skippedElements === Infinity || skippedElements === -Infinity)
         ) {
           throw new TypeError("skippedElements must be an integral Number or ±Infinity");
         }
@@ -769,14 +907,19 @@ function installIteratorSurface() {
       return out;
     },
   };
-  // `chunks` is written out literally as the matrix anchor for the Stage 4 additions
-  // (chunks/windows/includes/join), which install even where the ES2025 helpers are
-  // already native. Every name is still guarded individually.
+  // Literal guards are the feature-matrix anchors. chunks/windows remain
+  // polyfilled on Node 27, while includes/join are native there.
   if (typeof Iterator.prototype.chunks !== "function") {
     defBuiltin(IteratorProto, "chunks", protoHelpers.chunks);
   }
-  for (const name of Object.keys(protoHelpers)) {
-    if (name !== "chunks" && typeof IteratorProto[name] !== "function") {
+  if (typeof Iterator.prototype.includes !== "function") {
+    defBuiltin(IteratorProto, "includes", protoHelpers.includes);
+  }
+  if (typeof Iterator.prototype.join !== "function") {
+    defBuiltin(IteratorProto, "join", protoHelpers.join);
+  }
+  for (const name of ObjectKeys(protoHelpers)) {
+    if (!["chunks", "includes", "join"].includes(name) && typeof IteratorProto[name] !== "function") {
       defBuiltin(IteratorProto, name, protoHelpers[name]);
     }
   }
@@ -794,7 +937,7 @@ function installIteratorSurface() {
       const method = O[Symbol.iterator];
       let rec;
       if (typeof method === "function") {
-        rec = method.call(O);
+        rec = ReflectApply(method, O, []);
         if (IteratorProto.isPrototypeOf(rec)) return rec;
       } else {
         if (typeof O.next !== "function") throw new TypeError("not iterable and has no next");
@@ -824,154 +967,144 @@ function installIteratorSurface() {
     });
   }
 
-  // Iterator.zip / Iterator.zipKeyed (Stage 4, proposal-joint-iteration — in no
-  // engine). zipKeyed is the ITERATOR twin of Promise.allKeyed: same own-enumerable
-  // key treatment, same dictionary-in/dictionary-out shape. `mode` selects what
-  // happens on unequal lengths: "shortest" (default) stops at the first exhausted
-  // source, "longest" pads with `padding`/undefined, "strict" throws.
-  const zipMode = (options) => {
-    if (options === undefined) return { mode: "shortest", padding: undefined };
-    if (options === null || typeof options !== "object") {
-      throw new TypeError("options must be an object");
+  // Joint iteration (native on Node 27+). Capture each next method once and
+  // close all still-open inputs, in reverse order, on early return or failure.
+  const closeAll = (records, throwing = false, error) => {
+    for (let i = records.length - 1; i >= 0; i--) {
+      const rec = records[i];
+      if (rec.done) continue;
+      rec.done = true;
+      try { closeIterator(rec.iterator); } catch (e) {
+        if (!throwing) { throwing = true; error = e; }
+      }
     }
-    const mode = options.mode === undefined ? "shortest" : options.mode;
+    if (throwing) throw error;
+  };
+  const zipOptions = (options) => {
+    if (options === undefined) options = ObjectCreate(null);
+    iterOf(options);
+    const suppliedMode = options.mode;
+    const mode = suppliedMode === undefined ? "shortest" : suppliedMode;
     if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
       throw new TypeError('mode must be "shortest", "longest", or "strict"');
     }
-    return { mode, padding: options.padding };
+    const padding = mode === "longest" ? options.padding : undefined;
+    if (padding !== undefined) iterOf(padding);
+    return { mode, padding };
   };
-  if (typeof Iterator.zip !== "function") {
-    defBuiltin(Iterator, "zip", function zip(iterables) {
-      // Step 1 is an OBJECT check, which precedes any iterability test — so a string
-      // primitive is a TypeError even though strings are iterable.
-      iterOf(iterables);
-      if (typeof iterables[Symbol.iterator] !== "function") {
-        throw new TypeError("Iterator.zip requires an iterable of iterables");
-      }
-      const { mode, padding } = zipMode(arguments.length > 1 ? arguments[1] : undefined);
-      const sources = [...iterables].map((it) => {
-        if (it === null || it === undefined || typeof it[Symbol.iterator] !== "function") {
-          throw new TypeError("Iterator.zip sources must be iterable");
-        }
-        return it[Symbol.iterator]();
-      });
-      // Padding is stepped EXACTLY once per source and then closed, never drained:
-      // spreading it would hang on an infinite padding iterator and over-consume a
-      // finite one.
-      const pads = [];
-      if (padding !== undefined) {
-        if (padding === null || typeof padding[Symbol.iterator] !== "function") {
-          throw new TypeError("padding must be iterable");
-        }
-        const padIter = padding[Symbol.iterator]();
-        for (let i = 0; i < sources.length; i++) {
-          const r = padIter.next();
-          if (r.done) break;
-          pads.push(r.value);
-        }
-        if (typeof padIter.return === "function") {
-          try {
-            padIter.return();
-          } catch { /* closing must not mask the caller's completion */ }
-        }
-      }
-      return (function* () {
-        if (sources.length === 0) return;
-        const live = sources.map(() => true);
+  const zipRecord = (value, flattenable = false) => {
+    iterOf(value);
+    const method = value[Symbol.iterator];
+    const iterator = flattenable && (method === undefined || method === null)
+      ? value : ReflectApply(method, value, []);
+    iterOf(iterator);
+    return { ...getIteratorDirect(iterator), done: false };
+  };
+  const zipStep = (rec, readValue = true) => {
+    try {
+      const result = ReflectApply(rec.next, rec.iterator, []);
+      iterOf(result);
+      if (result.done) { rec.done = true; return { done: true }; }
+      return { done: false, value: readValue ? result.value : undefined };
+    } catch (e) {
+      // An iterator that throws from next/done/value is already considered done.
+      rec.done = true;
+      throw e;
+    }
+  };
+  const zipHelper = (records, mode, padding, keys) => {
+    // makeHelper forwards return() even before the first next(). Its synthetic
+    // underlying iterator closes every input instead of just one.
+    const closer = { iterator: { return() { closeAll(records); return {}; } } };
+    return makeHelper(closer, function* () {
+      try {
+        if (records.length === 0) return;
         while (true) {
           const row = [];
-          if (mode === "strict") {
-            // Strict requires every source to end on the SAME round, and must throw
-            // AT the diverging index — without stepping the sources after it.
-            let firstDone;
-            for (let i = 0; i < sources.length; i++) {
-              const r = sources[i].next();
-              if (i === 0) firstDone = !!r.done;
-              else if (!!r.done !== firstDone) {
-                throw new TypeError("Iterator.zip strict mode requires equal-length inputs");
+          for (let i = 0; i < records.length; i++) {
+            const rec = records[i];
+            if (rec.done) { ArrayPrototypePush(row, padding[i]); continue; }
+            const result = zipStep(rec);
+            if (result.done) {
+              if (mode === "shortest") return;
+              if (mode === "strict") {
+                if (i !== 0) throw new TypeError("zip inputs have different lengths");
+                for (let j = 1; j < records.length; j++) {
+                  if (!zipStep(records[j], false).done) {
+                    throw new TypeError("zip inputs have different lengths");
+                  }
+                }
+                return;
               }
-              if (!r.done) row.push(r.value);
-            }
-            if (firstDone) return;
-            yield row;
-            continue;
-          }
-          let anyLive = false;
-          let anyDone = false;
-          for (let i = 0; i < sources.length; i++) {
-            if (!live[i]) {
-              row.push(pads[i]);
-              anyDone = true;
-              continue;
-            }
-            const r = sources[i].next();
-            if (r.done) {
-              live[i] = false;
-              anyDone = true;
-              row.push(pads[i]);
+              if (ArrayPrototypeEvery(records, (r) => r.done)) return;
+              ArrayPrototypePush(row, padding[i]);
             } else {
-              anyLive = true;
-              row.push(r.value);
+              ArrayPrototypePush(row, result.value);
             }
           }
-          if (mode === "shortest" && anyDone) return;
-          if (mode === "longest" && !anyLive) return;
-          yield row;
+          if (keys === undefined) yield row;
+          else {
+            const result = ObjectCreate(null);
+            for (let i = 0; i < keys.length; i++) result[keys[i]] = row[i];
+            yield result;
+          }
         }
-      })();
+      } catch (e) {
+        closeAll(records, true, e);
+      } finally {
+        closeAll(records);
+      }
     });
+  };
+  if (typeof Iterator.zip !== "function") {
+    defBuiltin(Iterator, "zip", { zip(iterables) {
+      iterOf(iterables);
+      const { mode, padding } = zipOptions(arguments[1]);
+      const records = [];
+      const pads = [];
+      const input = zipRecord(iterables);
+      try {
+        while (true) {
+          const result = zipStep(input);
+          if (result.done) break;
+          try { ArrayPrototypePush(records, zipRecord(result.value, true)); }
+          catch (e) { closeAll([input, ...records], true, e); }
+        }
+        if (padding !== undefined) {
+          const padIter = zipRecord(padding);
+          for (let i = 0; i < records.length; i++) {
+            ArrayPrototypePush(pads, padIter.done ? undefined : zipStep(padIter).value);
+          }
+          closeAll([padIter]);
+        }
+      } catch (e) { closeAll(records, true, e); }
+      return zipHelper(records, mode, pads);
+    }}.zip);
   }
   if (typeof Iterator.zipKeyed !== "function") {
-    defBuiltin(Iterator, "zipKeyed", function zipKeyed(iterables) {
+    defBuiltin(Iterator, "zipKeyed", { zipKeyed(iterables) {
       iterOf(iterables);
-      const { mode, padding } = zipMode(arguments.length > 1 ? arguments[1] : undefined);
-      // Own ENUMERABLE keys including symbols, matching Promise.allKeyed.
-      const keys = Reflect.ownKeys(iterables).filter((k) => {
-        const d = Reflect.getOwnPropertyDescriptor(iterables, k);
-        return d !== undefined && d.enumerable;
-      });
-      const sources = keys.map((k) => {
-        const it = iterables[k];
-        if (it === null || it === undefined || typeof it[Symbol.iterator] !== "function") {
-          throw new TypeError("Iterator.zipKeyed sources must be iterable");
+      const { mode, padding } = zipOptions(arguments[1]);
+      const keys = [];
+      const records = [];
+      const pads = [];
+      try {
+        const ownKeys = ReflectOwnKeys(iterables);
+        for (let k = 0; k < ownKeys.length; k++) {
+          const key = ownKeys[k];
+          const desc = ReflectGetOwnPropertyDescriptor(iterables, key);
+          if (desc === undefined || !desc.enumerable) continue;
+          const value = iterables[key];
+          if (value === undefined) continue;
+          ArrayPrototypePush(keys, key);
+          ArrayPrototypePush(records, zipRecord(value, true));
         }
-        return it[Symbol.iterator]();
-      });
-      const padFor = (k) =>
-        padding === null || padding === undefined ? undefined : padding[k];
-      return (function* () {
-        const live = sources.map(() => true);
-        while (true) {
-          if (sources.length === 0) return;
-          const row = Object.create(null);
-          let anyLive = false;
-          let anyDone = false;
-          for (let i = 0; i < sources.length; i++) {
-            if (!live[i]) {
-              row[keys[i]] = padFor(keys[i]);
-              anyDone = true;
-              continue;
-            }
-            const r = sources[i].next();
-            if (r.done) {
-              live[i] = false;
-              anyDone = true;
-              row[keys[i]] = padFor(keys[i]);
-            } else {
-              anyLive = true;
-              row[keys[i]] = r.value;
-            }
-          }
-          if (mode === "shortest" && anyDone) return;
-          if (mode === "strict" && anyDone) {
-            if (!anyLive) return;
-            throw new TypeError("Iterator.zipKeyed strict mode requires equal-length inputs");
-          }
-          if (mode === "longest" && !anyLive) return;
-          yield row;
+        if (padding !== undefined) {
+          for (let k = 0; k < keys.length; k++) ArrayPrototypePush(pads, padding[keys[k]]);
         }
-      })();
-    });
+      } catch (e) { closeAll(records, true, e); }
+      return zipHelper(records, mode, pads, keys);
+    }}.zipKeyed);
   }
 }
 
@@ -982,7 +1115,7 @@ function installIteratorSurface() {
 // without inventing metadata that isn't there.
 function installSymbolMetadata() {
   if (typeof Symbol.metadata === "symbol") return;
-  Object.defineProperty(Symbol, "metadata", {
+  ObjectDefineProperty(Symbol, "metadata", {
     value: Symbol("Symbol.metadata"),
     writable: false,
     enumerable: false,
@@ -996,7 +1129,7 @@ function installSymbolMetadata() {
 // that ships some of a family natively keeps those and only gains the rest — no
 // polyfill ever overwrites a native implementation.
 function defBuiltin(target, name, value) {
-  Object.defineProperty(target, name, {
+  ObjectDefineProperty(target, name, {
     value,
     writable: true,
     enumerable: false,
@@ -1013,9 +1146,9 @@ function defBuiltin(target, name, value) {
 function installSetMethods() {
   // Real brand check: the `size` getter throws for anything without [[SetData]],
   // which is exactly the receiver check the spec performs first.
-  const sizeGetter = Object.getOwnPropertyDescriptor(Set.prototype, "size").get;
+  const sizeGetter = ObjectGetOwnPropertyDescriptor(Set.prototype, "size").get;
   const requireSet = (o) => {
-    sizeGetter.call(o);
+    ReflectApply(sizeGetter, o, []);
   };
   // GetSetRecord: the argument-validation order is observable, so it is preserved
   // exactly — size read and coerced first (NaN is a TypeError, negative a
@@ -1025,8 +1158,8 @@ function installSetMethods() {
       throw new TypeError("argument is not an object");
     }
     const numSize = Number(obj.size);
-    if (Number.isNaN(numSize)) throw new TypeError("size is NaN");
-    const intSize = Math.trunc(numSize) || 0;
+    if (NumberIsNaN(numSize)) throw new TypeError("size is NaN");
+    const intSize = MathTrunc(numSize) || 0;
     if (intSize < 0) throw new RangeError("size is negative");
     const has = obj.has;
     if (typeof has !== "function") throw new TypeError("has is not callable");
@@ -1036,14 +1169,26 @@ function installSetMethods() {
   };
   // -0 is normalized to +0 on the way into a result set, matching SameValueZero.
   const norm = (v) => (v === 0 ? 0 : v);
-  const otherKeys = (rec) => rec.keys.call(rec.obj);
+  const otherKeys = (rec) => ReflectApply(rec.keys, rec.obj, []);
 
+  const ownValues = (set) => {
+    const iterator = SetPrototypeValues(set);
+    return {
+      [Symbol.iterator]() { return this; },
+      next() { return SetIteratorPrototypeNext(iterator); },
+    };
+  };
+  const copySet = (set) => {
+    const result = new Set();
+    for (const value of ownValues(set)) SetPrototypeAdd(result, value);
+    return result;
+  };
   const methods = {
     union(other) {
       requireSet(this);
       const rec = setRecord(other);
-      const out = new Set(this);
-      for (const k of otherKeys(rec)) out.add(norm(k));
+      const out = copySet(this);
+      for (const k of otherKeys(rec)) SetPrototypeAdd(out, norm(k));
       return out;
     },
     intersection(other) {
@@ -1053,56 +1198,56 @@ function installSetMethods() {
       // Iterate the SMALLER side, but membership is always tested against the
       // other — the spec picks by size for complexity, and the observable
       // difference is which side's iteration order the result follows.
-      if (this.size <= rec.size) {
-        for (const k of this) if (rec.has.call(rec.obj, k)) out.add(k);
+      if (ReflectApply(sizeGetter, this, []) <= rec.size) {
+        for (const k of ownValues(this)) if (ReflectApply(rec.has, rec.obj, [k])) SetPrototypeAdd(out, k);
       } else {
-        for (const k of otherKeys(rec)) if (this.has(k)) out.add(norm(k));
+        for (const k of otherKeys(rec)) if (SetPrototypeHas(this, k)) SetPrototypeAdd(out, norm(k));
       }
       return out;
     },
     difference(other) {
       requireSet(this);
       const rec = setRecord(other);
-      const out = new Set(this);
-      if (this.size <= rec.size) {
-        for (const k of this) if (rec.has.call(rec.obj, k)) out.delete(k);
+      const out = copySet(this);
+      if (ReflectApply(sizeGetter, this, []) <= rec.size) {
+        for (const k of ownValues(this)) if (ReflectApply(rec.has, rec.obj, [k])) SetPrototypeDelete(out, k);
       } else {
-        for (const k of otherKeys(rec)) out.delete(norm(k));
+        for (const k of otherKeys(rec)) SetPrototypeDelete(out, norm(k));
       }
       return out;
     },
     symmetricDifference(other) {
       requireSet(this);
       const rec = setRecord(other);
-      const out = new Set(this);
+      const out = copySet(this);
       for (const k of otherKeys(rec)) {
         const key = norm(k);
-        if (this.has(key)) out.delete(key);
-        else out.add(key);
+        if (SetPrototypeHas(this, key)) SetPrototypeDelete(out, key);
+        else SetPrototypeAdd(out, key);
       }
       return out;
     },
     isSubsetOf(other) {
       requireSet(this);
       const rec = setRecord(other);
-      if (this.size > rec.size) return false;
-      for (const k of this) if (!rec.has.call(rec.obj, k)) return false;
+      if (ReflectApply(sizeGetter, this, []) > rec.size) return false;
+      for (const k of ownValues(this)) if (!ReflectApply(rec.has, rec.obj, [k])) return false;
       return true;
     },
     isSupersetOf(other) {
       requireSet(this);
       const rec = setRecord(other);
-      if (this.size < rec.size) return false;
-      for (const k of otherKeys(rec)) if (!this.has(norm(k))) return false;
+      if (ReflectApply(sizeGetter, this, []) < rec.size) return false;
+      for (const k of otherKeys(rec)) if (!SetPrototypeHas(this, norm(k))) return false;
       return true;
     },
     isDisjointFrom(other) {
       requireSet(this);
       const rec = setRecord(other);
-      if (this.size <= rec.size) {
-        for (const k of this) if (rec.has.call(rec.obj, k)) return false;
+      if (ReflectApply(sizeGetter, this, []) <= rec.size) {
+        for (const k of ownValues(this)) if (ReflectApply(rec.has, rec.obj, [k])) return false;
       } else {
-        for (const k of otherKeys(rec)) if (this.has(norm(k))) return false;
+        for (const k of otherKeys(rec)) if (SetPrototypeHas(this, norm(k))) return false;
       }
       return true;
     },
@@ -1111,7 +1256,7 @@ function installSetMethods() {
   // rest loop, and every method is still guarded on its own so a runtime shipping
   // only part of the family keeps what it has.
   if (typeof Set.prototype.union !== "function") defBuiltin(Set.prototype, "union", methods.union);
-  for (const name of Object.keys(methods)) {
+  for (const name of ObjectKeys(methods)) {
     if (name !== "union" && typeof Set.prototype[name] !== "function") {
       defBuiltin(Set.prototype, name, methods[name]);
     }
@@ -1140,7 +1285,7 @@ function installArrayFromAsync() {
       // A sync iterator's YIELDED VALUES are awaited too, which is what makes
       // `Array.fromAsync([promise])` resolve rather than collect promises.
       for await (const v of asyncItems) {
-        out[i] = mapfn === undefined ? v : await mapfn.call(thisArg, v, i);
+        out[i] = mapfn === undefined ? v : await ReflectApply(mapfn, thisArg, [v, i]);
         i++;
       }
       out.length = i;
@@ -1151,11 +1296,11 @@ function installArrayFromAsync() {
     const arrayLike = Object(asyncItems);
     // ToLength clamps to [0, 2^53-1], so a NEGATIVE length yields an empty result
     // rather than the RangeError `new C(-5)` would throw.
-    const len = Math.min(Math.max(Math.trunc(Number(arrayLike.length)) || 0, 0), 2 ** 53 - 1);
+    const len = MathMin(MathMax(MathTrunc(Number(arrayLike.length)) || 0, 0), 2 ** 53 - 1);
     const out = new C(len);
     for (let i = 0; i < len; i++) {
       const v = await arrayLike[i];
-      out[i] = mapfn === undefined ? v : await mapfn.call(thisArg, v, i);
+      out[i] = mapfn === undefined ? v : await ReflectApply(mapfn, thisArg, [v, i]);
     }
     out.length = len;
     return out;
@@ -1172,14 +1317,17 @@ function installMapGetOrInsert() {
   // `Map.prototype.getOrInsert` is spelled out below as the feature-matrix row's
   // detect anchor; WeakMap rides the same guards through the loop.
   for (const Ctor of [Map, WeakMap]) {
+    const has = Ctor === Map ? MapPrototypeHas : WeakMapPrototypeHas;
+    const get = Ctor === Map ? MapPrototypeGet : WeakMapPrototypeGet;
+    const set = Ctor === Map ? MapPrototypeSet : WeakMapPrototypeSet;
     if (Ctor === Map && typeof Map.prototype.getOrInsert === "function"
         && typeof Map.prototype.getOrInsertComputed === "function") {
       continue;
     }
     if (typeof Ctor.prototype.getOrInsert !== "function") {
       defBuiltin(Ctor.prototype, "getOrInsert", function getOrInsert(key, value) {
-        if (this.has(key)) return this.get(key);
-        this.set(key, value);
+        if (has(this, key)) return get(this, key);
+        set(this, key, value);
         return value;
       });
     }
@@ -1191,11 +1339,11 @@ function installMapGetOrInsert() {
           if (typeof callbackfn !== "function") {
             throw new TypeError("callbackfn is not a function");
           }
-          if (this.has(key)) return this.get(key);
+          if (has(this, key)) return get(this, key);
           const value = callbackfn(key);
           // The callback may have inserted `key` itself; the spec's final write
           // wins, so set unconditionally rather than re-checking `has`.
-          this.set(key, value);
+          set(this, key, value);
           return value;
         },
       );
@@ -1203,102 +1351,135 @@ function installMapGetOrInsert() {
   }
 }
 
-// ── Math.sumPrecise (TC39 Stage 4; in no Node — bun ships it, so bun is the
-//    differential oracle used to verify this) ──
-// Returns the CORRECTLY ROUNDED sum, not a left-to-right accumulation, so naive
-// `reduce((a, b) => a + b)` is wrong: it loses low bits at every step. This is
-// Shewchuk's exact-expansion algorithm — maintain a set of non-overlapping partial
-// sums whose total is exact, then round once at the end.
+// ── Intl.Locale.prototype.variants and the `variants` option (native on Node 27+) ──
+function installLocaleVariants() {
+  // A Node built without ICU has no Intl at all.
+  if (typeof Intl !== "object" || typeof Intl.Locale !== "function") return;
+  if ("variants" in Intl.Locale.prototype) return;
+  const NativeLocale = Intl.Locale;
+  const proto = NativeLocale.prototype;
+  // The intrinsic getter checks [[InitializedLocale]] even across realms and
+  // ignores user overrides of baseName/toString. Its result omits extensions.
+  const baseName = ObjectGetOwnPropertyDescriptor(proto, "baseName").get;
+  const localeToString = proto.toString;
+  const isVariant = (part) => RegExpPrototypeExec(/^(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3})$/i, part) !== null;
+  const getter = {
+    get variants() {
+      const parts = StringPrototypeSplit(ReflectApply(baseName, this, []), "-");
+      let result;
+      for (let i = 1; i < parts.length; i++) {
+        if (isVariant(parts[i])) result = result === undefined ? parts[i] : `${result}-${parts[i]}`;
+      }
+      return result;
+    },
+  };
+  ObjectDefineProperty(proto, "variants", {
+    get: ObjectGetOwnPropertyDescriptor(getter, "variants").get,
+    enumerable: false,
+    configurable: true,
+  });
+  // Without this wrapper the option is silently ignored. UpdateLanguageId reads it
+  // between region and calendar, so the proxy reads it there and hides it from the
+  // engine. The tag is then rebuilt, because the engine sorts variants and rejects
+  // duplicates only when parsing a tag.
+  const variantList = /^(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3})(?:-(?:[a-z0-9]{5,8}|[0-9][a-z0-9]{3}))*$/i;
+  const Locale = new Proxy(NativeLocale, {
+    __proto__: null,
+    construct(target, args, newTarget) {
+      const tag = args[0];
+      const options = args[1];
+      if (options === undefined || options === null) {
+        return ReflectConstruct(target, args, newTarget);
+      }
+      let variants;
+      const hooked = new Proxy(Object(options), {
+        __proto__: null,
+        get(target, key) {
+          if (key === "variants") return undefined;
+          if (key === "calendar") {
+            const value = target.variants;
+            if (value !== undefined) {
+              variants = `${value}`;
+              if (RegExpPrototypeExec(variantList, variants) === null) {
+                throw new RangeError(`Invalid variants: ${variants}`);
+              }
+              const parts = StringPrototypeSplit(StringPrototypeToLowerCase(variants), "-");
+              const seen = new Set();
+              for (let i = 0; i < parts.length; i++) {
+                const part = parts[i];
+                if (SetPrototypeHas(seen, part)) throw new RangeError(`Duplicate variants: ${variants}`);
+                SetPrototypeAdd(seen, part);
+              }
+            }
+          }
+          return ReflectGet(target, key);
+        }
+      });
+      const locale = ReflectConstruct(target, [tag, hooked], newTarget);
+      if (variants === undefined) return locale;
+
+      const text = ReflectApply(localeToString, locale, []);
+      const base = ReflectApply(baseName, locale, []);
+      const parts = StringPrototypeSplit(base, "-");
+      let id = parts[0];
+      for (let i = 1; i < parts.length; i++) {
+        if (!isVariant(parts[i])) id = `${id}-${parts[i]}`;
+      }
+      const selectedPrototype = ObjectGetPrototypeOf(locale);
+      const surrogate = function LocaleWithVariants() {};
+      ObjectDefineProperty(surrogate, "prototype", { value: selectedPrototype });
+      return ReflectConstruct(target, [`${id}-${StringPrototypeToLowerCase(variants)}${StringPrototypeSlice(text, base.length)}`], surrogate);
+    },
+  });
+  ObjectDefineProperty(proto, "constructor", { value: Locale });
+  ObjectDefineProperty(Intl, "Locale", { value: Locale });
+}
+
+// ── Math.sumPrecise (native on Node 27+) ──
 function installMathSumPrecise() {
   if (typeof Math.sumPrecise === "function") return;
-  defBuiltin(Math, "sumPrecise", function sumPrecise(items) {
-    const partials = [];
-    // Power-of-two factor the expansion is held in, so an intermediate overflow
-    // can be escaped without losing exactness. Undone before returning.
-    let scale = 1;
-    let count = 0;
-    // Tracks whether every finite contribution was -0, which the spec keeps in a
-    // ~minus-zero~ state and must preserve in the result.
+  defBuiltin(Math, "sumPrecise", { sumPrecise(items) {
+    // Every finite double is an integer multiple of 2^-1074. Accumulate those
+    // integers exactly, then round once. Floating-point partial sums can lose
+    // subnormals when an intermediate overflow forces them to be rescaled.
+    const bits = new DataView(new ArrayBuffer(8));
+    let total = 0n;
     let allMinusZero = true;
     let hasNaN = false;
     let posInf = false;
     let negInf = false;
     for (const x of items) {
-      count++;
       if (typeof x !== "number") throw new TypeError("Math.sumPrecise accepts only Numbers");
-      if (Number.isNaN(x)) {
-        hasNaN = true;
-        continue;
-      }
-      if (x === Infinity) {
-        posInf = true;
-        continue;
-      }
-      if (x === -Infinity) {
-        negInf = true;
-        allMinusZero = false;
-        continue;
-      }
-      if (!Object.is(x, -0)) allMinusZero = false;
-      if (hasNaN || (posInf && negInf)) continue;
-      // Two-sum each new value against every existing partial, keeping the exact
-      // low-order remainders as new partials.
-      //
-      // OVERFLOW: two partials can each be near MAX_VALUE while the TRUE sum is
-      // finite (e.g. [1e308, 1e308, -1e308, -1e308] sums to 0), and a plain
-      // expansion returns NaN there — caught by differential-testing against
-      // bun's native implementation. When an intermediate goes non-finite,
-      // HALVE the whole expansion and the incoming value and retry, tracking the
-      // power-of-two `scale` to undo at the end. Halving a double is exact until
-      // it goes subnormal, and a partial that subnormalizes here was already
-      // ~2^-1074 relative to a ~2^1023 magnitude — far below the ULP of any
-      // representable result, so no bit that could affect the rounding is lost.
-      let xi = x * scale;
-      for (;;) {
-        let used = 0;
-        let overflowed = false;
-        for (let j = 0; j < partials.length; j++) {
-          let y = partials[j];
-          if (Math.abs(xi) < Math.abs(y)) {
-            const t = xi;
-            xi = y;
-            y = t;
-          }
-          const hi = xi + y;
-          if (!Number.isFinite(hi)) {
-            overflowed = true;
-            break;
-          }
-          const lo = y - (hi - xi);
-          if (lo !== 0) partials[used++] = lo;
-          xi = hi;
-        }
-        if (!overflowed) {
-          partials.length = used;
-          partials.push(xi);
-          break;
-        }
-        // Rescale everything down by 2 and start this value over.
-        for (let j = 0; j < partials.length; j++) partials[j] *= 0.5;
-        scale *= 0.5;
-        xi = x * scale;
-      }
+      if (!ObjectIs(x, -0)) allMinusZero = false;
+      if (NumberIsNaN(x)) { hasNaN = true; continue; }
+      if (x === Infinity) { posInf = true; continue; }
+      if (x === -Infinity) { negInf = true; continue; }
+      if (hasNaN || posInf || negInf || x === 0) continue;
+      DataViewPrototypeSetFloat64(bits, 0, x);
+      const hi = DataViewPrototypeGetUint32(bits, 0);
+      const exponent = (hi >>> 20) & 0x7ff;
+      let significand = (BigInt(hi & 0xfffff) << 32n) | BigInt(DataViewPrototypeGetUint32(bits, 4));
+      if (exponent !== 0) significand = (significand | (1n << 52n)) << BigInt(exponent - 1);
+      total += hi >>> 31 ? -significand : significand;
     }
-    if (hasNaN) return NaN;
-    if (posInf && negInf) return NaN;
+    if (hasNaN || (posInf && negInf)) return NaN;
     if (posInf) return Infinity;
     if (negInf) return -Infinity;
-    // The additive identity here is -0: summing nothing, or only -0s, gives -0.
-    // The all-(-0) case must be caught HERE, because the final reduction seeds
-    // `total` with the literal +0 and `0 + -0` is +0, which would collapse the sign
-    // (bun, the oracle, returns -0 for [-0] and [-0, -0]).
-    if (count === 0 || partials.length === 0 || allMinusZero) return -0;
-    // Add smallest-to-largest so the single final rounding is correct, then undo
-    // the scale. Dividing by `scale` (a power of two) reintroduces no error.
-    let total = 0;
-    for (let j = partials.length - 1; j >= 0; j--) total += partials[j];
-    return total / scale;
-  });
+    if (total === 0n) return allMinusZero ? -0 : 0;
+    const negative = total < 0n;
+    if (negative) total = -total;
+    const shift = MathMax(0, BigIntPrototypeToString(total, 2).length - 53);
+    let rounded = total >> BigInt(shift);
+    if (shift > 0) {
+      const remainder = total - (rounded << BigInt(shift));
+      const halfway = 1n << BigInt(shift - 1);
+      if (remainder > halfway || (remainder === halfway && (rounded & 1n))) rounded++;
+    }
+    // The exponent is >= -1074, so this scale is representable. A carry at the
+    // upper boundary correctly produces Infinity on the final multiplication.
+    const value = Number(rounded) * 2 ** (shift - 1074);
+    return negative ? -value : value;
+  }}.sumPrecise);
 }
 
 // ── JSON.parse options (TC39 Stage 2.7, 2026-09; proposal-json-parseimmutable,
@@ -1330,8 +1511,8 @@ function installJsonParseOptions() {
     try {
       probe = nativeParse("{}", { freeze: true });
     } catch {}
-    if (typeof probe === "object" && probe !== null && Object.isFrozen(probe)
-        && Object.getPrototypeOf(probe) === null) {
+    if (typeof probe === "object" && probe !== null && ObjectIsFrozen(probe)
+        && ObjectGetPrototypeOf(probe) === null) {
       return;
     }
   }
@@ -1398,7 +1579,7 @@ function installJsonParseOptions() {
 // additive contract.
 function installFloorBuiltins() {
   const def = (target, name, value) => {
-    Object.defineProperty(target, name, {
+    ObjectDefineProperty(target, name, {
       value,
       writable: true,
       enumerable: false,
@@ -1407,16 +1588,17 @@ function installFloorBuiltins() {
   };
 
   // ── URL.parse (native Node 22.1 and 20.19; absent on all of 21.x) ──
-  // The whole API is "new URL but null instead of throwing", so the try/catch IS
-  // the spec. `base` is forwarded only when supplied: passing an explicit
-  // undefined to the URL constructor is NOT the same as omitting it.
+  // Only URL parsing failures become null. WebIDL string conversion happens
+  // first, so user-defined coercion errors (including Symbols) still propagate.
   if (typeof URL.parse !== "function") {
     // `base` is read from `arguments` rather than declared: WebIDL counts only
     // REQUIRED arguments toward `length`, so native URL.parse.length is 1.
     def(URL, "parse", function parse(url) {
-      const base = arguments.length > 1 ? arguments[1] : undefined;
+      if (arguments.length === 0) throw new TypeError("URL.parse requires a URL argument");
+      const input = `${url}`;
+      const base = arguments.length > 1 && arguments[1] !== undefined ? `${arguments[1]}` : undefined;
       try {
-        return base === undefined ? new URL(url) : new URL(url, base);
+        return base === undefined ? new URL(input) : new URL(input, base);
       } catch {
         return null;
       }
@@ -1456,13 +1638,13 @@ function installFloorBuiltins() {
   if (typeof Object.groupBy !== "function") {
     def(Object, "groupBy", function groupBy(items, callback) {
       if (typeof callback !== "function") throw new TypeError("callback is not a function");
-      const obj = Object.create(null);
+      const obj = ObjectCreate(null);
       let i = 0;
       for (const item of items) {
         const key = callback(item, i++);
         const k = typeof key === "symbol" ? key : String(key);
         if (obj[k] === undefined && !(k in obj)) obj[k] = [];
-        obj[k].push(item);
+        ArrayPrototypePush(obj[k], item);
       }
       return obj;
     });
@@ -1476,9 +1658,9 @@ function installFloorBuiltins() {
         // Map.prototype.get/set already key under SameValueZero, so -0 collapses
         // to +0 exactly as the spec's normalization requires.
         const key = callback(item, i++);
-        const group = map.get(key);
-        if (group === undefined) map.set(key, [item]);
-        else group.push(item);
+        const group = MapPrototypeGet(map, key);
+        if (group === undefined) MapPrototypeSet(map, key, [item]);
+        else ArrayPrototypePush(group, item);
       }
       return map;
     });
@@ -1486,25 +1668,25 @@ function installFloorBuiltins() {
 
   // ── Change-array-by-copy (native Node 20; absent 18.19) ──
   // Every method returns a plain Array regardless of the receiver's constructor —
-  // deliberately NOT species-aware, unlike map/filter. The Array.from(this) hop
+  // deliberately NOT species-aware, unlike map/filter. The ArrayFrom(this) hop
   // both realizes an array-like receiver and gives the fresh array to mutate.
   if (typeof Array.prototype.toSorted !== "function") {
     def(Array.prototype, "toSorted", function toSorted(compareFn) {
       if (compareFn !== undefined && typeof compareFn !== "function") {
         throw new TypeError("comparefn must be a function");
       }
-      return Array.prototype.sort.call(Array.from(this), compareFn);
+      return ArrayPrototypeSort(ArrayFrom(this), compareFn);
     });
     def(Array.prototype, "toReversed", function toReversed() {
-      return Array.from(this).reverse();
+      return ArrayPrototypeReverse(ArrayFrom(this));
     });
     def(Array.prototype, "toSpliced", function toSpliced(start, skipCount, ...items) {
-      const arr = Array.from(this);
+      const arr = ArrayFrom(this);
       // An OMITTED deleteCount deletes through the end, but a declared parameter
       // forwards an explicit `undefined`, which splice coerces to 0. Branch on the
       // real argument count so `toSpliced(1)` truncates the way native does.
-      if (arguments.length <= 1) arr.splice(start);
-      else arr.splice(start, skipCount, ...items);
+      if (arguments.length <= 1) ArrayPrototypeSplice(arr, start);
+      else ArrayPrototypeSplice(arr, start, skipCount, ...items);
       return arr;
     });
     // `with` is a reserved word, so a named function EXPRESSION is a SyntaxError.
@@ -1512,8 +1694,8 @@ function installFloorBuiltins() {
     // "with", which a `function with_` would have gotten wrong.
     def(Array.prototype, "with", {
       with(index, value) {
-        const arr = Array.from(this);
-        const i = Math.trunc(Number(index)) || 0;
+        const arr = ArrayFrom(this);
+        const i = MathTrunc(Number(index)) || 0;
         const actual = i < 0 ? arr.length + i : i;
         if (actual < 0 || actual >= arr.length) throw new RangeError("invalid index");
         arr[actual] = value;
@@ -1525,22 +1707,22 @@ function installFloorBuiltins() {
   // %TypedArray% gets toSorted/toReversed/with but NOT toSpliced (a typed array
   // cannot change length), and unlike the Array forms these return the SAME
   // typed-array type as the receiver.
-  const TypedArrayProto = Object.getPrototypeOf(Int8Array.prototype);
+  const TypedArrayProto = ObjectGetPrototypeOf(Int8Array.prototype);
   if (typeof TypedArrayProto.toSorted !== "function") {
     def(TypedArrayProto, "toSorted", function toSorted(compareFn) {
       if (compareFn !== undefined && typeof compareFn !== "function") {
         throw new TypeError("comparefn must be a function");
       }
       const copy = new this.constructor(this);
-      return copy.sort(compareFn);
+      return TypedArrayPrototypeSort(copy, compareFn);
     });
     def(TypedArrayProto, "toReversed", function toReversed() {
-      return new this.constructor(this).reverse();
+      return TypedArrayPrototypeReverse(new this.constructor(this));
     });
     def(TypedArrayProto, "with", {
       with(index, value) {
         const copy = new this.constructor(this);
-        const i = Math.trunc(Number(index)) || 0;
+        const i = MathTrunc(Number(index)) || 0;
         const actual = i < 0 ? copy.length + i : i;
         if (actual < 0 || actual >= copy.length) throw new RangeError("invalid index");
         copy[actual] = value;
@@ -1571,7 +1753,7 @@ function installFloorBuiltins() {
     const transferImpl = (buf, newLength, fixedLength) => {
       if (isDetached(buf)) throw new TypeError("ArrayBuffer is detached");
       const oldLen = buf.byteLength;
-      const len = newLength === undefined ? oldLen : Math.trunc(Number(newLength)) || 0;
+      const len = newLength === undefined ? oldLen : MathTrunc(Number(newLength)) || 0;
       if (len < 0) throw new RangeError("invalid length");
       // Copy BEFORE detaching; the copy is truncated or zero-padded to `len`.
       // `transfer` PRESERVES a resizable source's resizability while
@@ -1581,7 +1763,7 @@ function installFloorBuiltins() {
       const out = keepResizable
         ? new ArrayBuffer(len, { maxByteLength: buf.maxByteLength })
         : new ArrayBuffer(len);
-      new Uint8Array(out).set(new Uint8Array(buf, 0, Math.min(oldLen, len)));
+      TypedArrayPrototypeSet(new Uint8Array(out), new Uint8Array(buf, 0, MathMin(oldLen, len)));
       // Detach the source. The clone takes ownership of the original memory and
       // is immediately discarded, so this moves rather than copies.
       structuredClone(buf, { transfer: [buf] });
@@ -1594,7 +1776,7 @@ function installFloorBuiltins() {
     def(ArrayBuffer.prototype, "transferToFixedLength", function transferToFixedLength() {
       return transferImpl(this, arguments.length > 0 ? arguments[0] : undefined, true);
     });
-    Object.defineProperty(ArrayBuffer.prototype, "detached", {
+    ObjectDefineProperty(ArrayBuffer.prototype, "detached", {
       get: function detached() {
         return isDetached(this);
       },
@@ -1612,7 +1794,7 @@ function installFloorBuiltins() {
     def(Atomics, "pause", function pause() {
       const iterationNumber = arguments.length > 0 ? arguments[0] : undefined;
       if (iterationNumber !== undefined) {
-        if (typeof iterationNumber !== "number" || !Number.isInteger(iterationNumber)) {
+        if (typeof iterationNumber !== "number" || !NumberIsInteger(iterationNumber)) {
           throw new TypeError("Atomics.pause iterationNumber must be an integral Number");
         }
       }
@@ -1638,26 +1820,26 @@ function installUint8ArrayBase64() {
   // char code → 6-bit value for the standard alphabet; url chars are remapped to
   // standard before lookup, so a single decode table covers both alphabets.
   const DECODE = new Int16Array(128).fill(-1);
-  for (let i = 0; i < B64.length; i++) DECODE[B64.charCodeAt(i)] = i;
+  for (let i = 0; i < B64.length; i++) DECODE[StringPrototypeCharCodeAt(B64, i)] = i;
 
   // %TypedArray%.prototype[@@toStringTag] getter — the brand check native uses: it
   // accepts a Uint8Array (and Buffer, a Uint8Array subclass) and rejects any other
   // TypedArray or non-typed-array with a TypeError.
-  const tagGet = Object.getOwnPropertyDescriptor(
-    Object.getPrototypeOf(Uint8Array.prototype),
+  const tagGet = ObjectGetOwnPropertyDescriptor(
+    ObjectGetPrototypeOf(Uint8Array.prototype),
     Symbol.toStringTag,
   ).get;
   const checkU8 = (arg) => {
     let kind;
     try {
-      kind = tagGet.call(arg);
+      kind = ReflectApply(tagGet, arg, []);
     } catch {
       throw new TypeError("not a Uint8Array");
     }
     if (kind !== "Uint8Array") throw new TypeError("not a Uint8Array");
   };
   const getOptions = (options) => {
-    if (typeof options === "undefined") return Object.create(null);
+    if (typeof options === "undefined") return ObjectCreate(null);
     if (options && typeof options === "object") return options;
     throw new TypeError("options is not object");
   };
@@ -1665,7 +1847,7 @@ function installUint8ArrayBase64() {
   const isWs = (cc) =>
     cc === 0x09 || cc === 0x0a || cc === 0x0c || cc === 0x0d || cc === 0x20;
   const skipWs = (s, i) => {
-    while (i < s.length && isWs(s.charCodeAt(i))) i++;
+    while (i < s.length && isWs(StringPrototypeCharCodeAt(s, i))) i++;
     return i;
   };
 
@@ -1675,10 +1857,10 @@ function installUint8ArrayBase64() {
     const n = chunk.length;
     const padded = n < 4 ? chunk + (n === 2 ? "AA" : "A") : chunk;
     const triplet =
-      (DECODE[padded.charCodeAt(0)] << 18) +
-      (DECODE[padded.charCodeAt(1)] << 12) +
-      (DECODE[padded.charCodeAt(2)] << 6) +
-      DECODE[padded.charCodeAt(3)];
+      (DECODE[StringPrototypeCharCodeAt(padded, 0)] << 18) +
+      (DECODE[StringPrototypeCharCodeAt(padded, 1)] << 12) +
+      (DECODE[StringPrototypeCharCodeAt(padded, 2)] << 6) +
+      DECODE[StringPrototypeCharCodeAt(padded, 3)];
     const b0 = (triplet >> 16) & 255;
     const b1 = (triplet >> 8) & 255;
     const b2 = triplet & 255;
@@ -1759,7 +1941,7 @@ function installUint8ArrayBase64() {
                 error: new SyntaxError("malformed padding: exactly one additional character"),
               };
             }
-            bytes.push(...decodeChunk(chunk, false));
+            ArrayPrototypePush(bytes, ...decodeChunk(chunk, false));
           } else {
             return { bytes, read, error: new SyntaxError("missing padding") };
           }
@@ -1788,20 +1970,20 @@ function installUint8ArrayBase64() {
         if (index < string.length) {
           return { bytes, read, error: new SyntaxError("unexpected character after padding") };
         }
-        bytes.push(...decodeChunk(chunk, lastChunkHandling === "strict"));
+        ArrayPrototypePush(bytes, ...decodeChunk(chunk, lastChunkHandling === "strict"));
         return { bytes, read: string.length, error: null };
       }
       if (alphabet === "base64url") {
         if (char === "+" || char === "/") {
-          return { bytes, read, error: new SyntaxError("unexpected character " + JSON.stringify(char)) };
+          return { bytes, read, error: new SyntaxError("unexpected character " + JSONStringify(char)) };
         } else if (char === "-") {
           char = "+";
         } else if (char === "_") {
           char = "/";
         }
       }
-      if (!B64.includes(char)) {
-        return { bytes, read, error: new SyntaxError("unexpected character " + JSON.stringify(char)) };
+      if (!StringPrototypeIncludes(B64, char)) {
+        return { bytes, read, error: new SyntaxError("unexpected character " + JSONStringify(char)) };
       }
       const remainingBytes = maxLength - bytes.length;
       if (
@@ -1814,7 +1996,7 @@ function installUint8ArrayBase64() {
       }
       chunk += char;
       if (chunk.length === 4) {
-        bytes.push(...decodeChunk(chunk, false));
+        ArrayPrototypePush(bytes, ...decodeChunk(chunk, false));
         chunk = "";
         read = index;
         if (bytes.length === maxLength) {
@@ -1855,7 +2037,7 @@ function installUint8ArrayBase64() {
     let { bytes, read, error } = fromBase64(string, alphabet, lastChunkHandling, maxLength);
     if (error && !into) throw error;
     bytes = new Uint8Array(bytes);
-    if (into && bytes.length > 0) into.set(bytes);
+    if (into && bytes.length > 0) TypedArrayPrototypeSet(into, bytes);
     if (error) throw error;
     return { read, bytes };
   };
@@ -1866,7 +2048,7 @@ function installUint8ArrayBase64() {
       throw new TypeError("toHex called on array backed by detached buffer");
     }
     let out = "";
-    for (let i = 0; i < arr.length; ++i) out += arr[i].toString(16).padStart(2, "0");
+    for (let i = 0; i < arr.length; ++i) out += StringPrototypePadStart(NumberPrototypeToString(arr[i], 16), 2, "0");
     return out;
   };
 
@@ -1886,25 +2068,25 @@ function installUint8ArrayBase64() {
     let error = null;
     if (maxLength > 0) {
       while (read < string.length) {
-        const hexits = string.slice(read, read + 2);
-        if (/[^0-9a-fA-F]/.test(hexits)) {
+        const hexits = StringPrototypeSlice(string, read, read + 2);
+        if (RegExpPrototypeExec(/[^0-9a-fA-F]/, hexits)) {
           error = new SyntaxError("string should only contain hex characters");
           break;
         }
-        bytesArr.push(parseInt(hexits, 16));
+        ArrayPrototypePush(bytesArr, parseInt(hexits, 16));
         read += 2;
         if (bytesArr.length === maxLength) break;
       }
     }
     if (error && !into) throw error;
     const bytes = new Uint8Array(bytesArr);
-    if (into && bytes.length > 0) into.set(bytes);
+    if (into && bytes.length > 0) TypedArrayPrototypeSet(into, bytes);
     if (error) throw error;
     return { read, bytes };
   };
 
   const def = (target, name, fn) => {
-    Object.defineProperty(target, name, {
+    ObjectDefineProperty(target, name, {
       value: fn,
       writable: true,
       enumerable: false,
@@ -1947,14 +2129,14 @@ function installUint8ArrayBase64() {
 // no-op where native.
 function installDisposableStacks() {
   if (typeof Symbol.dispose === "undefined") {
-    Object.defineProperty(Symbol, "dispose", { value: Symbol("Symbol.dispose") });
+    ObjectDefineProperty(Symbol, "dispose", { value: Symbol("Symbol.dispose") });
   }
   if (typeof Symbol.asyncDispose === "undefined") {
-    Object.defineProperty(Symbol, "asyncDispose", { value: Symbol("Symbol.asyncDispose") });
+    ObjectDefineProperty(Symbol, "asyncDispose", { value: Symbol("Symbol.asyncDispose") });
   }
 
   const defGlobal = (name, value) => {
-    Object.defineProperty(globalThis, name, {
+    ObjectDefineProperty(globalThis, name, {
       value,
       writable: true,
       enumerable: false,
@@ -1971,13 +2153,13 @@ function installDisposableStacks() {
         // Spec (and native Node 24+) install .error/.suppressed as non-enumerable
         // data props — plain assignment would make them enumerable, so Object.keys()
         // / JSON.stringify() would leak them on the floor but not on native.
-        Object.defineProperty(this, "error", {
+        ObjectDefineProperty(this, "error", {
           value: error,
           writable: true,
           enumerable: false,
           configurable: true,
         });
-        Object.defineProperty(this, "suppressed", {
+        ObjectDefineProperty(this, "suppressed", {
           value: suppressed,
           writable: true,
           enumerable: false,
@@ -1985,7 +2167,7 @@ function installDisposableStacks() {
         });
       }
     }
-    Object.defineProperty(SuppressedError.prototype, "name", {
+    ObjectDefineProperty(SuppressedError.prototype, "name", {
       value: "SuppressedError",
       writable: true,
       enumerable: false,
@@ -2033,20 +2215,20 @@ function installDisposableStacks() {
         if (value !== null && value !== undefined) {
           const method = value[Symbol.dispose];
           if (typeof method !== "function") throw new TypeError("value is not disposable");
-          this.#stack.push(() => method.call(value));
+          ArrayPrototypePush(this.#stack, () => ReflectApply(method, value, []));
         }
         return value;
       }
       adopt(value, onDispose) {
         if (this.#disposed) throw new ReferenceError("DisposableStack already disposed");
         if (typeof onDispose !== "function") throw new TypeError("onDispose is not callable");
-        this.#stack.push(() => onDispose(value));
+        ArrayPrototypePush(this.#stack, () => onDispose(value));
         return value;
       }
       defer(onDispose) {
         if (this.#disposed) throw new ReferenceError("DisposableStack already disposed");
         if (typeof onDispose !== "function") throw new TypeError("onDispose is not callable");
-        this.#stack.push(() => onDispose());
+        ArrayPrototypePush(this.#stack, () => onDispose());
         return undefined;
       }
       move() {
@@ -2062,7 +2244,7 @@ function installDisposableStacks() {
       }
     }
     // Spec: @@dispose is the same function object as `dispose`.
-    Object.defineProperty(DisposableStack.prototype, Symbol.dispose, {
+    ObjectDefineProperty(DisposableStack.prototype, Symbol.dispose, {
       value: DisposableStack.prototype.dispose,
       writable: true,
       enumerable: false,
@@ -2108,12 +2290,12 @@ function installDisposableStacks() {
             if (typeof sync !== "function") {
               throw new TypeError("value is not async disposable");
             }
-            this.#stack.push(() => sync.call(value));
+            ArrayPrototypePush(this.#stack, () => ReflectApply(sync, value, []));
           } else {
             if (typeof method !== "function") {
               throw new TypeError("value is not async disposable");
             }
-            this.#stack.push(() => method.call(value));
+            ArrayPrototypePush(this.#stack, () => ReflectApply(method, value, []));
           }
         }
         return value;
@@ -2121,13 +2303,13 @@ function installDisposableStacks() {
       adopt(value, onDispose) {
         if (this.#disposed) throw new ReferenceError("AsyncDisposableStack already disposed");
         if (typeof onDispose !== "function") throw new TypeError("onDispose is not callable");
-        this.#stack.push(() => onDispose(value));
+        ArrayPrototypePush(this.#stack, () => onDispose(value));
         return value;
       }
       defer(onDispose) {
         if (this.#disposed) throw new ReferenceError("AsyncDisposableStack already disposed");
         if (typeof onDispose !== "function") throw new TypeError("onDispose is not callable");
-        this.#stack.push(() => onDispose());
+        ArrayPrototypePush(this.#stack, () => onDispose());
         return undefined;
       }
       move() {
@@ -2142,7 +2324,7 @@ function installDisposableStacks() {
         return "AsyncDisposableStack";
       }
     }
-    Object.defineProperty(AsyncDisposableStack.prototype, Symbol.asyncDispose, {
+    ObjectDefineProperty(AsyncDisposableStack.prototype, Symbol.asyncDispose, {
       value: AsyncDisposableStack.prototype.disposeAsync,
       writable: true,
       enumerable: false,
@@ -2202,7 +2384,7 @@ function newPromiseCapability(C, name) {
 // `this` so a Promise subclass drives the promise.
 function installPromiseWithResolvers() {
   if (typeof Promise.withResolvers === "function") return;
-  Object.defineProperty(Promise, "withResolvers", {
+  ObjectDefineProperty(Promise, "withResolvers", {
     value: function withResolvers() {
       const { promise, resolve, reject } = newPromiseCapability(this, "withResolvers");
       return { promise, resolve, reject };
@@ -2223,7 +2405,7 @@ function installKeyedPromiseCombinators() {
   // setter to intercept (not even `__proto__`), and the keys came from
   // [[OwnPropertyKeys]] so they are already distinct.
   const resultObject = (entries) => {
-    const obj = Object.create(null);
+    const obj = ObjectCreate(null);
     for (let i = 0; i < entries.length; i++) obj[entries[i].key] = entries[i].value;
     return obj;
   };
@@ -2234,12 +2416,14 @@ function installKeyedPromiseCombinators() {
   const perform = (isSettled, promises, ctor, capability, promiseResolve) => {
     const entries = [];
     const remaining = { value: 1 };
-    for (const key of Reflect.ownKeys(promises)) {
-      const desc = Reflect.getOwnPropertyDescriptor(promises, key);
+    const ownKeys = ReflectOwnKeys(promises);
+    for (let k = 0; k < ownKeys.length; k++) {
+      const key = ownKeys[k];
+      const desc = ReflectGetOwnPropertyDescriptor(promises, key);
       if (desc === undefined || !desc.enumerable) continue;
       const value = promises[key];
-      const index = entries.push({ key, value: undefined }) - 1;
-      const nextPromise = promiseResolve.call(ctor, value);
+      const index = ArrayPrototypePush(entries, { key, value: undefined }) - 1;
+      const nextPromise = ReflectApply(promiseResolve, ctor, [value]);
       const alreadyCalled = { value: false };
       const settle = (entryValue) => {
         if (alreadyCalled.value) return;
@@ -2286,8 +2470,8 @@ function installKeyedPromiseCombinators() {
     };
     // A builtin's `name` and `length` are observable; the anonymous function
     // expression above gives length 1 but an empty name.
-    Object.defineProperty(fn, "name", { value: name, configurable: true });
-    Object.defineProperty(Promise, name, {
+    ObjectDefineProperty(fn, "name", { value: name, configurable: true });
+    ObjectDefineProperty(Promise, name, {
       value: fn,
       writable: true,
       enumerable: false,

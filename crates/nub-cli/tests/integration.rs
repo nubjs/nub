@@ -5242,6 +5242,7 @@ fn polyfills_never_clobber_native() {
 import { createRequire } from "node:module";
 const TAP = Object.getPrototypeOf(Int8Array.prototype);
 const IP = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()));
+const AIP = Object.getPrototypeOf(Object.getPrototypeOf(Object.getPrototypeOf((async function* () {})())));
 const targets = [
   [Promise, "allKeyed"], [Promise, "allSettledKeyed"], [Promise, "withResolvers"], [Promise, "try"],
   [RegExp, "escape"], [Error, "isError"], [URL, "parse"],
@@ -5258,7 +5259,7 @@ const targets = [
   [Math, "sumPrecise"],
   [IP, "map"], [IP, "filter"], [IP, "take"], [IP, "drop"], [IP, "flatMap"], [IP, "reduce"],
   [IP, "toArray"], [IP, "some"], [IP, "every"], [IP, "find"], [IP, "forEach"],
-  [IP, "chunks"], [IP, "windows"], [IP, "includes"], [IP, "join"], [IP, Symbol.dispose],
+  [IP, "chunks"], [IP, "windows"], [IP, "includes"], [IP, "join"], [IP, Symbol.dispose], [AIP, Symbol.asyncDispose],
   [Uint8Array.prototype, "toBase64"], [Uint8Array.prototype, "toHex"], [Uint8Array, "fromBase64"],
   [globalThis, "DisposableStack"], [globalThis, "AsyncDisposableStack"],
   [globalThis, "SuppressedError"], [globalThis, "reportError"],
@@ -5280,16 +5281,23 @@ const jsonSentinel = function nubSentinel(text) {
 };
 Object.defineProperty(JSON, "parse", { value: jsonSentinel, writable: true, enumerable: false, configurable: true });
 planted.push([JSON, "parse", jsonSentinel]);
-// The one accessor in the set needs its own sentinel shape.
-Object.defineProperty(ArrayBuffer.prototype, "detached", {
-  get: function nubSentinelGetter() { return "SENTINEL"; },
-  enumerable: false, configurable: true,
-});
+// The accessors in the set need their own sentinel shape.
+const accessors = [[ArrayBuffer.prototype, "detached"], [Intl.Locale.prototype, "variants"]];
+for (const [holder, key] of accessors) {
+  Object.defineProperty(holder, key, {
+    get: function nubSentinelGetter() { return "SENTINEL"; },
+    enumerable: false, configurable: true,
+  });
+}
+const NativeLocale = Intl.Locale;
 createRequire(import.meta.url)(process.argv[2]).installSyncPolyfills({});
-const clobbered = planted.filter(([h, k, s]) => h[k] !== s).map(([, k]) => k);
-const d = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "detached");
-if (!d || d.get?.name !== "nubSentinelGetter") clobbered.push("detached");
-console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
+const clobbered = planted.filter(([h, k, s]) => h[k] !== s).map(([, k]) => String(k));
+for (const [holder, key] of accessors) {
+  const d = Object.getOwnPropertyDescriptor(holder, key);
+  if (!d || d.get?.name !== "nubSentinelGetter") clobbered.push(key);
+}
+if (Intl.Locale !== NativeLocale) clobbered.push("Intl.Locale");
+console.log(JSON.stringify({ checked: planted.length + accessors.length + 1, clobbered }));
 "#,
     )
     .unwrap();
@@ -5324,8 +5332,8 @@ console.log(JSON.stringify({ checked: planted.length + 1, clobbered }));
 #[test]
 fn iterator_stage4_helpers_and_promise_try_follow_spec() {
     // The final Stage 4 text of iterator chunking/includes/join, plus the generic
-    // `this` of Promise.try. No Node release ships the four iterator methods, and
-    // Promise.try is deleted first so its fallback runs on 23+ too; each case below
+    // `this` of Promise.try. Promise.try is deleted first so its fallback runs on 23+
+    // too, and includes/join are native from Node 27; each case below
     // is one the pre-Stage-4 polyfill got wrong. Full conformance is checked against
     // test262 (built-ins/Iterator/prototype, built-ins/Promise/try); this pins the
     // observable contract. Plain `node` against the runtime file, as the no-clobber
@@ -5558,8 +5566,7 @@ fn esnext_library_polyfills() {
     // surface (helpers + from/concat/zip/zipKeyed + the Stage 3 chunks/windows/
     // includes/join), Map/WeakMap getOrInsert, Math.sumPrecise and Symbol.metadata.
     // Spec fidelity is verified by batteries that run the SAME assertions against
-    // the polyfill and against native (and, for Math.sumPrecise which no Node ships,
-    // against bun's native implementation); this asserts reachability + correctness
+    // the polyfill and against native; this asserts reachability + correctness
     // through nub's real preload chain. Isolated tmpdir + cache as elsewhere.
     let work = unique_test_cache();
     std::fs::create_dir_all(&work).unwrap();

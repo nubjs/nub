@@ -93,20 +93,6 @@ On a mise install, `nub upgrade` runs `mise upgrade --bump nub`, which updates t
 
 Nub and Node version independently. Upgrading Nub does not change the Node your project pins.
 
-### Canary builds
-
-A nightly build of `main` publishes a canary for all platforms as the rolling [canary release](https://github.com/nubjs/nub/releases/tag/canary). Canary builds pass build and smoke checks only, and each one replaces the last.
-
-```bash
-# a new install
-curl -fsSL https://nubjs.com/install.sh | bash -s canary
-
-nub upgrade --canary   # switch; later upgrades stay on canary
-nub upgrade --stable   # switch back
-```
-
-On Windows, install it with `iex "& { $(irm https://nubjs.com/install.ps1) } canary"`. Canary versions carry a date stamp, such as `v0.5.1-canary.20260724.117`. Homebrew, winget, and mise carry only stable releases.
-
 ## Package management
 
 The installer is pnpm-compatible at the CLI and lockfile-compatible with whatever your project already uses. The npm, pnpm, and bun lockfiles round-trip; yarn's is read-only.

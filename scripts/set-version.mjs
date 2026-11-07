@@ -2,12 +2,10 @@
 // (root optionalDependencies pinned exact), both workspace Cargo.tomls, and
 // runtime/version.mjs (NUB_VERSION — the transpile-cache key, which must stay in
 // lockstep with the binary version or a stale cache would serve stale output
-// after an upgrade). Shared by `make version V=<v>` (committed release bumps —
-// the Makefile also refreshes the ROOT Cargo.lock through cargo) and release.yml's
-// canary stamp (an UNCOMMITTED prerelease set on the build runners, where `make`
-// isn't dependable on Windows). The two out-of-workspace lockfiles are stamped
-// here, by BOTH paths, because they are consumed under `--locked` — see the note
-// beside them below; only the root lock self-heals on the next cargo invocation.
+// after an upgrade). Called by `make version V=<v>`, whose Makefile target also
+// refreshes the ROOT Cargo.lock through cargo. The out-of-workspace lockfiles are
+// stamped here because they are consumed under `--locked` — see the note beside
+// them below; only the root lock self-heals on the next cargo invocation.
 // Run from the repo root: node scripts/set-version.mjs <version>
 import fs from "node:fs";
 
@@ -104,15 +102,11 @@ replaceOrDie(
 // carries its own Cargo.lock recording the version of a crate stamped above —
 // the launcher's records nub-core, the addon's records itself. Stamping a
 // manifest without these leaves that lock unsatisfiable, and both are built with
-// `--locked`, which refuses to reconcile rather than doing it. Not hypothetical:
-// release.yml's canary path stamps a version on the build runners and then builds
-// the launcher `--locked` in the SAME job, so every canary build would fail on
-// all eight targets. The root lock is not in this list because nothing
+// `--locked`, which refuses to reconcile rather than doing it. The root lock is not in this list because nothing
 // consumes it under `--locked`; it self-heals on the next cargo invocation.
 //
-// Rewritten here rather than through `cargo update` because BOTH entry points
-// reach this file while only `make version` can rely on cargo and a network, and
-// these are path dependencies whose lock entry is a plain version string.
+// Rewritten here rather than through `cargo update` because these are path
+// dependencies whose lock entry is a plain version string.
 // `\r?\n`, not `\n`: this is the only MULTI-LINE pattern in the file, and the
 // GitHub runner image ships `core.autocrlf=true` (see the mitigation in
 // aube-parity.yml, and #290). Neither lock is normalized by .gitattributes, so

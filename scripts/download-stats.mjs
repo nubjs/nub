@@ -29,8 +29,8 @@
 //
 // Nothing installs the binary outside those channels: postinstall.js only chmods and
 // re-links shims, and bin/launch.js makes no network call, so an npm install always
-// rides a platform package. The rolling `canary` prerelease is excluded — it is recreated
-// by every nightly canary build, so its counters reset and would corrupt the snapshot deltas.
+// rides a platform package. Prereleases are excluded: the old rolling `canary` release
+// reset its counters on every rebuild, which would corrupt the snapshot deltas.
 //
 // These are DOWNLOADS, not users and not installs: an upgrade re-downloads, and npm
 // counts CI, mirrors and bots. Needs network; `gh` authenticated (GitHub channel only).

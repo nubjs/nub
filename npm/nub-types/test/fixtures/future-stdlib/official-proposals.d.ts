@@ -90,3 +90,13 @@ interface Uint8ArrayConstructor {
   ): Uint8Array<ArrayBuffer>;
   fromHex(string: string): Uint8Array<ArrayBuffer>;
 }
+
+// Canonical locale variant subtags; absent when the locale has no variants.
+declare namespace Intl {
+  interface LocaleOptions {
+    variants?: string | undefined;
+  }
+  interface Locale {
+    readonly variants: string | undefined;
+  }
+}
