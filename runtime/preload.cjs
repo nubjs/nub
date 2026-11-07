@@ -222,6 +222,7 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   // not leaked onto the user's stderr — on every entry above nub is forced onto
   // module.register (require(esm) off, foreign-loader composition, or registerHooks
   // absent outright), so the user has no action to take. See registerLoaderWorker.
+  common.installAsyncTierCjsSource();
   common.registerLoaderWorker(
     "./preload-async-hooks.mjs",
     pathToFileURL(__filename).href,
