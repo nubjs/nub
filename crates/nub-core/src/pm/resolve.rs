@@ -904,9 +904,6 @@ fn pin_target_dir(cwd: &Path) -> PathBuf {
 /// errors naming the required `name@version` shape. The Corepack hash suffix
 /// (`yarn@4.2.2+sha512.xxxx`) is kept verbatim in `version` — resolution never
 /// lies about what was written; the engine strips it before download.
-///
-/// Public so the CLI's pin consumers parse through the SAME pin parser the
-/// `packageManager` reader uses — there is no second spec parser.
 fn parse_spec(spec: &str) -> Result<PmPin> {
     let spec = spec.trim();
     let (name, version) = spec.split_once('@').with_context(|| {
@@ -977,9 +974,9 @@ fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
 ///
 /// The pinned route ([`classify`]) calls this with the version. The unpinned route
 /// does NOT reach here — it defers to whatever `yarn` is on PATH and so needs no
-/// classic/Berry split. The `None`-version arm is the seam a future
-/// provisioning-from-lockfile path would use; it is exercised by tests but has no
-/// production caller today.
+/// classic/Berry split. [`project_pm_identity`] is the caller of the
+/// `None`-version arm: a versionless yarn declaration beside a `.yarnrc.yml` is
+/// a Berry identity.
 fn classify_yarn(version: Option<&str>, yarnrc_present: bool) -> Pm {
     match version.and_then(yarn_major) {
         Some(major) if major >= 2 => Pm::YarnBerry,
@@ -1040,7 +1037,7 @@ pub fn committed_yarn_path(cwd: &Path) -> Option<PathBuf> {
 /// `# comment` removed — `yarnPath: .yarn/releases/x.cjs # pinned` is the path,
 /// not `… # pinned`. Comments are only recognized on unquoted values (a `#`
 /// inside quotes is part of the path).
-fn strip_yaml_value(rest: &str) -> &str {
+pub(super) fn strip_yaml_value(rest: &str) -> &str {
     let rest = rest.trim();
     for quote in ['"', '\''] {
         if let Some(inner) = rest.strip_prefix(quote)

@@ -1,10 +1,9 @@
 //! Baseline benches for the workspace topo-sort hot path.
 //!
 //! `topological_chunks` (Kahn's algorithm, one wave per level) runs on every
-//! `nub run -r` / filtered workspace invocation. Its inner loop rescans the
-//! `remaining` set per wave — O(waves * remaining * deps) — so its cost scales
-//! with workspace size and dependency depth. This bench fixes a baseline on a
-//! synthetic ~200-package graph before any optimization is attempted.
+//! `nub run -r` / filtered workspace invocation, so its cost scales with
+//! workspace size and dependency depth. This bench measures it on a synthetic
+//! ~200-package graph.
 //!
 //! Fixture (built inline, no I/O): 200 packages named `pkg-000..pkg-199`. Each
 //! package depends on the 3 packages immediately below it (`pkg-N` deps on
@@ -67,8 +66,6 @@ fn bench_workspace_topo(c: &mut Criterion) {
     let deps = build_dep_graph(&members, &name_to_idx);
     let all_nodes: HashSet<usize> = (0..N).collect();
 
-    // The topo-sort proper — the hot path whose per-wave rescan we want a
-    // baseline for.
     c.bench_function("workspace/topological_chunks/200", |b| {
         b.iter(|| {
             topological_chunks(

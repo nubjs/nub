@@ -83,7 +83,7 @@ fn pnpm_range(yaml: &str) -> Option<String> {
         let Some(rest) = line.trim().strip_prefix("lockfileVersion:") else {
             continue;
         };
-        let range = match yaml_scalar(rest) {
+        let range = match super::resolve::strip_yaml_value(rest) {
             "5.3" => "6",
             "5.4" => "7",
             // '6.1' was a pnpm-8-prerelease window; same family.
@@ -141,25 +141,6 @@ fn yarn_hint(content: &str) -> Option<PmVersionHint> {
         }
     }
     None // Neither marker (empty/truncated file): no honest inference.
-}
-
-/// Extract a scalar YAML value from the text after a `key:` — quotes stripped,
-/// trailing inline ` # comment` removed. Local sibling of
-/// `resolve::strip_yaml_value` (private there; four lines beat a visibility
-/// change in a file this module doesn't own).
-fn yaml_scalar(rest: &str) -> &str {
-    let rest = rest.trim();
-    for quote in ['"', '\''] {
-        if let Some(inner) = rest.strip_prefix(quote)
-            && let Some(end) = inner.find(quote)
-        {
-            return &inner[..end];
-        }
-    }
-    match rest.split_once(" #") {
-        Some((value, _comment)) => value.trim_end(),
-        None => rest,
-    }
 }
 
 #[cfg(test)]

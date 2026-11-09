@@ -351,10 +351,13 @@ pub fn npm_install_route(args: &[String], node_env_production: bool) -> Option<N
 /// install honors it because npm would have, and the routed path otherwise
 /// runs every build script.
 pub fn npm_ignore_scripts_configured(project_root: &Path) -> bool {
-    if let Some((_, v)) =
-        std::env::vars().find(|(k, _)| k.eq_ignore_ascii_case("npm_config_ignore_scripts"))
-    {
-        return matches!(v.trim(), "true" | "1");
+    // `vars_os`: `std::env::vars` panics on any non-UTF-8 variable in the
+    // environment, whatever its name.
+    if let Some((_, v)) = std::env::vars_os().find(|(k, _)| {
+        k.to_str()
+            .is_some_and(|k| k.eq_ignore_ascii_case("npm_config_ignore_scripts"))
+    }) {
+        return v.to_str().is_some_and(|v| matches!(v.trim(), "true" | "1"));
     }
     crate::workspace::scripts::npmrc_value(project_root, "ignore-scripts")
         .is_some_and(|v| matches!(v.as_str(), "true" | "1"))
@@ -839,8 +842,8 @@ const LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(30);
 /// A best-effort advisory lock on the shim dir, held for the duration of an
 /// install/remove. Created `O_EXCL` so exactly one creator wins the race; a
 /// lockfile older than [`LOCK_STALE`] is stolen (the previous holder died). The
-/// guard removes the file on drop. Lives at `<dir>.lock` in the parent
-/// (`~/.nub`, created first) so it also covers the shim dir's own
+/// guard removes the file on drop. Lives at `<dir>.lock` in the shim dir's
+/// parent (created first) so it also covers the shim dir's own
 /// `create_dir_all` / `remove_dir_all`.
 ///
 /// What it closes: `nub pm shim`'s remove-then-link is NOT atomic per entry
@@ -865,8 +868,8 @@ impl ShimLock {
     /// without a held lock; `Some(guard)` = held, released on drop.
     fn acquire(dir: &Path) -> Option<Self> {
         let parent = dir.parent()?;
-        // The parent (`~/.nub`) must exist to hold the lockfile; this also
-        // pre-creates it for the install path's own create_dir_all.
+        // The parent must exist to hold the lockfile; this also pre-creates it
+        // for the install path's own create_dir_all.
         std::fs::create_dir_all(parent).ok()?;
         let path = parent.join(format!(
             "{}.lock",
@@ -1193,7 +1196,7 @@ const BLOCK_MARKER: &str = "# nub shims";
 /// Fields are [`Cow`] because not every family's directory is known at compile
 /// time: the global-bin block's path is RESOLVED AT RUNTIME (it follows
 /// `XDG_BIN_HOME` and friends), so its lines cannot be `&'static str` the way
-/// the two fixed `~/.nub/…` families' can.
+/// the two fixed families' can.
 pub(crate) struct ShimBlock {
     /// The marker comment written on its own line above the PATH line.
     pub(crate) marker: Cow<'static, str>,
@@ -1665,8 +1668,8 @@ fn strip_block(content: &str, block: &ShimBlock) -> Option<String> {
     };
 
     // The block end: past the marker's newline, then past our PATH line's
-    // newline — but only consume that next line when it really names
-    // `.nub/shims` (defensive: a malformed half-block without the line stops at
+    // newline — but only consume that next line when it carries the block's
+    // `dir_marker` (defensive: a malformed half-block without the line stops at
     // the marker rather than eating an unrelated following line).
     let after_marker = marker_line_start + marker.len();
     let mut block_end = after_marker;

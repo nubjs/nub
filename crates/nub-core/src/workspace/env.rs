@@ -262,6 +262,11 @@ const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
 /// (consistent with [`load_env_files`]). Mutates `map` in-place and returns it
 /// for easy chaining.
+///
+/// A `\$` escape stays escaped through every round and becomes a literal `$`
+/// only once the rounds are done. Resolving it inside a round would hand the
+/// next round a bare `$`, which it would then expand — `PASSWORD="foo\$bar"`
+/// would come out as `foo`, the exact result the escape exists to prevent.
 // @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#What Nub does#Expansion ruleset]]
 pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
     for _ in 0..10 {
@@ -278,6 +283,11 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
         }
         if !changed {
             break;
+        }
+    }
+    for value in map.values_mut() {
+        if value.contains("\\$") {
+            *value = value.replace("\\$", "$");
         }
     }
     map
@@ -350,7 +360,7 @@ fn load_env_files_raw_reporting(
                 // dispatcher → `useContext` of null), #263. Reaching here means ambient
                 // `NODE_ENV` is unset (shell-wins above), so this value WOULD have been
                 // injected — drop it and flag it for the caller's warning.
-                if key == "NODE_ENV" {
+                if env_keys_equal(&key, "NODE_ENV") {
                     node_env_ignored = true;
                     continue;
                 }
@@ -603,7 +613,10 @@ fn push_var_bounded(result: &mut String, name: &str, env: &HashMap<String, Strin
     }
 }
 
-/// Expand `${VAR}` and `$VAR` references in a value.
+/// Expand `${VAR}` and `$VAR` references in a value, for one round of
+/// [`expand_env_map`]. A `\$` escape is copied through unchanged, so the `$`
+/// after it is never expanded; [`expand_env_map`] resolves it after its last
+/// round.
 ///
 /// `None` means the expansion would exceed [`MAX_EXPANDED_VALUE`]. Callers keep
 /// the raw value in that case rather than publishing a truncated replacement.
@@ -614,7 +627,7 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
 
     while i < chars.len() {
         if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '$' {
-            push_bounded(&mut result, "$")?;
+            push_bounded(&mut result, "\\$")?;
             i += 2;
             continue;
         }
@@ -715,14 +728,34 @@ mod tests {
 
         assert_eq!(
             expand_vars(&map["ESCAPED"], &map),
-            Some("$SMALL::resolved".to_string()),
-            "one pass keeps an escaped dollar literal and drops a missing variable"
+            Some(r"\$SMALL::resolved".to_string()),
+            "one pass keeps an escaped dollar escaped and drops a missing variable"
         );
 
         expand_env_map(&mut map);
 
         assert_eq!(map["AT_LIMIT"].len(), MAX_EXPANDED_VALUE);
-        assert_eq!(map["ESCAPED"], "resolved::resolved");
+        assert_eq!(map["ESCAPED"], "$SMALL::resolved");
+    }
+
+    /// The documented `.env` example: `PASSWORD="foo\$bar"` is the literal
+    /// `foo$bar`, and a value that references it gets the same literal. The
+    /// escape has to survive the later rounds, which would otherwise expand the
+    /// now-bare `$bar` to nothing and leave `foo`.
+    #[test]
+    fn an_escaped_dollar_stays_literal_across_expansion_rounds() {
+        let unset = "NUB_TEST_ESCAPE_TARGET_NEVER_SET";
+        assert!(std::env::var_os(unset).is_none());
+        let mut map = HashMap::new();
+        map.insert("PASSWORD".to_string(), format!(r"foo\${unset}"));
+        map.insert("COPY".to_string(), "${PASSWORD}".to_string());
+        map.insert("BRACED".to_string(), r"\${PASSWORD}".to_string());
+
+        expand_env_map(&mut map);
+
+        assert_eq!(map["PASSWORD"], format!("foo${unset}"));
+        assert_eq!(map["COPY"], format!("foo${unset}"));
+        assert_eq!(map["BRACED"], "${PASSWORD}");
     }
 
     #[test]
@@ -873,8 +906,7 @@ mod tests {
 
     /// Node's `--env-file` treats backticks as a third quote style alongside
     /// `'` and `"` (`src/node_dotenv.cc`): the surrounding backticks are
-    /// stripped and the content is taken verbatim. dotenvy alone leaves the
-    /// backticks in the value, so [`parse_env`] must close the gap. Covers all
+    /// stripped and the content is taken verbatim. Covers all
     /// three quote styles plus the empty-backtick case the regression flagged
     /// (`parallel/test-dotenv.js` BACKTICKS / EMPTY_BACKTICKS). Reference
     /// values were captured from node-v25.8.1's `--env-file` on this fixture.
@@ -1022,11 +1054,10 @@ mod tests {
 
     #[test]
     fn expand_escaped_dollar() {
-        let env = HashMap::new();
-        assert_eq!(
-            expand_vars("price=\\$5", &env),
-            Some("price=$5".to_string())
-        );
+        let mut map = HashMap::new();
+        map.insert("PRICE".to_string(), "price=\\$5".to_string());
+        expand_env_map(&mut map);
+        assert_eq!(map["PRICE"], "price=$5");
     }
 
     // `discover_env_files` underpins `nub watch`'s `--env-file` precedence: it
@@ -1160,6 +1191,28 @@ mod tests {
             Some("secret"),
             "sibling keys must still load after NODE_ENV is stripped; got {vars:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows environment keys ignore ASCII case, so a `.env` `node_env` IS
+    /// `NODE_ENV` there and must be dropped like it. On Unix it is a separate,
+    /// ordinary variable and loads.
+    #[test]
+    fn dotenv_node_env_is_matched_with_the_platforms_key_case_rule() {
+        let dir = std::env::temp_dir().join(format!("nub-nodeenv-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "node_env=development\nAPP_KEY=secret\n").unwrap();
+
+        let vars = load_env_files(&dir);
+
+        assert_eq!(
+            vars.contains_key("node_env"),
+            !cfg!(windows),
+            "`node_env` is NODE_ENV on Windows only; got {vars:?}"
+        );
+        assert_eq!(vars.get("APP_KEY").map(String::as_str), Some("secret"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

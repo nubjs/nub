@@ -554,13 +554,26 @@ fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
 /// A spec that already uses commas, or that is a single comparator (`^9`, `10`,
 /// `>=9`), is returned unchanged. This is a syntactic bridge only — it does not
 /// translate the `||` OR operator (unsupported by Cargo's `semver`).
+///
+/// node-semver also allows a space between an operator and its version
+/// (`>= 9 < 10`), so an operator-only token stays attached to the token after
+/// it rather than becoming a comparator of its own.
 pub(crate) fn normalize_range(spec: &str) -> String {
     let spec = spec.trim();
     // Single token, or the user already comma-separated → nothing to do.
     if spec.contains(',') || !spec.contains(char::is_whitespace) {
         return spec.to_string();
     }
-    spec.split_whitespace().collect::<Vec<_>>().join(", ")
+    let mut comparators: Vec<String> = Vec::new();
+    for token in spec.split_whitespace() {
+        match comparators.last_mut() {
+            Some(op) if op.chars().all(|c| matches!(c, '<' | '>' | '=' | '^' | '~')) => {
+                op.push_str(token);
+            }
+            _ => comparators.push(token.to_string()),
+        }
+    }
+    comparators.join(", ")
 }
 
 /// Reject a registry-declared version string before it becomes a STORE PATH
@@ -856,8 +869,9 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Standard-alphabet base64 encode — only used to render the *actual* digest in a
-/// mismatch message (the happy path never encodes).
+/// Standard-alphabet base64 encode — builds the Basic credential from a
+/// username + password, and renders the *actual* digest in an integrity
+/// mismatch message.
 fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -992,6 +1006,13 @@ mod tests {
             err.contains("unsafe version string"),
             "escaping version must be refused: {err}"
         );
+    }
+
+    #[test]
+    fn normalize_range_keeps_a_spaced_operator_on_its_version() {
+        assert_eq!(normalize_range(">= 9 < 10"), ">=9, <10");
+        assert_eq!(normalize_range("^ 9"), "^9");
+        assert!(semver::VersionReq::parse(&normalize_range(">= 9 < 10")).is_ok());
     }
 
     #[test]

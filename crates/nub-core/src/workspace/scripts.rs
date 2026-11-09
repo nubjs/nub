@@ -43,8 +43,9 @@ pub enum ScriptSelection {
 ///
 /// Note: pnpm uses JS `RegExp`; nub uses the Rust `regex` crate. The two share
 /// the common subset script-name selectors use (`^`, `$`, `:`, char classes,
-/// alternation), so `/^build:/`, `/test|lint/`, etc. behave identically; exotic
-/// JS-only constructs (lookbehind) are not supported by either in this context.
+/// alternation), so `/^build:/`, `/test|lint/`, etc. behave identically. A
+/// JS-only construct (lookaround, a backreference) does not compile here, and
+/// the selector then falls back to a plain — and thus missing — script name.
 pub fn select_scripts(manifest: &serde_json::Value, selector: &str) -> ScriptSelection {
     let scripts = match manifest.get("scripts").and_then(|s| s.as_object()) {
         Some(map) => map,
@@ -310,7 +311,7 @@ pub fn bin_dirs(project_root: &Path, workspace_root: Option<&Path>) -> Vec<PathB
     let mut dir = project_root.to_path_buf();
     for _ in 0..16 {
         dirs.push(dir.join("node_modules").join(".bin"));
-        if workspace_root.is_some() && Some(dir.as_path()) == workspace_root {
+        if Some(dir.as_path()) == workspace_root {
             break;
         }
         if !dir.pop() {
@@ -326,14 +327,8 @@ pub fn bin_path(project_root: &Path, workspace_root: Option<&Path>) -> String {
         .iter()
         .map(|dir| dir.to_string_lossy().to_string())
         .collect();
-
-    let existing = env::var("PATH").unwrap_or_default();
-    if dirs.is_empty() {
-        existing
-    } else {
-        dirs.push(existing);
-        dirs.join(crate::PATH_LIST_SEPARATOR)
-    }
+    dirs.push(env::var("PATH").unwrap_or_default());
+    dirs.join(crate::PATH_LIST_SEPARATOR)
 }
 
 /// Find a binary in node_modules/.bin by name, walking up from `cwd`.

@@ -245,8 +245,7 @@ fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
         }
         if in_packages {
             if let Some(rest) = trimmed.strip_prefix("- ") {
-                let pattern = rest.trim().trim_matches('\'').trim_matches('"');
-                patterns.push(pattern.to_string());
+                patterns.push(yaml_list_item(rest).to_string());
             } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
                 break;
             }
@@ -256,6 +255,29 @@ fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
         None
     } else {
         Some(patterns)
+    }
+}
+
+/// The scalar of one `pnpm-workspace.yaml` sequence item, without its quotes
+/// or a trailing `# comment`. A quoted item ends at its closing quote. In a
+/// plain item YAML starts a comment only at a `#` preceded by whitespace, so
+/// `pkgs/a#b` keeps its `#`.
+fn yaml_list_item(item: &str) -> &str {
+    let item = item.trim();
+    match item.chars().next() {
+        Some(quote @ ('\'' | '"')) => {
+            let body = &item[1..];
+            body.find(quote).map_or(body, |end| &body[..end])
+        }
+        _ => {
+            let end = item
+                .match_indices(" #")
+                .chain(item.match_indices("\t#"))
+                .map(|(at, _)| at)
+                .min()
+                .unwrap_or(item.len());
+            item[..end].trim_end()
+        }
     }
 }
 
@@ -660,6 +682,32 @@ mod tests {
             names.iter().any(|n| n == "@x/a"),
             "pnpm-workspace.yaml member must be discovered when pnpm-lock.yaml is present; got {names:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `# comment` after a sequence item is YAML, not part of the pattern, for
+    /// quoted and plain items alike; a `#` inside a plain scalar is not a comment.
+    #[test]
+    fn pnpm_workspace_yaml_items_may_carry_trailing_comments() {
+        let dir = ws_fixture("comments");
+        std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
+        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'pkgs/*' # app packages\n  - tools/*\t# tooling\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("tools/t")).unwrap();
+        std::fs::write(dir.join("tools/t/package.json"), r#"{"name":"@x/t"}"#).unwrap();
+
+        let names: HashSet<String> = discover_members(&dir).into_iter().map(|m| m.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["@x/a".to_string(), "@x/t".to_string()]),
+            "commented items must still select their members"
+        );
+        assert_eq!(yaml_list_item("pkgs/a#b"), "pkgs/a#b");
+        assert_eq!(yaml_list_item("\"pkgs/*\"  # c"), "pkgs/*");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
