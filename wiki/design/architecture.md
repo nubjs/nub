@@ -29,7 +29,7 @@ All of it lives in one feature table. Each carries sorted, non-overlapping versi
 | Native | Nothing. The version already ships it. |
 | Unflag | Injects the experimental flag, across the exact range where it exists and is still required |
 | Polyfill | Installs a JavaScript polyfill, guarded by a method or accessor feature detect |
-| Storage file | Passes a workspace-keyed `--localstorage-file` path, for Web Storage only |
+| Storage file | Injects nothing. `localStorage` needs a `--localstorage-file` path, which the user supplies and Nub forwards, for Web Storage only |
 | Unflag on argv | Injects a V8 flag Node accepts only on the command line, never through `NODE_OPTIONS` |
 | Runtime V8 flag | Turns a V8 flag on from inside the process, the first time a module that uses its syntax is loaded |
 
