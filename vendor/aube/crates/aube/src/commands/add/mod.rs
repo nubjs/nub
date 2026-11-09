@@ -454,8 +454,8 @@ pub struct AddArgs {
     /// up its DefinitelyTyped package (`@scope/pkg` becomes
     /// `@types/scope__pkg`) and saves its newest release on the same
     /// major version. Nothing is added for a package that declares
-    /// `types`, `typings` or a `types` export condition, for an
-    /// `@types/*` package, when the project already lists the `@types`
+    /// `types`, `typings` or a `types` condition on its root export, for
+    /// an `@types/*` package, when the project already lists the `@types`
     /// package, or when the registry has no matching release.
     #[usage(long, conflicts = "--global")]
     pub save_types: bool,

@@ -159,10 +159,17 @@ fn has_bundled_types(version: &serde_json::Value) -> bool {
             _ => false,
         }
     }
+    // `import "pkg"` sees only the root entry. A `.`-keyed object is a
+    // subpath map, any other object the root's own conditions.
+    let exports = &version["exports"];
+    let root = match exports.as_object() {
+        Some(map) if map.keys().any(|key| key.starts_with('.')) => &exports["."],
+        _ => exports,
+    };
     ["types", "typings"]
         .iter()
         .any(|field| version[field].as_str().is_some_and(|path| !path.is_empty()))
-        || exports_have_types(&version["exports"])
+        || exports_have_types(root)
 }
 
 pub(super) async fn update_manifest_for_add(
@@ -1443,12 +1450,13 @@ mod tests {
     }
 
     #[test]
-    fn bundled_types_come_from_types_typings_or_a_types_export_condition() {
+    fn bundled_types_come_from_types_typings_or_the_root_export_types_condition() {
         use serde_json::json;
         for declared in [
             json!({ "types": "index.d.ts" }),
             json!({ "typings": "index.d.ts" }),
             json!({ "exports": { ".": { "import": { "types": "./index.d.mts" } } } }),
+            json!({ "exports": { "types": "./index.d.ts", "default": "./index.js" } }),
             json!({ "exports": [{ "types@>=5": "./ts5.d.ts" }, "./index.js"] }),
         ] {
             assert!(has_bundled_types(&declared), "{declared}");
@@ -1457,6 +1465,8 @@ mod tests {
             json!({}),
             json!({ "types": "" }),
             json!({ "exports": { ".": { "types": null, "default": "./index.js" } } }),
+            // A typed subpath doesn't type `import "pkg"`.
+            json!({ "exports": { ".": "./index.js", "./feature": { "types": "./f.d.ts" } } }),
         ] {
             assert!(!has_bundled_types(&untyped), "{untyped}");
         }
