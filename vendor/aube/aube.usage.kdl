@@ -374,6 +374,7 @@ Inverse of `--save-workspace-protocol`.
 Forces the manifest specifier into a registry-style spec (`^<version>`) for this invocation, even when `linkWorkspacePackages` matched a local sibling. The install pipeline still prefers the local workspace copy at resolve time — this flag only controls what's written to `package.json`. Mirrors `pnpm add --no-save-workspace-protocol`.
 """#
     }
+    flag --no-save-types help="Inverse of `--save-types`, for a project with `saveTypes` turned on." overrides=--save-types
     flag --save-catalog help="Save the new dependency into the workspace's default catalog." {
         long_help #"""
 Save the new dependency into the workspace's default catalog.
@@ -401,7 +402,7 @@ Add as a peer dependency (written to `peerDependencies` in package.json).
 By convention you usually pair this with `--save-dev` so the peer is also installed for local development; that's what pnpm does.
 """#
     }
-    flag --save-types help="Also save the matching `@types/*` package to `devDependencies`." conflicts=--global {
+    flag --save-types help="Also save the matching `@types/*` package to `devDependencies`." conflicts=--global overrides=--no-save-types {
         long_help #"""
 Also save the matching `@types/*` package to `devDependencies`.
 

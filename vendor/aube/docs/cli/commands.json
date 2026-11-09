@@ -945,6 +945,22 @@
             ]
           },
           {
+            "name": "no-save-types",
+            "usage": "--no-save-types",
+            "help": "Inverse of `--save-types`, for a project with `saveTypes` turned on.",
+            "help_long": "Inverse of `--save-types`, for a project with `saveTypes` turned on.",
+            "help_first_line": "Inverse of `--save-types`, for a project with `saveTypes` turned on.",
+            "short": [],
+            "long": [
+              "no-save-types"
+            ],
+            "hide": false,
+            "global": false,
+            "overrides": [
+              "--save-types"
+            ]
+          },
+          {
             "name": "no-save-workspace-protocol",
             "usage": "--no-save-workspace-protocol",
             "help": "Inverse of `--save-workspace-protocol`.",
@@ -1030,6 +1046,9 @@
             "global": false,
             "conflicts": [
               "--global"
+            ],
+            "overrides": [
+              "--no-save-types"
             ]
           },
           {

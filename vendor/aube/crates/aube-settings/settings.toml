@@ -2781,6 +2781,21 @@ sources.npmrc = ["link-workspace-packages", "linkWorkspacePackages"]
 sources.workspaceYaml = ["linkWorkspacePackages"]
 examples = []
 
+[saveTypes]
+description = "Also save the matching `@types/*` package when adding a dependency."
+type = "bool"
+default = "false"
+docs = """
+Makes `add` behave as if `--save-types` were passed: a registry package that
+ships no TypeScript types also gets its DefinitelyTyped package saved to
+`devDependencies`. `--no-save-types` turns it off for one command.
+"""
+sources.cli = []
+sources.env = ["npm_config_save_types", "NPM_CONFIG_SAVE_TYPES", "AUBE_SAVE_TYPES"]
+sources.npmrc = ["save-types", "saveTypes"]
+sources.workspaceYaml = ["saveTypes"]
+examples = []
+
 [saveWorkspaceProtocol]
 description = "Spec form written to `package.json` when `aube add` resolves against a workspace sibling."
 type = '"true" | "false" | "rolling"'
@@ -3254,6 +3269,7 @@ apply cleanly.
 sources.cli = []
 sources.env = ["npm_config_catalog_mode", "NPM_CONFIG_CATALOG_MODE", "AUBE_CATALOG_MODE"]
 sources.npmrc = ["catalogMode"]
+sources.workspaceYaml = ["catalogMode"]
 examples = []
 
 [ci]

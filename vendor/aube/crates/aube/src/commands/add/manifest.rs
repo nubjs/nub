@@ -14,7 +14,8 @@ pub(super) struct AddManifestOptions {
     pub(super) save_exact: bool,
     pub(super) save_optional: bool,
     pub(super) save_peer: bool,
-    pub(super) save_types: bool,
+    /// `None` follows the `saveTypes` setting.
+    pub(super) save_types: Option<bool>,
     pub(super) network_mode: aube_registry::NetworkMode,
     /// Target catalog for `--save-catalog` / `--save-catalog-name`.
     /// `None` means neither flag was passed and the catalog yaml is
@@ -39,7 +40,7 @@ impl AddManifestOptions {
             save_exact: args.save_exact,
             save_optional: args.save_optional,
             save_peer: args.save_peer,
-            save_types: args.save_types,
+            save_types: types_flag(args.save_types, args.no_save_types),
             network_mode: aube_registry::NetworkMode::Online,
             save_catalog: args.save_catalog_name.clone().or_else(|| {
                 if args.save_catalog {
@@ -138,6 +139,35 @@ fn place_dep_in_manifest(
     }
 }
 
+/// `--save-types` / `--no-save-types`, or `None` to follow the setting.
+pub(super) fn types_flag(save_types: bool, no_save_types: bool) -> Option<bool> {
+    match (save_types, no_save_types) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// The name a local spec's package declares. pnpm saves a local dependency
+/// under this; the path's basename is only the fallback for a package with
+/// no readable name. `cwd` is the directory the spec is relative to.
+fn local_package_name(cwd: &Path, spec: &str) -> Option<String> {
+    let path = spec
+        .strip_prefix("file:")
+        .or_else(|| spec.strip_prefix("link:"))?;
+    let path = cwd.join(path);
+    let manifest = if path.is_dir() {
+        std::fs::read(path.join("package.json")).ok()?
+    } else {
+        aube_resolver::read_tarball_package_json(&std::fs::read(path).ok()?).ok()?
+    };
+    let name = serde_json::from_slice::<serde_json::Value>(&manifest).ok()?;
+    name["name"]
+        .as_str()
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+}
+
 /// DefinitelyTyped's name for `name`: `@scope/pkg` → `@types/scope__pkg`.
 fn types_package_name(name: &str) -> String {
     match name.strip_prefix('@') {
@@ -201,6 +231,7 @@ pub(super) async fn update_manifest_for_add(
         minimum_release_age,
         registry_supports_time,
         cache_dir,
+        save_types,
     ) = crate::commands::with_settings_ctx_and_cli(cwd, &opts.setting_overrides, |ctx| {
         let tag = aube_settings::resolved::tag(ctx);
         // `--save-exact` (CLI) OR a resolved `.npmrc`/env `save-exact=true`
@@ -233,6 +264,9 @@ pub(super) async fn update_manifest_for_add(
         let registry_supports_time_field =
             aube_settings::resolved::registry_supports_time_field(ctx);
         let cache_dir = crate::commands::resolved_cache_dir_with_ctx(cwd, ctx);
+        let save_types = opts
+            .save_types
+            .unwrap_or_else(|| aube_settings::resolved::save_types(ctx));
         (
             tag,
             prefix,
@@ -240,18 +274,27 @@ pub(super) async fn update_manifest_for_add(
             minimum_release_age,
             registry_supports_time_field,
             cache_dir,
+            save_types,
         )
     });
     let workspace_settings_cwd = crate::dirs::find_workspace_yaml_root(cwd)
         .or_else(|| crate::dirs::find_workspace_root(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
-    let (link_workspace_packages, save_workspace_protocol_setting) =
+    let (link_workspace_packages, save_workspace_protocol_setting, root_catalog_mode) =
         crate::commands::with_settings_ctx(&workspace_settings_cwd, |ctx| {
             (
                 aube_settings::resolved::link_workspace_packages(ctx),
                 aube_settings::resolved::save_workspace_protocol(ctx),
+                aube_settings::resolved::catalog_mode(ctx),
             )
         });
+    // The workspace yaml is read from the root, so a mode set there has to
+    // reach a member; a member's own `.npmrc` still wins with a stricter one.
+    let catalog_mode = if matches!(catalog_mode, CatalogMode::Manual) {
+        root_catalog_mode
+    } else {
+        catalog_mode
+    };
     // Load the workspace catalog map up front — the resolver needs it
     // later, but `catalogMode` consults the default catalog while we
     // build the specifier below. Pass the same map to the resolver to
@@ -281,6 +324,14 @@ pub(super) async fn update_manifest_for_add(
             // or tag — `aube add lodash@latest` always means `latest`.
             if !spec.has_explicit_range && default_tag != "latest" {
                 spec.range = default_tag.clone();
+            }
+            if spec.alias.is_none()
+                && let Some(name) = spec
+                    .local_spec
+                    .as_deref()
+                    .and_then(|local| local_package_name(cwd, local))
+            {
+                spec.name = name;
             }
             Ok::<_, miette::Report>(spec)
         })
@@ -779,7 +830,7 @@ pub(super) async fn update_manifest_for_add(
         );
 
         place_dep_in_manifest(&mut manifest, pkg_name_for_manifest, specifier, &opts);
-        if opts.save_types && !is_jsr && !spec.name.starts_with("@types/") {
+        if save_types && !is_jsr && !spec.name.starts_with("@types/") {
             types_candidates.push((
                 pkg_name_for_manifest.to_string(),
                 spec.name.clone(),
@@ -1272,7 +1323,7 @@ mod tests {
             save_exact: false,
             save_optional,
             save_peer,
-            save_types: false,
+            save_types: Some(false),
             network_mode: aube_registry::NetworkMode::Online,
             save_catalog: None,
             workspace_protocol_override: None,
@@ -1417,7 +1468,7 @@ mod tests {
                 save_exact: false,
                 save_optional: false,
                 save_peer: false,
-                save_types: false,
+                save_types: Some(false),
                 network_mode: aube_registry::NetworkMode::Offline,
                 save_catalog: None,
                 workspace_protocol_override: None,
@@ -1469,7 +1520,7 @@ mod tests {
                         save_exact: false,
                         save_optional: false,
                         save_peer: false,
-                        save_types: false,
+                        save_types: Some(false),
                         network_mode: aube_registry::NetworkMode::Offline,
                         save_catalog: None,
                         workspace_protocol_override: None,
@@ -1624,7 +1675,7 @@ mod tests {
         )
         .unwrap();
         let save_types = || AddManifestOptions {
-            save_types: true,
+            save_types: Some(true),
             ..opts(false, false, false)
         };
 
@@ -1709,23 +1760,26 @@ mod tests {
             project.path().join(".npmrc"),
             format!(
                 "registry={registry}\n@types:registry={registry}types/\n\
-                 cache-dir={}\nminimumReleaseAge=0\ncatalogMode=strict\n",
+                 cache-dir={}\nminimumReleaseAge=0\n",
                 project.path().join("cache").display()
             ),
         )
         .unwrap();
         std::fs::write(
             project.path().join("pnpm-workspace.yaml"),
-            "catalog:\n  '@types/listed': npm:@acme/listed-types@^2\n",
+            "packages:\n  - packages/*\ncatalogMode: strict\ncatalog:\n  '@types/listed': npm:@acme/listed-types@^2\n",
         )
         .unwrap();
-        let manifest_path = project.path().join("package.json");
+        std::fs::write(project.path().join("package.json"), "{}").unwrap();
+        let member = project.path().join("packages/member");
+        std::fs::create_dir_all(&member).unwrap();
+        let manifest_path = member.join("package.json");
         std::fs::write(&manifest_path, "{}").unwrap();
         let add = |name: &str, save_catalog: Option<&str>| {
-            let dir = project.path();
+            let dir = member.as_path();
             let packages = [name.to_string()];
             let options = AddManifestOptions {
-                save_types: true,
+                save_types: Some(true),
                 save_catalog: save_catalog.map(String::from),
                 ..opts(false, false, false)
             };
@@ -1739,8 +1793,72 @@ mod tests {
         let manifest = aube_manifest::PackageJson::from_path(&manifest_path).unwrap();
         assert_eq!(manifest.dev_dependencies["@types/listed"], "catalog:");
         assert_eq!(manifest.dev_dependencies["@types/unlisted"], "catalog:");
-        let catalogs = crate::commands::load_workspace_catalogs(project.path()).unwrap();
+        let catalogs = crate::commands::load_workspace_catalogs(&member).unwrap();
         assert_eq!(catalogs["default"]["@types/unlisted"], "^1.0.3");
+    }
+
+    #[tokio::test]
+    async fn save_types_setting_applies_unless_the_flag_turns_it_off() {
+        use serde_json::json;
+
+        let (registry, server) = serve_registry(vec![
+            registry_doc("one", &["1.0.0"], json!({})),
+            registry_doc("@types/one", &["1.0.0"], json!({})),
+            registry_doc("two", &["1.0.0"], json!({})),
+            registry_doc("@types/two", &["1.0.0"], json!({})),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".npmrc"),
+            format!(
+                "registry={registry}\n@types:registry={registry}types/\n\
+                 cache-dir={}\nminimumReleaseAge=0\nsave-types=true\n",
+                project.path().join("cache").display()
+            ),
+        )
+        .unwrap();
+        let manifest_path = project.path().join("package.json");
+        std::fs::write(&manifest_path, "{}").unwrap();
+        for (name, save_types) in [("one", None), ("two", Some(false))] {
+            let options = AddManifestOptions {
+                save_types,
+                ..opts(false, false, false)
+            };
+            update_manifest_for_add(project.path(), &[name.to_string()], options, false)
+                .await
+                .unwrap();
+        }
+        server.abort();
+        let manifest = aube_manifest::PackageJson::from_path(&manifest_path).unwrap();
+        assert_eq!(manifest.dev_dependencies["@types/one"], "^1.0.0");
+        assert!(!manifest.dev_dependencies.contains_key("@types/two"));
+    }
+
+    #[tokio::test]
+    async fn local_specs_are_saved_under_the_package_s_own_name() {
+        let project = tempfile::tempdir().unwrap();
+        for (dir, manifest) in [
+            ("named", r#"{ "name": "@acme/real-name" }"#),
+            ("unnamed", "{}"),
+        ] {
+            std::fs::create_dir(project.path().join(dir)).unwrap();
+            std::fs::write(project.path().join(dir).join("package.json"), manifest).unwrap();
+        }
+        let manifest_path = project.path().join("package.json");
+        std::fs::write(&manifest_path, "{}").unwrap();
+        update_manifest_for_add(
+            project.path(),
+            &["./named", "./unnamed", "picked@./named"].map(String::from),
+            opts(false, false, false),
+            false,
+        )
+        .await
+        .unwrap();
+        let manifest = aube_manifest::PackageJson::from_path(&manifest_path).unwrap();
+        assert_eq!(manifest.dependencies["@acme/real-name"], "link:./named");
+        assert_eq!(manifest.dependencies["unnamed"], "link:./unnamed");
+        assert_eq!(manifest.dependencies["picked"], "link:./named");
     }
 
     #[tokio::test]
@@ -1788,7 +1906,7 @@ mod tests {
                 save_exact: false,
                 save_optional: false,
                 save_peer: false,
-                save_types: false,
+                save_types: Some(false),
                 network_mode: aube_registry::NetworkMode::Offline,
                 save_catalog: None,
                 workspace_protocol_override: None,

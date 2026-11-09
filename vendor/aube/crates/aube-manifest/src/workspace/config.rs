@@ -543,6 +543,12 @@ pub struct WorkspaceConfig {
     /// `aube_settings::resolved::SaveWorkspaceProtocol::from_str_normalized`.
     #[serde(default)]
     pub save_workspace_protocol: Option<yaml_serde::Value>,
+    /// Read through `aube_settings`; declared so the key is not `extra`.
+    #[serde(default)]
+    pub catalog_mode: Option<yaml_serde::Value>,
+    /// Read through `aube_settings`; declared so the key is not `extra`.
+    #[serde(default)]
+    pub save_types: Option<yaml_serde::Value>,
 
     /// Version prefix written to `package.json` when `aube add` records a
     /// dep (`""` exact, `"~"`, or `"^"`). pnpm reads a top-level

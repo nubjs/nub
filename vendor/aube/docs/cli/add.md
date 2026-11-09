@@ -47,6 +47,7 @@ Add a dependency
 - **`--no-save-workspace-protocol`** — Inverse of `--save-workspace-protocol`.
 
   Forces the manifest specifier into a registry-style spec (`^<version>`) for this invocation, even when `linkWorkspacePackages` matched a local sibling. The install pipeline still prefers the local workspace copy at resolve time — this flag only controls what's written to `package.json`. Mirrors `pnpm add --no-save-workspace-protocol`.
+- **`--no-save-types`** — Inverse of `--save-types`, for a project with `saveTypes` turned on.
 - **`--save-catalog`** — Save the new dependency into the workspace's default catalog.
 
   Writes `catalog:` into `package.json` and seeds/upserts the resolved range under `catalog:` in the workspace yaml. Mirrors `pnpm add --save-catalog`.

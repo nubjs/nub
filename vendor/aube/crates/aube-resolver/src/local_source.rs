@@ -181,7 +181,7 @@ pub fn resolve_exec_script_path(
 const MAX_RESOLVE_TARBALL_DECOMPRESSED_BYTES: u64 = 1 << 30;
 const MAX_RESOLVE_PACKAGE_JSON_BYTES: u64 = 8 * 1024 * 1024;
 
-fn read_tarball_package_json(bytes: &[u8]) -> Result<Vec<u8>, String> {
+pub fn read_tarball_package_json(bytes: &[u8]) -> Result<Vec<u8>, String> {
     read_tarball_package_json_capped(bytes, MAX_RESOLVE_TARBALL_DECOMPRESSED_BYTES)
 }
 
