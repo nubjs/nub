@@ -520,23 +520,35 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
     // ends a substitution is told apart from one that closes a block within it.
     let mut substitutions: Vec<usize> = Vec::new();
     // Whether a `/` here would open a regular expression rather than divide: true
-    // where an expression can start, false right after a value.
+    // where an expression can start, false right after a value. Division read as
+    // a regular expression steps over real code up to the next `/`, so it takes a
+    // token that only an expression can follow to set this.
     let mut regex_allowed = true;
+    // Whether the token before this one makes a word a name whatever it spells:
+    // the `.` of a property read (`x.in`, `x?.return`, `x. typeof`) or the `#` of a
+    // private one.
+    let mut names_next = false;
     while i < bytes.len() {
         // Prose is not code, and this is not pedantry: jsdom's `interfaces.js`
         // carries the phrase "require()s" in a comment, which read as a call with
         // a computed argument and gave up jsdom's ENTIRE closure — 1843 payload
         // files that stayed exactly as they were.
         if let Some(after) = skip_noncode(bytes, i) {
-            // A comment leaves the token before it in charge of what a `/` means;
-            // a string is a value.
+            // A comment leaves the token before it in charge of what follows; a
+            // string is a value.
             if bytes[i] != b'/' {
                 regex_allowed = false;
+                names_next = false;
             }
             i = after;
             continue;
         }
         let byte = bytes[i];
+        if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+            continue;
+        }
+        let named = std::mem::take(&mut names_next);
         if !is_word_byte(byte) {
             match byte {
                 b'`' => {
@@ -569,7 +581,17 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
                 // `x++ / y`: a postfix increment ends a value, and no regular
                 // expression can follow `++` or `--`.
                 b'+' | b'-' if i > 0 && bytes[i - 1] == byte => regex_allowed = false,
-                b' ' | b'\t' | b'\n' | b'\r' => {}
+                // `...` spreads an expression. Any other `.` reads a property or
+                // ends a number (`1. / x`), and neither is followed by a regular
+                // expression.
+                b'.' => {
+                    regex_allowed = bytes[..i].ends_with(b"..");
+                    names_next = !regex_allowed;
+                }
+                b'#' => names_next = true,
+                // Outside a string or a comment, a non-ASCII byte is part of an
+                // identifier.
+                0x80.. => regex_allowed = false,
                 _ => regex_allowed = true,
             }
             i += 1;
@@ -584,8 +606,14 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             i += 1;
         }
         let word = &text[start..i];
-        // A keyword used as a property name (`x.in`) is a value like any other.
-        regex_allowed = REGEX_KEYWORDS.contains(&word) && (start == 0 || bytes[start - 1] != b'.');
+        regex_allowed = match word {
+            _ if named => false,
+            // Not reserved. It is the keyword only after the binding of a
+            // `for (x of /re/)`; where an expression starts it is an identifier,
+            // and `of / 2` divides.
+            "of" => !regex_allowed,
+            _ => REGEX_KEYWORDS.contains(&word),
+        };
         if !matches!(word, "require" | "import" | "from") {
             continue;
         }
@@ -619,7 +647,9 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
 }
 
 /// Words after which a `/` opens a regular expression: each one is followed by an
-/// expression, never by a value a `/` could divide.
+/// expression, and each is reserved, so it is never a variable a `/` could divide.
+/// `yield` and `await` are left out for that reason: a sloppy script may name a
+/// variable either one, and nothing here says which reading applies.
 const REGEX_KEYWORDS: &[&str] = &[
     "return",
     "typeof",
@@ -632,9 +662,6 @@ const REGEX_KEYWORDS: &[&str] = &[
     "delete",
     "void",
     "throw",
-    "yield",
-    "await",
-    "of",
 ];
 
 /// Skip template text from `i` to its closing backtick or its next `${`, and say
@@ -713,11 +740,12 @@ fn take(specifier: &str, required: bool, out: &mut BTreeMap<String, Uses>) {
 /// read inside out, and in a minified bundle — one line — that hides the rest of
 /// the file, real `require` calls included.
 ///
-/// Two shapes are still misread, and neither occurs in the corpus: a regular
-/// expression directly after `)` or `}` (`if (x) /re/.test(y)`) is taken for
-/// division, so its body is scanned as code, and a `/` after a non-ASCII
-/// identifier is taken for a regular expression, which skips to the next `/` on
-/// that line.
+/// Three shapes are still misread, and none occurs in the corpus. A regular
+/// expression directly after `)` or `}` (`if (x) /re/.test(y)`), or after `yield`
+/// or `await`, is taken for division, so its body is scanned as code. A statement
+/// that opens by dividing a variable named `of`, directly after a value
+/// (`}\nof / 2`), is taken for the `for … of` keyword, which skips to the next `/`
+/// on that line.
 fn skip_noncode(bytes: &[u8], i: usize) -> Option<usize> {
     match (bytes[i], bytes.get(i + 1)) {
         (b'/', Some(b'/')) => Some(
@@ -981,6 +1009,8 @@ mod tests {
             "f(/'/);",
             "const r = /'/;",
             "f(a, /'/);",
+            "for (const m of /'/.exec(s)) {}",
+            "const l = [.../'/.exec(s)];",
         ] {
             assert_eq!(
                 scanned(&format!("{source}\nconst m = require(name);")),
@@ -996,20 +1026,38 @@ mod tests {
     }
 
     /// After a value a `/` divides. Reading it as a regular expression would skip
-    /// to the next `/` and step over the call between them.
+    /// to the next `/` and step over the call between them: a literal specifier
+    /// would go missing, and a computed one would no longer refuse the scan.
     #[test]
     fn a_slash_after_a_value_is_division() {
-        for source in [
-            "const r = total / require('os').cpus().length / 2;",
-            "const r = (a + b) / require('os').cpus().length / 2;",
-            "const r = list[0] / require('os').cpus().length / 2;",
-            "const r = {} / require('os').cpus().length / 2;",
-            "const r = `${n}` / require('os').cpus().length / 2;",
-            "const r = 'n' / require('os').cpus().length / 2;",
-            "const r = n++ / require('os').cpus().length / 2;",
-            "const r = x.in / require('os').cpus().length / 2;",
+        for value in [
+            "total",
+            "(a + b)",
+            "list[0]",
+            "{}",
+            "`${n}`",
+            "'n'",
+            "n++",
+            // A keyword spelled as a property or a private name, however spaced.
+            "x.in",
+            "x. in",
+            "x\n  .typeof",
+            "x?.delete",
+            "x. /* c */ return",
+            "this.#in",
+            // A number that ends at its decimal point.
+            "1.",
+            // Not reserved, so each can name a variable: `of` anywhere, `yield`
+            // and `await` in a sloppy script.
+            "of",
+            "yield",
+            "await",
+            "café",
         ] {
-            assert_eq!(scanned(source), Some(vec!["os r".into()]), "{source}");
+            let literal = format!("const r = {value} / require('os').cpus().length / 2;");
+            assert_eq!(scanned(&literal), Some(vec!["os r".into()]), "{literal}");
+            let computed = format!("const r = {value} / require(name).cpus().length / 2;");
+            assert_eq!(scanned(&computed), None, "{computed}");
         }
     }
 
