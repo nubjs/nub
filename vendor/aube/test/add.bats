@@ -603,6 +603,19 @@ EOF2
 	assert_file_exists node_modules/is-odd/index.js
 }
 
+# The lockfile's name depends on the embedder and on how the project was detected.
+lockfile_bytes() {
+	local name
+	for name in aube-lock.yaml nub.lock pnpm-lock.yaml; do
+		if [ -f "$1/$name" ]; then
+			cat "$1/$name"
+			return
+		fi
+	done
+	echo "no lockfile in $1" >&2
+	return 1
+}
+
 @test "aube add: a failed install leaves package.json and the lockfile as they were" {
 	cat >package.json <<'EOF2'
 {
@@ -618,13 +631,13 @@ EOF2
 	run aube install
 	assert_success
 	manifest="$(cat package.json)"
-	lockfile="$(cat aube-lock.yaml)"
+	lockfile="$(lockfile_bytes .)"
 
 	run aube add file:./broken
 	assert_failure
 	assert_output --partial 'restored package.json and lockfile'
 	[ "$(cat package.json)" = "$manifest" ]
-	[ "$(cat aube-lock.yaml)" = "$lockfile" ]
+	[ "$(lockfile_bytes .)" = "$lockfile" ]
 }
 
 @test "aube add --filter: a failed install restores every selected package.json" {
@@ -648,6 +661,39 @@ EOF2
 	assert_failure
 	[ "$(cat packages/a/package.json)" = "$a" ]
 	[ "$(cat packages/b/package.json)" = "$b" ]
+}
+
+@test "aube add: a failed build restores each member's own lockfile" {
+	cat >package.json <<'EOF2'
+{ "name": "root", "version": "0.0.0", "private": true, "workspaces": ["packages/*"] }
+EOF2
+	echo 'shared-workspace-lockfile=false' >>.npmrc
+	mkdir -p packages/a dep
+	echo '{ "name": "a", "version": "1.0.0", "dependencies": { "is-odd": "3.0.1" } }' >packages/a/package.json
+	echo '{ "name": "dep", "version": "1.0.0", "scripts": { "postinstall": "exit 3" } }' >dep/package.json
+	run aube install
+	assert_success
+	lockfile="$(lockfile_bytes packages/a)"
+
+	run aube add --filter a --dangerously-allow-all-builds file:../../dep
+	assert_failure
+	[ "$(lockfile_bytes packages/a)" = "$lockfile" ]
+}
+
+@test "aube add: a failed build restores a relocated lockfile" {
+	cat >package.json <<'EOF2'
+{ "name": "app", "version": "0.0.0", "dependencies": { "is-odd": "3.0.1" } }
+EOF2
+	echo 'lockfile-dir=locks' >>.npmrc
+	mkdir dep
+	echo '{ "name": "dep", "version": "1.0.0", "scripts": { "postinstall": "exit 3" } }' >dep/package.json
+	run aube install
+	assert_success
+	lockfile="$(lockfile_bytes locks)"
+
+	run aube add --dangerously-allow-all-builds file:./dep
+	assert_failure
+	[ "$(lockfile_bytes locks)" = "$lockfile" ]
 }
 
 @test "aube add --no-save: restores a non-aube lockfile (package-lock.json)" {

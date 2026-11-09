@@ -48,7 +48,24 @@ pub(super) struct LockfileWriteInputs {
     pub rewrite_lockfile: bool,
 }
 
-pub(super) type LockfileWriteHandle = tokio::task::JoinHandle<miette::Result<()>>;
+/// An in-flight lockfile write. Dropping it blocks until the write has finished,
+/// because `spawn_blocking` work outlives its `JoinHandle`: an install that
+/// returns an error before [`join`] would otherwise leave the writer running
+/// past the project lock, where it can land after `add` has restored the
+/// project's lockfile. The wait is the tens of milliseconds the write takes, on
+/// the failure path only; the writer runs on the blocking pool, so a
+/// current-thread runtime cannot deadlock against it.
+pub(super) struct LockfileWriteHandle {
+    task: tokio::task::JoinHandle<miette::Result<()>>,
+    /// Disconnects when the writer finishes, or is dropped without running.
+    finished: std::sync::mpsc::Receiver<()>,
+}
+
+impl Drop for LockfileWriteHandle {
+    fn drop(&mut self) {
+        let _ = self.finished.recv();
+    }
+}
 
 /// Returns whether the write-overlap optimization is enabled (the
 /// default). `AUBE_DISABLE_LOCKFILE_WRITE_OVERLAP` (under the active
@@ -116,7 +133,7 @@ pub(super) fn write_one(
 /// closure is `'static`. The returned handle MUST be joined (via [`join`])
 /// before the install completes so a write error still surfaces.
 pub(super) fn spawn(inputs: LockfileWriteInputs) -> LockfileWriteHandle {
-    tokio::task::spawn_blocking(move || {
+    spawn_write(move || {
         let _diag = aube_util::diag::Span::new(
             aube_util::diag::Category::Install,
             "lockfile_write_overlapped",
@@ -137,13 +154,22 @@ pub(super) fn spawn(inputs: LockfileWriteInputs) -> LockfileWriteHandle {
     })
 }
 
+fn spawn_write(write: impl FnOnce() -> miette::Result<()> + Send + 'static) -> LockfileWriteHandle {
+    let (finished_tx, finished) = std::sync::mpsc::channel::<()>();
+    let task = tokio::task::spawn_blocking(move || {
+        let _finished_tx = finished_tx;
+        write()
+    });
+    LockfileWriteHandle { task, finished }
+}
+
 /// Join a spawned write handle, mapping a task panic to a diagnostic. A
 /// write error surfaces here (at the join point, before finalize) rather
 /// than being dropped. Returns the write's own `Result` unchanged so the
 /// error chain is exactly what the inline path would have produced, with a
 /// panic wrapped distinctly.
-pub(super) async fn join(handle: LockfileWriteHandle) -> miette::Result<()> {
-    match handle.await {
+pub(super) async fn join(mut handle: LockfileWriteHandle) -> miette::Result<()> {
+    match (&mut handle.task).await {
         Ok(write_result) => write_result,
         // `JoinError` is a plain `std::error::Error` (not a miette
         // `Diagnostic`), so the bridge to a `Report` is `into_diagnostic()`
@@ -151,5 +177,26 @@ pub(super) async fn join(handle: LockfileWriteHandle) -> miette::Result<()> {
         Err(join_err) => Result::<(), _>::Err(join_err)
             .into_diagnostic()
             .wrap_err("lockfile write task panicked"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_the_handle_waits_for_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("written");
+        let target = path.clone();
+        let handle = spawn_write(move || {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            std::fs::write(target, "done").unwrap();
+            Ok(())
+        });
+
+        drop(handle);
+
+        assert!(path.exists(), "the write outlived its handle");
     }
 }

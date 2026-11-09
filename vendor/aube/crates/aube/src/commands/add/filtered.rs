@@ -31,7 +31,7 @@ pub(super) async fn run(
     let lock = crate::commands::take_project_lock(&root)?;
 
     let mut snapshot = rollback::Snapshot::default();
-    snapshot.capture_project(&root)?;
+    snapshot.capture_install_root(&root)?;
     for pkg in &matched {
         snapshot.capture_manifest(&pkg.dir)?;
     }

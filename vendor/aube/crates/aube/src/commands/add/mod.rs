@@ -140,7 +140,7 @@ pub(crate) async fn add_to_project_with_overrides(
     overrides.append_to(&mut setting_overrides);
     let mut snapshot = rollback::Snapshot::default();
     snapshot.capture_project(project_dir)?;
-    snapshot.capture_project(lock.project_dir())?;
+    snapshot.capture_install_root(lock.project_dir())?;
     let mutation_control = options.control.clone();
     let mutation_result = install::control::scope(options.control.clone(), async {
         tokio::select! {
@@ -628,12 +628,11 @@ pub async fn run(
     // Snapshot before anything is written. A failed add leaves the project as
     // it found it, and `--no-save` restores after a successful one too, so the
     // new package is linked into `node_modules` while the committed project
-    // state stays as the user wrote it. Both directories are captured because a
-    // member's add writes the workspace root's lockfile unless the workspace
-    // keeps one per package.
+    // state stays as the user wrote it. A member's add writes its own manifest
+    // and the workspace root's lockfile, so both directories are captured.
     let mut snapshot = rollback::Snapshot::default();
     snapshot.capture_project(&cwd)?;
-    snapshot.capture_project(lock.project_dir())?;
+    snapshot.capture_install_root(lock.project_dir())?;
 
     let pipeline_result: miette::Result<()> = async {
         // `--allow-build=<pkg>` / `--deny-build=<pkg>` pre-review dep

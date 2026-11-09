@@ -19,21 +19,65 @@ pub(super) struct Restored {
 
 impl Snapshot {
     /// Capture what an add writes for the project at `dir`: its manifest, its
-    /// lockfile in every name, and the workspace yaml that `--allow-build`,
-    /// `--deny-build` and `--save-catalog` write to. The pre-rename legacy
-    /// lockfiles matter because a write MIGRATES them (writes `nub.lock`, deletes
-    /// `lock.yaml`), which would otherwise lose the checked-in file.
+    /// lockfile, and the workspace yaml that `--allow-build`, `--deny-build` and
+    /// `--save-catalog` write to.
     pub(super) fn capture_project(&mut self, dir: &Path) -> miette::Result<()> {
         self.capture_manifest(dir)?;
-        let lockfile_path = lockfile_path_for_project(dir)?;
-        self.capture(lockfile_path.clone())?;
-        for name in aube_util::embedder().lockfile_legacy_basenames {
-            let path = dir.join(name);
-            if path != lockfile_path {
-                self.capture(path)?;
+        self.capture_lockfiles(dir)?;
+        self.capture(aube_manifest::workspace::workspace_yaml_target(dir))
+    }
+
+    /// [`Self::capture_project`] for the directory the install runs in, plus
+    /// the lockfiles that install writes elsewhere: a relocated `lockfile-dir`,
+    /// and every member's own under `sharedWorkspaceLockfile=false`.
+    pub(super) fn capture_install_root(&mut self, root: &Path) -> miette::Result<()> {
+        self.capture_project(root)?;
+        let (lockfile_dir, shared) = crate::commands::with_settings_ctx(root, |ctx| {
+            (
+                aube_settings::resolved::lockfile_dir(ctx),
+                aube_settings::resolved::shared_workspace_lockfile(ctx),
+            )
+        });
+        if let Some(dir) = lockfile_dir {
+            self.capture_lockfiles(&root.join(dir))?;
+        }
+        if !shared {
+            let members = aube_workspace::find_workspace_packages(root)
+                .map_err(|e| miette::miette!("failed to discover workspace packages: {e}"))?;
+            for member in members {
+                self.capture_lockfiles(&member)?;
             }
         }
-        self.capture(aube_manifest::workspace::workspace_yaml_target(dir))
+        Ok(())
+    }
+
+    /// Every lockfile name `dir` could hold, so the snapshot does not depend on
+    /// predicting which format the install picks. The pre-rename legacy names
+    /// matter because a write MIGRATES them (writes `nub.lock`, deletes
+    /// `lock.yaml`), which would otherwise lose the checked-in file.
+    fn capture_lockfiles(&mut self, dir: &Path) -> miette::Result<()> {
+        use aube_lockfile::LockfileKind;
+        let branch_aware = [
+            aube_lockfile::aube_lock_filename(dir),
+            aube_lockfile::pnpm_lock_filename(dir),
+        ];
+        let fixed = [
+            LockfileKind::Npm,
+            LockfileKind::NpmShrinkwrap,
+            LockfileKind::Yarn,
+            LockfileKind::Bun,
+        ]
+        .map(LockfileKind::filename);
+        let legacy = aube_util::embedder().lockfile_legacy_basenames;
+        for name in branch_aware
+            .iter()
+            .map(String::as_str)
+            .chain(fixed)
+            .chain(legacy.iter().copied())
+        {
+            self.capture(dir.join(name))?;
+        }
+        Ok(())
     }
 
     pub(super) fn capture_manifest(&mut self, dir: &Path) -> miette::Result<()> {
@@ -97,25 +141,4 @@ fn read_if_present(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
     }
-}
-
-/// Resolve the on-disk lockfile path that a normal `add` would write
-/// to in `project_dir`. Mirrors the `LockfileKind` -> filename mapping
-/// inside `aube_lockfile::write_lockfile_as` so the snapshot lines up
-/// byte-for-byte with the normal install write, including non-aube
-/// lockfiles (`pnpm-lock.yaml`, `package-lock.json`, `yarn.lock`,
-/// `bun.lock`, `npm-shrinkwrap.json`). When no lockfile exists yet the
-/// resolver uses the `package.json`-declared package manager's format,
-/// falling back to the configured default. Fallible so a declaration
-/// mismatch surfaces here rather than collapsing to the default.
-fn lockfile_path_for_project(project_dir: &Path) -> miette::Result<PathBuf> {
-    use aube_lockfile::LockfileKind;
-    let kind = crate::commands::resolve_lockfile_kind_for_write(project_dir)?
-        .unwrap_or_else(|| crate::commands::default_lockfile_kind_for_cwd(project_dir));
-    let filename = match kind {
-        LockfileKind::Aube => aube_lockfile::aube_lock_filename(project_dir),
-        LockfileKind::Pnpm => aube_lockfile::pnpm_lock_filename(project_dir),
-        other => other.filename().to_string(),
-    };
-    Ok(project_dir.join(filename))
 }
