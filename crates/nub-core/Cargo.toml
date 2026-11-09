@@ -40,7 +40,6 @@ anyhow = "1"
 camino = "1"
 libc = "0.2"
 dirs-next = "2"
-dotenvy = "0.15"
 # `zlib-rs`, not `zlib-ng`: the same algorithms, ported to Rust, so the gzip hot
 # path keeps its speed without a C toolchain. `zlib-ng` reaches us through
 # `libz-ng-sys`, which builds via CMake — and CMake defaults MSVC to the DYNAMIC
