@@ -43,58 +43,16 @@ Automated short-lived builders under `scripts/remote-build.ts` are a separate ca
 
 ### Idle auto-stop — the mechanism that replaces a run-duration cap
 
-This is the cost mechanism, now that the run-duration cap is gone: it targets idleness directly rather than capping useful work. Ship it in the same `create` call so no box exists without it, and the box powers itself off once nothing is happening. GCE reports a guest `poweroff` as `TERMINATED`, so the disk survives and a `start` brings it back.
+This is the cost mechanism, now that the run-duration cap is gone: it targets idleness directly rather than capping useful work. Every box ships it in the same `create` call so none exists without it, and the box powers itself off once nothing has happened for 30 minutes. GCE reports a guest shutdown as `TERMINATED`, so the disk survives and a `start` brings it back. It needs no credential and tells nobody: the maintainer does not want to hear about idle boxes, only for them to stop.
 
-```sh
-cat > /tmp/idle-stop.sh <<'SH'
-#!/usr/bin/env bash
-# power off once nothing has happened for $IDLE_MIN minutes
-set -euo pipefail
-IDLE_MIN=30
-STAMP=/var/tmp/nub-idle-since
-busy() {
-  who | grep -q .                     && return 0   # an SSH session is attached
-  pgrep -x 'cargo|rustc|nub' >/dev/null && return 0  # a build is running detached
-  awk '{exit ($1 > 0.2) ? 0 : 1}' /proc/loadavg      # 1-min load says real work
-}
-if busy; then rm -f "$STAMP"; exit 0; fi
-now=$(date +%s); [ -f "$STAMP" ] || printf '%s' "$now" > "$STAMP"
-if [ $(( (now - $(cat "$STAMP")) / 60 )) -ge "$IDLE_MIN" ]; then
-  logger -t nub-idle "idle ${IDLE_MIN}m, powering off"
-  systemctl poweroff
-fi
-SH
+| OS | Script | Counts as busy |
+|---|---|---|
+| Linux | [`scripts/vm-idle/linux-startup.sh`](../../../scripts/vm-idle/linux-startup.sh), passed as the box's `startup-script` | an established connection on port 22; a `cargo`, `rustc` or `nub` process; 1-minute load above 0.2 |
+| Windows | [`scripts/vm-idle/windows-startup.ps1`](../../../scripts/vm-idle/windows-startup.ps1), appended to the box's `windows-startup-script-ps1` | an established connection on port 22 or 3389; a running scheduled task in the root folder, which is how a long build runs. CPU is deliberately not a signal, because a Defender spike would keep restarting the idle window |
 
-cat > /tmp/idle-startup.sh <<'SH'
-#!/bin/bash
-install -m 0755 /dev/stdin /usr/local/sbin/nub-idle-stop <<'INNER'
-__IDLE_SCRIPT__
-INNER
-cat > /etc/systemd/system/nub-idle.service <<'UNIT'
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/nub-idle-stop
-UNIT
-cat > /etc/systemd/system/nub-idle.timer <<'UNIT'
-[Timer]
-OnBootSec=10min
-OnUnitActiveSec=5min
-[Install]
-WantedBy=timers.target
-UNIT
-systemctl daemon-reload && systemctl enable --now nub-idle.timer
-SH
-python3 - <<'PY'
-p='/tmp/idle-startup.sh'; s=open(p).read()
-open(p,'w').write(s.replace('__IDLE_SCRIPT__', open('/tmp/idle-stop.sh').read().rstrip()))
-PY
-# then add to the create call:
-#   --metadata-from-file startup-script=/tmp/idle-startup.sh
-```
-
-- **`who` is the load-bearing check**, because an agent driving a long `cargo build` over SSH holds a session the whole time — the timer must not shoot the box out from under it. The `pgrep` arm covers a build detached from any session, and the load arm covers everything else.
-- **Tune `IDLE_MIN` up, never down, for a box you interact with by hand.** Thirty minutes is chosen so a poweroff never lands mid-thought. There is no run-duration backstop behind it any more, so a wedged timer means a box that bills until someone deletes it — check `instances list` when you finish with a box.
-- **Windows has no equivalent here.** Nothing reaps a Windows box for you, so DELETE it explicitly when the job is done and confirm with a full `instances list`.
+- **An open connection is the load-bearing check**, because an agent driving a long job over SSH holds one the whole time, and the timer must not shoot the box out from under it. It is read from the socket table: `who` lists only sessions with a terminal, so it misses `ssh host command`.
+- **Tune the idle time up, never down, for a box you interact with by hand.** Thirty minutes is chosen so a poweroff never lands mid-thought. There is no run-duration backstop behind it any more, so a wedged timer means a box that bills until someone deletes it — check `instances list` when you finish with a box.
+- **A stopped box still bills its disk.** The timer ends the compute charge, not the storage one, so DELETE a box when the job is done and confirm with a full `instances list`.
 
 ## ⛔ LIFECYCLE HYGIENE — DIAGNOSE AT FIRST DETECTION, THEN DELETE
 
@@ -163,8 +121,8 @@ For an isolated/ephemeral box (a clean first-run env, a second Linux box so you 
 
 ```sh
 # Linux — size ≥16 GB if it will COMPILE nub (see the OOM gotcha); e2-standard-4 is the proven size.
-# The last line is NOT optional: it is what stops a forgotten box billing for weeks. Nor is
-# --no-service-account --no-scopes: without it the create needs a permission the key lacks (see Auth).
+# Run from the repo root. The last line is NOT optional: it is what stops a forgotten box billing for
+# weeks. Nor is --no-service-account --no-scopes: without it the create needs a permission the key lacks (see Auth).
 keyward --reason "nub: create the Linux VM nub-linux-tmp" -- \
 gcloud compute instances create nub-linux-tmp \
   --zone us-central1-a --project pullfrog \
@@ -172,7 +130,7 @@ gcloud compute instances create nub-linux-tmp \
   --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud \
   --boot-disk-size 30GB \
   --no-service-account --no-scopes \
-  --metadata-from-file startup-script=/tmp/idle-startup.sh
+  --metadata-from-file startup-script=scripts/vm-idle/linux-startup.sh
 
 # Then give it a throwaway key exactly as above, with NAME=nub-linux-tmp.
 ```
@@ -216,8 +174,10 @@ icacls \$ak /grant 'Administrators:F' /grant 'SYSTEM:F'   # sshd REFUSES a loose
 Restart-Service sshd
 PS
 
-# There is no guest-side idle timer for Windows and no run-duration cap, and the licence makes this
-# the most expensive box shape in the project — so delete it explicitly the moment the job is done.
+# Run from the repo root. NOT optional: this is what powers the box off when it goes idle, and the
+# licence makes this the most expensive box shape in the project. Still delete it when the job is done.
+cat scripts/vm-idle/windows-startup.ps1 >> /tmp/win-ssh.ps1
+
 keyward --reason "nub: create the Windows VM nub-win-tmp" -- \
 gcloud compute instances create nub-win-tmp \
   --zone us-central1-a --project pullfrog \
