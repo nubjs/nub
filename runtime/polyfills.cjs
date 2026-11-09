@@ -121,10 +121,6 @@ const compileBootstrap = process[Symbol.for("nub.compile.bootstrap")];
 const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
   ? compileBootstrap.getBuiltin
   : require;
-const { createRequire } = getBuiltin("node:module");
-const runtimeRequire = typeof compileBootstrap?.createRequire === "function"
-  ? compileBootstrap.createRequire(__filename)
-  : createRequire(__filename);
 const { installUtilRateShims } = require("./util/rate.cjs");
 
 // Install every globalThis/prototype polyfill that doesn't depend on loading the
@@ -329,11 +325,14 @@ function installSyncPolyfills(preloaded) {
       const lo = 0xdc00 + (h & 0x3ff);
       return "\\u" + hi.toString(16).padStart(4, "0") + "\\u" + lo.toString(16).padStart(4, "0");
     };
+    // A lone surrogate is escaped too (EncodeForRegExpEscape), so the result
+    // stays well-formed and a `u`/`v` pattern built from it still parses.
+    const isSurrogate = (cp) => cp >= 0xd800 && cp <= 0xdfff;
     const encode = (ch, cp) =>
       SYNTAX.has(ch)
         ? "\\" + ch
-        : CONTROL[ch] ?? ((OTHER.has(ch) || isWhiteSpace(cp)) ? hexEscape(cp) : ch);
-    RegExp.escape = (s) => {
+        : CONTROL[ch] ?? ((OTHER.has(ch) || isWhiteSpace(cp) || isSurrogate(cp)) ? hexEscape(cp) : ch);
+    defBuiltin(RegExp, "escape", { escape(s) {
       if (typeof s !== "string") throw new TypeError("RegExp.escape argument must be a string");
       const cps = [...s]; // iterate by code point (astral-safe)
       let out = "";
@@ -349,15 +348,15 @@ function installSyncPolyfills(preloaded) {
         }
       }
       return out;
-    };
+    } }.escape);
   }
 
   // Error.isError (~95% fidelity — cross-realm internal-slot unreachable)
   if (typeof Error.isError !== "function") {
-    Error.isError = (value) => {
+    defBuiltin(Error, "isError", { isError(value) {
       if (value == null || typeof value !== "object") return false;
       return value instanceof Error;
-    };
+    } }.isError);
   }
 
   // Promise.try (native on Node 23+). Generic on `this` like the other statics: the
@@ -951,19 +950,29 @@ function installIteratorSurface() {
     });
   }
 
-  // Iterator.concat (Stage 4, native only on Node 26+): each argument must be
-  // iterable, and each one's Symbol.iterator is called LAZILY, only when the
-  // previous source is exhausted.
+  // Iterator.concat (Stage 4, native only on Node 26+): each argument must be an
+  // iterable OBJECT — a string is a TypeError — and its Symbol.iterator method is
+  // read up front but called LAZILY, once the previous source is exhausted. Sources
+  // are stepped like flatMap's inner iterators, with a bare `next()`: `yield*` would
+  // forward the consumer's arguments.
   if (typeof Iterator.concat !== "function") {
     defBuiltin(Iterator, "concat", function concat(...items) {
-      for (const it of items) {
-        if (it === null || it === undefined || typeof it[Symbol.iterator] !== "function") {
-          throw new TypeError("Iterator.concat arguments must be iterable");
-        }
+      const sources = [];
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!isObject(item)) throw new TypeError("Iterator.concat arguments must be iterable objects");
+        const method = item[Symbol.iterator];
+        if (typeof method !== "function") throw new TypeError("Iterator.concat arguments must be iterable objects");
+        ArrayPrototypePush(sources, { item, method });
       }
-      return (function* () {
-        for (const it of items) yield* it;
-      })();
+      // Nothing is open before the first `next()`, so an early `return()` closes nothing.
+      return makeHelper({ iterator: {} }, function* () {
+        for (let i = 0; i < sources.length; i++) {
+          const inner = ReflectApply(sources[i].method, sources[i].item, []);
+          if (!isObject(inner)) throw new TypeError("Symbol.iterator did not return an object");
+          for (const v of asIterable(getIteratorDirect(inner))) yield v;
+        }
+      });
     });
   }
 
@@ -1169,7 +1178,25 @@ function installSetMethods() {
   };
   // -0 is normalized to +0 on the way into a result set, matching SameValueZero.
   const norm = (v) => (v === 0 ? 0 : v);
-  const otherKeys = (rec) => ReflectApply(rec.keys, rec.obj, []);
+  // GetIteratorFromMethod: `keys()` must return an object, which is then stepped
+  // through the `next` read once here. It is never asked for Symbol.iterator, so a
+  // bare `{ next }` iterator is valid and a string result is a TypeError. `return`
+  // is read only when a method stops early, as IteratorClose does.
+  const otherKeys = (rec) => {
+    const iterator = ReflectApply(rec.keys, rec.obj, []);
+    if (iterator === null || (typeof iterator !== "object" && typeof iterator !== "function")) {
+      throw new TypeError("keys() did not return an object");
+    }
+    const next = iterator.next;
+    return {
+      [Symbol.iterator]() { return this; },
+      next() { return ReflectApply(next, iterator, []); },
+      return() {
+        const close = iterator.return;
+        return close === undefined || close === null ? {} : ReflectApply(close, iterator, []);
+      },
+    };
+  };
 
   const ownValues = (set) => {
     const iterator = SetPrototypeValues(set);
@@ -2483,18 +2510,4 @@ function installKeyedPromiseCombinators() {
   if (needAllSettled) install("allSettledKeyed", true);
 }
 
-// Load the two ESM side-effect modules — Web Locks (navigator.locks) and the
-// browser-shape Worker global — synchronously via `require()`. Valid on the fast
-// tier ONLY (Node 22.15+), where require(esm) of these side-effecting ES modules
-// works (verified). The compat tier must NOT call this; it loads them with
-// dynamic `import()` from preload.mjs instead.
-function installEsmPolyfillsSync() {
-  // ── navigator.locks (native on Node 24+, missing on 22.x) ──────────
-  if (typeof globalThis.navigator?.locks === "undefined") {
-    runtimeRequire("./navigator-locks.mjs");
-  }
-  // ── Worker (browser-shape global, not in any Node) ──────────────────
-  runtimeRequire("./worker-polyfill.mjs");
-}
-
-module.exports = { installSyncPolyfills, installEsmPolyfillsSync };
+module.exports = { installSyncPolyfills };

@@ -1682,14 +1682,20 @@ function armChildProcessCompileCacheWrap() {
   __cpWrapArmed = true;
   if (typeof module_._load !== "function") return;
   const origLoad = nameInternalFrame(module_._load, "_load");
-  module_._load = function (request, parent, isMain) {
+  // Assigned through the property so the wrapper stays anonymous: its frame keeps
+  // printing as `Module._load`.
+  const interceptor = (module_._load = function (request, parent, isMain) {
     const exports = ReflectApply(origLoad, this, [request, parent, isMain]);
     if (request === "child_process" || request === "node:child_process") {
-      module_._load = origLoad; // restore: one-shot, no steady-state overhead
+      // One-shot, but only while this is still the installed `_load`. A hook the
+      // program wrapped around it since (mock-require, a test double) delegates
+      // through it, and putting the original back would silently drop that hook.
+      // Left in place, it passes through: the wrap below runs once.
+      if (module_._load === interceptor) module_._load = origLoad;
       try { wrapChildProcessCompileCache(exports); } catch {}
     }
     return exports;
-  };
+  });
 }
 
 // Monkey-patch child_process so node-targeted children the USER spawns with an

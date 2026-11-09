@@ -358,7 +358,8 @@ export function installWorkerPolyfill() {
         this.dispatchEvent(
           new ErrorEventCtor("error", {
             error: err,
-            message: err.message,
+            // A worker may throw any value, `null` and `undefined` included.
+            message: err?.message,
             filename,
             lineno,
             colno,

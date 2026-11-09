@@ -295,7 +295,7 @@ common.installServeEntry(true);
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────
 // The two ESM side-effect polyfills — the browser-shape Worker global
 // (worker-polyfill.mjs) and Web Locks (navigator-locks.mjs) — were previously
-// installed EAGERLY at preload (polyfills.cjs:installEsmPolyfillsSync). That drags
+// installed EAGERLY at preload. That drags
 // ~50 builtins into bootstrap on EVERY startup: worker-polyfill.mjs imports
 // node:worker_threads, which pulls internal/streams/* (readable/writable/duplex/
 // transform/pipeline/…), internal/worker, internal/worker/io,

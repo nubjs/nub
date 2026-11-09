@@ -133,6 +133,18 @@ void test("Worker shim delivers worker errors with their original details", () =
   await worker.terminate();
 `));
 
+void test("Worker shim delivers a thrown null to the error listener", () => child(`
+  delete globalThis.Worker; delete globalThis.ErrorEvent;
+  await import(${moduleUrl("worker-polyfill.mjs")});
+  const worker = new Worker("throw null", { eval: true, execArgv: [] });
+  const error = await new Promise(resolve => worker.addEventListener('error', event => {
+    event.preventDefault(); resolve(event);
+  }, { once: true }));
+  assert.equal(error.error, null);
+  assert.equal(error.message, '');
+  await worker.terminate();
+`));
+
 void test("Worker blob sources install the worker-side globals and reject revoked URLs", () => child(`
   delete globalThis.Worker;
   await import(${moduleUrl("worker-polyfill.mjs")});
@@ -149,6 +161,18 @@ void test("Worker blob sources install the worker-side globals and reject revoke
     assert.throws(() => new Worker(url), TypeError);
     assert.throws(() => new Worker({}), TypeError);
   } finally { await worker.terminate(); }
+`));
+
+void test("child_process compile-cache wrap keeps a Module._load hook installed over it", () => child(`
+  const Module = require('node:module');
+  const cp = process.getBuiltinModule('node:child_process'); const spawn = cp.spawn;
+  require(${JSON.stringify(join(runtime, "preload-common.cjs"))}).restoreCompileCacheEnv();
+  const armed = Module._load; const seen = [];
+  Module._load = function (request, ...rest) { seen.push(request); return Reflect.apply(armed, this, [request, ...rest]); };
+  require('node:child_process');
+  assert.notEqual(cp.spawn, spawn);
+  seen.length = 0; require('node:path');
+  assert.deepEqual(seen, ['node:path']);
 `));
 
 function packageRoot(name: string): string {

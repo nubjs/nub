@@ -73,15 +73,18 @@ shimTest("URLPattern and Float16 adapters delegate to their supplied packages", 
   assert.equal(view.getFloat16, get); assert.equal(Float16Array, F16);
 `);
 
-shimTest("RegExp.escape protects concatenation, punctuation, whitespace and astral text", `
+shimTest("RegExp.escape protects concatenation, punctuation, whitespace, lone surrogates and astral text", `
   remove(RegExp, "escape"); install();
   assert.equal(RegExp.escape("a-b.c\\n"), "\\\\x61\\\\x2db\\\\.c\\\\n");
   assert.equal(RegExp.escape(" \\u2028"), "\\\\x20\\\\u2028");
   assert.equal(RegExp.escape("😀"), "😀");
+  assert.equal(RegExp.escape("\\udc00x\\ud83d"), "\\\\udc00x\\\\ud83d");
   for (const text of ["foo(bar)", "[x]", "1+1", "a\\\\b", "😀"]) {
     assert.equal(new RegExp(\`^(?:\${RegExp.escape(text)})$\`, "u").test(text), true);
   }
   assert.throws(() => RegExp.escape({ toString: () => "x" }), TypeError);
+  const { value, enumerable } = Object.getOwnPropertyDescriptor(RegExp, "escape");
+  assert.deepEqual([enumerable, value.name, value.length], [false, "escape", 1]);
 `);
 
 shimTest("Error.isError rejects tag spoofs and recognizes local subclasses", `
@@ -89,6 +92,8 @@ shimTest("Error.isError rejects tag spoofs and recognizes local subclasses", `
   class Custom extends Error {}
   assert.equal(Error.isError(new Custom()), true);
   for (const value of [null, undefined, 1, "Error", {}, { [Symbol.toStringTag]: "Error" }]) assert.equal(Error.isError(value), false);
+  const { value, enumerable } = Object.getOwnPropertyDescriptor(Error, "isError");
+  assert.deepEqual([enumerable, value.name, value.length], [false, "isError", 1]);
 `);
 
 shimTest("Set operations use set-like inputs, membership and size-aware ordering", `
@@ -104,6 +109,19 @@ shimTest("Set operations use set-like inputs, membership and size-aware ordering
   assert.equal(left.isDisjointFrom(right), false);
   assert.throws(() => left.union({ size: NaN, has() {}, keys() {} }), TypeError);
   assert.throws(() => Set.prototype.union.call({}, right), TypeError);
+`);
+
+shimTest("Set operations step a set-like's keys() result directly and close it on early exit", `
+  remove(Set.prototype, "union", "intersection", "difference", "symmetricDifference", "isSubsetOf", "isSupersetOf", "isDisjointFrom"); install();
+  const log = [];
+  const like = (values) => ({ size: values.length, has: (v) => values.includes(v), keys() {
+    let i = 0;
+    return { next() { return i < values.length ? { done: false, value: values[i++] } : { done: true }; }, return() { log.push("return"); return {}; } };
+  } });
+  assert.deepEqual([...new Set([1, 2]).union(like([2, 3]))], [1, 2, 3]);
+  assert.equal(new Set([1, 2, 3]).isSupersetOf(like([1, 9, 2])), false);
+  assert.deepEqual(log, ["return"]);
+  assert.throws(() => new Set([1, 2]).union({ size: 1, has() {}, keys: () => "ab" }), TypeError);
 `);
 
 shimTest("Array.fromAsync awaits iterable, array-like and mapped values", `
@@ -265,6 +283,18 @@ shimTest("Iterator constructor, core helpers, concat, chunks/windows and disposa
   assert.deepEqual(Iterator.from([1, 2, 3]).chunks(2).toArray(), [[1, 2], [3]]);
   assert.deepEqual(Iterator.from([1, 2, 3]).windows(2).toArray(), [[1, 2], [2, 3]]);
   let closed = 0; ip[Symbol.dispose].call({ return() { closed++; } }); assert.equal(closed, 1);
+`);
+
+shimTest("Iterator.concat rejects primitives, captures each method up front and steps sources with a bare next()", `
+  remove(Iterator, "concat"); install();
+  assert.throws(() => Iterator.concat("ab"), TypeError);
+  const nextArgs = [];
+  const source = { [Symbol.iterator]() { let i = 0; return { next(...args) { nextArgs.push(args.length); return { done: i > 1, value: i++ }; } }; } };
+  const it = Iterator.concat(source);
+  source[Symbol.iterator] = () => assert.fail("method read after the call");
+  assert.equal(Object.prototype.toString.call(it), "[object Iterator Helper]");
+  assert.equal(it.next("x").value, 0); assert.equal(it.next("y").value, 1);
+  assert.deepEqual(nextArgs, [0, 0]);
 `);
 
 shimTest("Symbol.metadata has the standard immutable, hidden descriptor", `

@@ -1,6 +1,6 @@
 // Nub compat-tier hooks module — Node 18.19 through 22.14.
 //
-// On Node 22.15+, runtime/preload.mjs registers its hooks synchronously via
+// On Node 22.15+, runtime/preload.cjs registers its hooks synchronously via
 // `module.registerHooks({ resolve, load })`. That API didn't exist before 22.15,
 // so on 18.19..22.14 the main-thread bootstrap calls
 // `module.register('./preload-async-hooks.mjs', parentURL)` instead, which loads
@@ -165,11 +165,9 @@ async function loadInner(url, context, nextLoad) {
   // `outerHookOwnsFormat`). This tier has no registration counter like the fast
   // tier's and needs none: nothing but such a hook produces the bare form here.
   if (outerHookOwnsFormat(context?.format, ext) && !isDependency(url)) return nextLoad(url, context);
-  // node_modules deps are NEVER transpiled (the byte-parity boundary). This guard is
-  // make-or-break now that TRANSPILE_EXTS includes `.js`/`.mjs`/`.cjs`: without it,
-  // the compat tier would route every dependency `.js` through oxc. (loadTranspile's
-  // own skip-gate handles the project-source no-op case; this keeps deps off the
-  // pipeline entirely.) Mirrors the fast-tier sync hook's `!isDependency` gate.
+  // node_modules deps are NEVER transpiled (the byte-parity boundary): a dependency's
+  // `.ts` falls through to Node, and its error. Mirrors the fast-tier sync hook's
+  // `!isDependency` gate.
   if (TRANSPILE_EXTS.has(ext) && !isDependency(url)) {
     // Module-format + decorator detection inside loadTranspile is a synchronous
     // native call (nub's addon), available on every supported Node — no parser
