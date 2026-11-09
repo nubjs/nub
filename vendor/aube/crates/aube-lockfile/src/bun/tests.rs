@@ -1544,16 +1544,17 @@ fn test_parse_reads_each_local_path_from_the_base_bun_wrote_it_against() {
 }
 
 /// Two manifests spelling one path can mean different archives. bun installs
-/// the root's, else the one from the member whose name sorts first.
+/// a concrete dependency's over a peer's and, within each, the root's, else
+/// the one from the member whose name sorts first.
 #[test]
 fn test_parse_picks_buns_archive_when_manifests_spell_one_path() {
-    let read = |root_deps: &str| {
+    let read = |root_fields: &str| {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let content = format!(
             r#"{{
   "lockfileVersion": 1,
   "workspaces": {{
-    "": {{ "name": "root", "dependencies": {{ {root_deps} }} }},
+    "": {{ "name": "root"{root_fields} }},
     "apps/a": {{ "name": "z", "dependencies": {{ "foo": "file:./foo.tgz" }} }},
     "apps/b": {{ "name": "a", "dependencies": {{ "foo": "file:./foo.tgz" }} }}
   }},
@@ -1570,8 +1571,12 @@ fn test_parse_picks_buns_archive_when_manifests_spell_one_path() {
         LocalSource::Tarball(PathBuf::from("apps/b/foo.tgz"))
     );
     assert_eq!(
-        read(r#""foo": "file:./foo.tgz""#),
+        read(r#", "dependencies": { "foo": "file:./foo.tgz" }"#),
         LocalSource::Tarball(PathBuf::from("./foo.tgz"))
+    );
+    assert_eq!(
+        read(r#", "peerDependencies": { "foo": "file:./foo.tgz" }"#),
+        LocalSource::Tarball(PathBuf::from("apps/b/foo.tgz"))
     );
 }
 
