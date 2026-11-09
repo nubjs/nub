@@ -737,7 +737,8 @@ function annotateError(err, hint) {
     const oldMsg = err.message;
     err.message = oldMsg + hint;
     if (oldStack !== null) {
-      err.stack = oldStack.includes(oldMsg) ? oldStack.replace(oldMsg, err.message) : oldStack + hint;
+      // A function replacement: the message carries paths, and a `$` in one is text.
+      err.stack = oldStack.includes(oldMsg) ? oldStack.replace(oldMsg, () => err.message) : oldStack + hint;
     }
   } catch {
     /* read-only error: leave verbatim */

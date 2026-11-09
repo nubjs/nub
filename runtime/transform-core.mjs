@@ -260,7 +260,7 @@ export function explainMappedExtension(err, url) {
     pnp: `which Nub does not discover under Yarn Plug'n'Play; add "${entry.package}/register" to \`preload\` in nub.jsonc`,
   }[entry.reason] ?? `which has no "./register" export to load it at runtime`;
   const message = `${err.message}\n"${entry.extension}" is mapped in ${entry.tsconfig} by "${entry.package}", ${why}.`;
-  if (typeof err.stack === "string") err.stack = err.stack.replace(err.message, message);
+  if (typeof err.stack === "string") err.stack = err.stack.replace(err.message, () => message);
   err.message = message;
 }
 

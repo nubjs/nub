@@ -13390,6 +13390,45 @@ fn phantom_dependency_miss_points_at_the_hoisted_opt_out() {
     );
 }
 
+/// The hint is spliced into the printed stack in place of the original message.
+/// That message carries the importer's path, and a `$` in it is text, not a
+/// replacement pattern.
+#[test]
+fn phantom_dependency_hint_keeps_a_dollar_sign_in_the_importer_path() {
+    let dir = unique_test_cache().join("a$$b");
+    let mk = |rel: &str, body: &str| {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    mk(
+        "package.json",
+        r#"{"name":"app","version":"1.0.0","type":"module"}"#,
+    );
+    mk(
+        "node_modules/.store/ghost@1.0.0/node_modules/ghost/package.json",
+        r#"{"name":"ghost","version":"1.0.0"}"#,
+    );
+    mk("app.mjs", "import 'ghost';\n");
+
+    let out = Command::new(nub_binary())
+        .arg("app.mjs")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("phantom dependency"), "{stderr}");
+    let line = stderr
+        .lines()
+        .find(|line| line.contains("Cannot find package 'ghost'"))
+        .unwrap_or_else(|| panic!("no module-not-found line: {stderr}"));
+    assert!(
+        line.contains("a$$b"),
+        "the importer path must print verbatim: {line}"
+    );
+}
+
 #[test]
 fn yaml_alias_bomb_is_rejected_before_loader_materialization() {
     // Each anchor doubles the previous collection. The compact input would make
