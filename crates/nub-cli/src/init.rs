@@ -91,7 +91,9 @@ pub(crate) fn run_init(opts: InitOptions) -> Result<i32> {
         true
     };
     // An existing repo always skips `git init` — no prompt for a settled fact.
-    let in_repo = cwd.join(".git").exists();
+    // The repo may enclose the cwd: a scaffold in a monorepo's `packages/app`
+    // that ran `git init` would nest a second repo the parent cannot add.
+    let in_repo = cwd.ancestors().any(|dir| dir.join(".git").exists());
     let git = if opts.no_git || in_repo {
         false
     } else if interactive {

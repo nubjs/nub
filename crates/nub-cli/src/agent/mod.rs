@@ -11,8 +11,8 @@
 //!   slugs ARE the in-doc link hrefs (`/docs/runtime/decorators`, …), so an agent
 //!   can take a markdown link target and plug it straight into `--page`. `--page
 //!   <path>` prints one page's full markdown; `--list`/`--toc` prints just the
-//!   TOC. The whole docs tree (`site/content/docs/**/*.mdx`) is baked in at build
-//!   time, so an agent can pull the current docs with no network.
+//!   TOC. Every published page of the docs tree (`site/content/docs/**/*.mdx`) is
+//!   baked in at build time, so an agent can pull the current docs with no network.
 //! - `skill` — prints the evergreen agent skill (`site/public/skill.md`, also
 //!   served at https://nubjs.com/skill.md) for the agent to install itself.
 //!
@@ -32,7 +32,7 @@ use anyhow::{Result, bail};
 /// stale binary. It deliberately omits volatile detail (exhaustive flag lists).
 const SKILL_MD: &str = include_str!("../../../../site/public/skill.md");
 
-/// The full docs tree, baked in at build time by `build.rs` as a slug-sorted
+/// The published docs tree, baked in at build time by `build.rs` as a slug-sorted
 /// `&[(slug, title, markdown)]` table with each page's YAML frontmatter
 /// stripped. Each slug is the page's exact `/docs/...` URL path — the same href
 /// the docs link to internally — so a markdown link target is a valid `--page`
@@ -350,8 +350,9 @@ mod tests {
     }
 
     /// The build script's slug and frontmatter rules, restated: every `.mdx`
-    /// under the docs root, `index` collapsing to its parent (`runtime/index` ->
-    /// `/docs/runtime`, the root `index` -> `/docs`); the title is the
+    /// under the docs root not marked `unpublished: true`, `index` collapsing to
+    /// its parent (`runtime/index` -> `/docs/runtime`, the root `index` ->
+    /// `/docs`); the title is the
     /// frontmatter `title:` (quotes stripped, the slug when absent) and the body
     /// is everything past the closing fence. Kept in the test rather than shared
     /// with `build.rs` on purpose — a shared helper would make the test agree
@@ -382,10 +383,21 @@ mod tests {
                 let raw = std::fs::read_to_string(&path)
                     .expect("readable page")
                     .replace("\r\n", "\n");
-                let (title, body) = match raw.strip_prefix("---\n").and_then(|rest| {
+                let frontmatter = raw.strip_prefix("---\n").and_then(|rest| {
                     let end = rest.find("\n---")?;
                     Some((&rest[..end], &rest[end + 4..]))
+                });
+                // A page the site withholds from production is withheld here too.
+                if frontmatter.is_some_and(|(front, _)| {
+                    front.lines().any(|l| {
+                        l.trim()
+                            .strip_prefix("unpublished:")
+                            .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+                    })
                 }) {
+                    continue;
+                }
+                let (title, body) = match frontmatter {
                     Some((front, after)) => {
                         let title = front
                             .lines()

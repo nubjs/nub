@@ -4,8 +4,10 @@
 //! This is nub's OWN durable settings home, distinct from the registry/PM tuning
 //! that rides `.npmrc` and the ephemeral `NUB_*` env knobs: a setting lands here
 //! only when no neutral standard field expresses it AND it must survive a `nub
-//! cache clear` (the config-home ladder). Today the sole key is the dlx consent
-//! kill-switch `exec.implicitDlx`. It lives under `exec` because dlx literally
+//! cache clear` (the config-home ladder). Beside the project schema's fields,
+//! which it accepts as personal defaults ([`load_global_config`]), it holds the
+//! dlx consent kill-switch, whose legacy spelling `exec.implicitDlx` this
+//! module reads and writes directly. That spelling sits under `exec` because dlx literally
 //! means *download and exec* — a fetch-then-exec variant of local-binary exec,
 //! the same behavior class, not a separate domain — so `exec` holds config for
 //! both exec and dlx. (Config sections split by behavior class, not the nubx tier
@@ -214,9 +216,9 @@ pub(crate) fn load_global_config() -> Option<crate::project_config::LoadedConfig
     }
 }
 
-/// Read `exec.implicitDlx`. Absent file / absent key / unparseable value / any
-/// unknown sibling key all mean the default (`Prompt`) — config is best-effort and
-/// never fails the gate.
+/// Read `exec.implicitDlx`. An absent or unparseable file, an absent key, or an
+/// unrecognized value means the default (`Prompt`), and unknown sibling keys are
+/// ignored — config is best-effort and never fails the gate.
 pub fn implicit_dlx() -> ImplicitDlx {
     let Some(path) = config_path() else {
         return ImplicitDlx::Prompt;
@@ -421,7 +423,18 @@ pub(crate) fn set_json_path(
 /// defeating, for exactly the files that carry a BOM, the point of the
 /// comment-preserving CST write. It is the byte-level sibling of keeping the
 /// author's CRLF line endings.
+///
+/// A symlink is written THROUGH, not over. The rename replaces whatever sits at
+/// its destination, so a config linked into a dotfiles checkout would come back
+/// a regular file holding the edit while the file the link named — the one the
+/// reader just read, and the one the user versions — kept the old content.
 fn write_preserving_mode(path: &Path, text: &str) -> std::io::Result<()> {
+    let target = if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    };
+    let path = target.as_path();
     let prior = std::fs::metadata(path).ok().map(|m| m.permissions());
     let bytes = if crate::jsonc::starts_with_bom(path) {
         [crate::jsonc::UTF8_BOM, text.as_bytes()].concat()
@@ -701,6 +714,41 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_ne!(mode, 0, "a brand-new file is left at the platform default");
         });
+    }
+
+    /// A config symlinked into a dotfiles checkout keeps its link, and both
+    /// `set` and `delete` land in the file the link names — the one every read
+    /// goes through.
+    #[cfg(unix)]
+    #[test]
+    fn set_and_unset_write_through_a_symlinked_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let dotfile = dir.path().join("dotfiles").join("nub.jsonc");
+        std::fs::create_dir_all(dotfile.parent().unwrap()).unwrap();
+        std::fs::write(&dotfile, "{\n  // mine\n}\n").unwrap();
+        let link = dir.path().join("config").join("nub.jsonc");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&dotfile, &link).unwrap();
+        let is_link = |path: &Path| {
+            std::fs::symlink_metadata(path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        };
+
+        set_json_path(&link, &["nodeCompat"], CstInputValue::Bool(true)).unwrap();
+        assert!(is_link(&link), "set must not replace the link with a file");
+        let body = std::fs::read_to_string(&dotfile).unwrap();
+        assert!(body.contains("\"nodeCompat\": true"), "{body}");
+        assert!(body.contains("// mine"), "{body}");
+
+        assert!(unset_json_path(&link, &["nodeCompat"]).unwrap());
+        assert!(
+            is_link(&link),
+            "delete must not replace the link with a file"
+        );
+        let body = std::fs::read_to_string(&dotfile).unwrap();
+        assert!(!body.contains("nodeCompat"), "{body}");
     }
 
     #[test]

@@ -482,3 +482,31 @@ fn non_tty_without_yes_takes_defaults_and_never_hangs() {
     assert_eq!(out.code, 0, "stderr: {}", out.stderr);
     assert!(dir.join("index.ts").exists(), "defaults to TypeScript");
 }
+
+#[test]
+fn inside_an_enclosing_repo_no_second_repo_is_nested() {
+    // A scaffold in a monorepo's `packages/app` sits inside the monorepo's
+    // repository; a nested `.git` there is one the parent cannot add. A `.git`
+    // entry is all the detection reads, so the enclosing repo needs no git binary.
+    let root = tmpdir("enclosing-repo");
+    std::fs::create_dir(root.join(".git")).unwrap();
+    let app = root.join("packages").join("app");
+    std::fs::create_dir_all(&app).unwrap();
+
+    let out = run_init(&app, &["-y", "--no-install", "--name", "app"]);
+    assert_eq!(out.code, 0, "stderr: {}", out.stderr);
+    assert!(
+        app.join("package.json").is_file(),
+        "scaffolded: {}",
+        out.stdout
+    );
+    assert!(
+        !app.join(".git").exists(),
+        "no repo nested inside the existing one"
+    );
+    assert!(
+        !out.stdout.contains(".git/"),
+        "the summary must not list a repo it did not create: {}",
+        out.stdout
+    );
+}
