@@ -603,6 +603,53 @@ EOF2
 	assert_file_exists node_modules/is-odd/index.js
 }
 
+@test "aube add: a failed install leaves package.json and the lockfile as they were" {
+	cat >package.json <<'EOF2'
+{
+  "name": "test-failed-add",
+  "version": "0.0.0",
+  "dependencies": { "is-odd": "3.0.1" }
+}
+EOF2
+	mkdir broken
+	cat >broken/package.json <<'EOF2'
+{ "name": "broken", "version": "1.0.0", "dependencies": { "does-not-exist-anywhere": "1.0.0" } }
+EOF2
+	run aube install
+	assert_success
+	manifest="$(cat package.json)"
+	lockfile="$(cat aube-lock.yaml)"
+
+	run aube add file:./broken
+	assert_failure
+	assert_output --partial 'restored package.json and lockfile'
+	[ "$(cat package.json)" = "$manifest" ]
+	[ "$(cat aube-lock.yaml)" = "$lockfile" ]
+}
+
+@test "aube add --filter: a failed install restores every selected package.json" {
+	cat >package.json <<'EOF2'
+{ "name": "root", "version": "0.0.0", "private": true }
+EOF2
+	cat >pnpm-workspace.yaml <<'EOF2'
+packages:
+  - packages/*
+EOF2
+	mkdir -p packages/a packages/b broken
+	echo '{ "name": "a", "version": "1.0.0" }' >packages/a/package.json
+	echo '{ "name": "b", "version": "1.0.0" }' >packages/b/package.json
+	cat >broken/package.json <<'EOF2'
+{ "name": "broken", "version": "1.0.0", "dependencies": { "does-not-exist-anywhere": "1.0.0" } }
+EOF2
+	a="$(cat packages/a/package.json)"
+	b="$(cat packages/b/package.json)"
+
+	run aube add --filter './packages/*' file:../../broken
+	assert_failure
+	[ "$(cat packages/a/package.json)" = "$a" ]
+	[ "$(cat packages/b/package.json)" = "$b" ]
+}
+
 @test "aube add --no-save: restores a non-aube lockfile (package-lock.json)" {
 	# Regression: --no-save used to assume aube-lock.yaml regardless of
 	# the project's actual lockfile kind, which silently mutated

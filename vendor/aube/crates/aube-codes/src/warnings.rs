@@ -28,6 +28,7 @@ pub const WARN_AUBE_DEPRECATED_PACKAGE_SUMMARY: &str = "WARN_AUBE_DEPRECATED_PAC
 #[rustfmt::skip] pub const WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT: &str = "WARN_AUBE_SUSPICIOUS_LIFECYCLE_SCRIPT";
 #[rustfmt::skip] pub const WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE: &str = "WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE";
 pub const WARN_AUBE_MISSING_INTEGRITY: &str = "WARN_AUBE_MISSING_INTEGRITY";
+pub const WARN_AUBE_ADD_ROLLBACK_FAILED: &str = "WARN_AUBE_ADD_ROLLBACK_FAILED";
 pub const WARN_AUBE_CACHE_WRITE_FAILED: &str = "WARN_AUBE_CACHE_WRITE_FAILED";
 pub const WARN_AUBE_CLONE_STRATEGY_FALLBACK: &str = "WARN_AUBE_CLONE_STRATEGY_FALLBACK";
 pub const WARN_AUBE_LTHASH_MISMATCH: &str = "WARN_AUBE_LTHASH_MISMATCH";
@@ -277,6 +278,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_WINDOWS_JOB_OBJECT_UNAVAILABLE,
         category: category::INSTALL_LIFECYCLE,
         description: "Windows: couldn't create or assign a kill-on-job-close job object for a lifecycle script. The script still runs, but on abort/failure its grandchildren (node-gyp / MSBuild / node) may be orphaned. Usually caused by a restrictive parent job or enterprise policy.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_ADD_ROLLBACK_FAILED,
+        category: category::INSTALL_LIFECYCLE,
+        description: "An `add` failed and a project file it had changed could not be put back.",
         exit_code: None,
     },
     CodeMeta {
