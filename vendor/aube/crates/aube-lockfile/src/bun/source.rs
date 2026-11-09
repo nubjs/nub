@@ -192,28 +192,40 @@ pub(super) fn rebase_member_tarball(
     }
 }
 
-/// The member a hoisted tarball's path is relative to: the first workspace
-/// spelling it this way. The root sorts first (its key is empty) and its
-/// spelling is already project-relative.
+/// The member a hoisted tarball's path is relative to. Several manifests can
+/// spell the same path for different archives, and bun then installs one of
+/// them for all: the root's, else the member whose package name sorts first
+/// (measured on bun 1.2, 1.3 and 1.4; workspace path and declaration order do
+/// not matter). The root's spelling is already project-relative.
 fn hoisted_tarball_member<'a>(
     name: &str,
     path: &Path,
     workspaces: &'a BTreeMap<String, RawBunWorkspace>,
 ) -> Option<&'a str> {
     let spec = format!("file:{}", path.to_string_lossy());
+    let declares = |ws: &RawBunWorkspace| {
+        [
+            &ws.dependencies,
+            &ws.dev_dependencies,
+            &ws.optional_dependencies,
+        ]
+        .iter()
+        .any(|deps| deps.get(name) == Some(&spec))
+            || ws
+                .extra
+                .get("peerDependencies")
+                .and_then(|peers| peers.get(name))
+                .and_then(serde_json::Value::as_str)
+                == Some(spec.as_str())
+    };
+    if workspaces.get("").is_some_and(declares) {
+        return None;
+    }
     workspaces
         .iter()
-        .find(|(_, ws)| {
-            [
-                &ws.dependencies,
-                &ws.dev_dependencies,
-                &ws.optional_dependencies,
-            ]
-            .iter()
-            .any(|deps| deps.get(name) == Some(&spec))
-        })
+        .filter(|(_, ws)| declares(ws))
+        .min_by_key(|(_, ws)| ws.extra.get("name").and_then(serde_json::Value::as_str))
         .map(|(ws_path, _)| ws_path.as_str())
-        .filter(|ws_path| !ws_path.is_empty())
 }
 
 pub(super) fn split_committish(spec: &str) -> (String, Option<String>) {

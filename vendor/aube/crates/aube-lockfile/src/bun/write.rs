@@ -931,6 +931,7 @@ fn bun_local_ident_tail(
                 &m.dependencies,
                 &m.dev_dependencies,
                 &m.optional_dependencies,
+                &m.peer_dependencies,
             ]
             .iter()
             .find_map(|deps| deps.get(&pkg.name))?;
