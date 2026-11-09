@@ -41,8 +41,9 @@
 //! - **R2 — verify the loaded code against a baked-in hash (integrity backstop).**
 //!   `build.rs` bakes the BLAKE3 digest of the directly-loaded entrypoints
 //!   (`preload.mjs`, `preload.cjs`, `gc-startup.cjs`, `watch-env-guard.cjs`,
-//!   `compile-preamble.mjs`, and `addons/nub-native.node`) into the binary. On
-//!   the load path (once per process, inside the OnceLock init, ~6 ms for the ~9 MB
+//!   `threadpool-snapshot.cjs`, `compile-preamble.mjs`, and
+//!   `addons/nub-native.node`) into the binary. On the load path (once per
+//!   process, inside the OnceLock init, ~6 ms for the ~9 MB
 //!   addon on aarch64 — BLAKE3 over software SHA-256's ~28 ms there) the EXTRACTED
 //!   entrypoints are re-hashed against those consts. On mismatch we
 //!   SELF-HEAL: re-extract the trusted in-binary blob over the dir and re-verify —
@@ -701,11 +702,11 @@ fn walk_windows_base_under(
     if crate::windows_security::directory_is_stable(base, true, false)? {
         return Ok(());
     }
-    // The base is NOT necessarily created by this walk: node discovery writes
-    // `node-discovery.json` there through a plain `create_dir_all` long before
-    // spawn reaches `ensure_runtime`, so it usually already exists carrying its
-    // parent's inherited ACEs. Harden the directory instead of declining it;
-    // ownership is checked there, so a foreign-owned base is still refused. Only on
+    // The base is NOT necessarily created by this walk: the Node release index
+    // and the Node version store create it through a plain `create_dir_all`, so
+    // it may already exist carrying its parent's inherited ACEs. Harden the
+    // directory instead of declining it; ownership is checked there, so a
+    // foreign-owned base is still refused. Only on
     // the creating walk — `is_safe_dir` validates an existing target and must
     // never mutate.
     let unsafe_dir = "the cache directory is owned or writable by another account";

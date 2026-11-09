@@ -32,10 +32,11 @@
 //!   for every internal compiled afterwards. Never enters argv or `NODE_OPTIONS`;
 //!   [`runtime_v8_flags_for`] serves the spawn sites, which hand the set to the
 //!   preload through `super::flags::RUNTIME_V8_FLAGS_ENV`.
-//! - **`StorageFile`** — webstorage-specific: the global is native (or unflagged)
-//!   but still needs a runtime-computed `--localstorage-file=<path>` to
-//!   materialize. The path is workspace-keyed, so it lives in `spawn.rs`; this
-//!   row records the *floor* and *intent*, not the path.
+//! - **`StorageFile`** — webstorage-specific: the global is native (unflagged),
+//!   and `localStorage` materializes only with a `--localstorage-file=<path>`.
+//!   Nub never synthesizes that path — persistence is the user's opt-in, and a
+//!   user-supplied one is forwarded verbatim — so this row records the *floor*
+//!   and *intent*, and nothing is injected.
 //! - **`Polyfill { runtime_file, global }`** — no Node version ships it (or the
 //!   floor doesn't), so nub installs a JS polyfill from `runtime/<file>`, gated
 //!   at runtime by a `typeof <global>` feature-detect (`"key" in owner` for an
@@ -117,8 +118,8 @@ pub enum Mitigation {
     /// isolate-creation state) — see the `import-defer` row for the proof shape.
     /// Never enters argv or `NODE_OPTIONS`. See [`runtime_v8_flags_for`].
     RuntimeV8Flag(&'static str),
-    /// Webstorage: the global is native/unflagged but still needs a
-    /// runtime-computed `--localstorage-file=<path>` (handled in spawn.rs).
+    /// Webstorage: the global is native/unflagged; `localStorage` still needs a
+    /// user-supplied `--localstorage-file=<path>`, which nub never synthesizes.
     StorageFile,
     /// nub installs a JS polyfill from `runtime/<runtime_file>`, gated at runtime
     /// by a `typeof <global>` feature-detect. The matrix records intent + floor;
@@ -585,24 +586,23 @@ static FEATURES: &[Feature] = &[
     // below it both are "bad option" (compat tier 18.19–22.3 runs without
     // webstorage — no band). The experimental flag was unflagged (defaults on) in
     // Node 25.0.0 (PR #57666). So:
-    //   • [22.4.0, 25.0.0) → Unflag("--experimental-webstorage") + a storage file.
+    //   • [22.4.0, 25.0.0) → Unflag("--experimental-webstorage").
     //   • [25.0.0, ∞)      → StorageFile only (global is native; the
     //                        `--localstorage-file` is STILL required for the global
     //                        to materialize — without it Node leaves localStorage
     //                        undefined and throws on access).
-    // The `--localstorage-file=<path>` itself is workspace-keyed and runtime-
-    // computed, so it lives in spawn.rs (`compute_localstorage_path`); this row
-    // records the floor + the per-band flag intent. The webstorage predicates in
-    // `super::flags` are derived from these two bands.
+    // Nub never synthesizes `--localstorage-file` on either band: persistence is
+    // the user's opt-in, forwarded verbatim. This row records the floor + the
+    // per-band flag intent. The webstorage predicates in `super::flags` are derived
+    // from these two bands.
     Feature {
         name: "webstorage",
         mitigations: &[
             (
                 band((22, 4, 0), Some((25, 0, 0))),
-                // + StorageFile: the --localstorage-file is injected on this band
-                // too (the file is required on the whole >=22.4 range — see
-                // super::flags::webstorage_supported). The single-valued
-                // Mitigation enum records the flag intent; the file rides along.
+                // A user-supplied `--localstorage-file` matters on this band too
+                // (see super::flags::webstorage_supported); the single-valued
+                // Mitigation enum records only the flag nub injects.
                 Mitigation::Unflag("--experimental-webstorage"),
             ),
             (band((25, 0, 0), None), Mitigation::StorageFile),
@@ -1301,11 +1301,14 @@ pub(crate) fn runtime_v8_flags_for(node_version: &NodeVersion) -> Vec<&'static s
 /// The lowest Node version at which `flag` EXISTS — the minimum `lo` across every
 /// `Unflag(flag)` band in the matrix — or `None` if no band unflags `flag`.
 ///
-/// Once Node ships an experimental flag it keeps ACCEPTING it (as a default-true
-/// no-op bool) at every higher version, so the band where Node REJECTS the flag is
-/// exactly `[0, floor)`. [`super::flags::strip_unsupported_node_options`] uses this
-/// to snip a below-floor gated flag out of an inherited NODE_OPTIONS. Derived from
-/// the same matrix the inject path reads — no parallel floor table.
+/// Once Node ships an experimental flag it usually keeps ACCEPTING it (as a
+/// default-true no-op bool) at every higher version, so Node REJECTS the flag on
+/// `[0, floor)`. Not only there: a release line that never got the flag (21.x for
+/// eventsource and detect-module) and a later removal (async-context-frame at 24.0)
+/// reject it above the floor too, and this floor does not describe those.
+/// [`super::flags::strip_unsupported_node_options`] uses this to snip a below-floor
+/// gated flag out of an inherited NODE_OPTIONS. Derived from the same matrix the
+/// inject path reads — no parallel floor table.
 pub(crate) fn unflag_floor(flag: &str) -> Option<NodeVersion> {
     FEATURES
         .iter()

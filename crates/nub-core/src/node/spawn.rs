@@ -139,9 +139,8 @@ pub fn spawn_with_eagain_retry(cmd: &mut Command) -> std::io::Result<std::proces
         match cmd.spawn() {
             Ok(child) => return Ok(child),
             Err(e) => {
-                let transient = matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::OutOfMemory)
-                    || e.raw_os_error() == Some(libc_eagain())
-                    || e.raw_os_error() == Some(libc_enomem());
+                // std decodes EAGAIN as `WouldBlock` and ENOMEM as `OutOfMemory`.
+                let transient = matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::OutOfMemory);
                 if !transient || attempt >= MAX_RETRIES {
                     return Err(e);
                 }
@@ -156,33 +155,16 @@ pub fn spawn_with_eagain_retry(cmd: &mut Command) -> std::io::Result<std::proces
     }
 }
 
-#[cfg(unix)]
-fn libc_eagain() -> i32 {
-    libc::EAGAIN
-}
-#[cfg(unix)]
-fn libc_enomem() -> i32 {
-    libc::ENOMEM
-}
-#[cfg(not(unix))]
-fn libc_eagain() -> i32 {
-    -1
-}
-#[cfg(not(unix))]
-fn libc_enomem() -> i32 {
-    -1
-}
-
 /// Terminating-signal forwarding to the current child, registered once per
 /// process. Nub catches SIGINT (Ctrl-C), SIGTERM (docker stop / systemd / CI
 /// cancel) and SIGHUP (terminal hangup) and re-sends the SAME signal to the Node
 /// child, so the child runs its own handler and exits with the matching code —
 /// instead of being reparented to PID 1 and running forever, which is what
-/// happened when only SIGINT was handled. A single background thread reads the
-/// current child's pid from a global atomic that each spawn updates, so
-/// sequential / re-entrant spawns forward to the right child, and a stray signal
-/// after a child exits (pid cleared to 0) is a no-op rather than a kill of a
-/// reused pid.
+/// happened when only SIGINT was handled. A single background thread signals
+/// every target in a global set that each spawn adds to and removes from on exit,
+/// so sequential / concurrent spawns forward to the right children, and a stray
+/// signal after the last child exits (empty set) is a no-op rather than a kill of
+/// a reused pid.
 ///
 /// The diagnostic signals SIGUSR1, SIGUSR2 and SIGQUIT are forwarded too, for a
 /// different reason than the terminating ones. Node assigns them meaning at the
@@ -376,8 +358,8 @@ pub fn untrack_child(pid: u32) {
 /// straight to it — so we also suppress nub's now-redundant SIGINT forward (see
 /// [`ctrl_c::set_suppress_sigint_forward`]) to keep #26's exactly-once.
 ///
-/// Only meaningful when stdin is a real TTY and stdio is inherited — callers gate
-/// on `foreground_handoff_applicable`. Returns `None` (no-op) off a TTY, off Unix,
+/// Only meaningful when stdin is a real TTY and stdio is inherited, which is how
+/// every caller spawns; the TTY half is checked here. Returns `None` (no-op) off a TTY, off Unix,
 /// or if the handoff syscalls fail, in which case behavior is exactly the prior
 /// own-group-without-tcsetpgrp path (correct for non-interactive children).
 #[cfg(unix)]
@@ -526,9 +508,7 @@ const PDEATH_DISARM: u8 = b'D';
 /// On the normal path the guard writes [`PDEATH_DISARM`] before closing, and
 /// the watcher exits without signaling anyone. The guard then reaps the
 /// watcher, so nub processes that spawn many sequential children (workspace
-/// `-r` runs) don't accumulate zombies. (`nub watch` is NOT covered: its
-/// spawn path predates `group_on_spawn` entirely, so it has neither pdeathsig
-/// nor this reaper — a pre-existing gap on both platforms.)
+/// `-r` runs) don't accumulate zombies.
 ///
 /// Returns `None` off macOS (Linux is already covered kernel-side; a second
 /// mechanism would be redundant) and on any setup failure — the backstop
@@ -924,9 +904,13 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         super::discovery::mark_node_launch(&mut cmd, config.node.path.as_std_path());
     }
 
-    // Permission model detection and auto-grant.
-    let has_permission = config.user_args.iter().any(|a| is_permission_flag(a));
-    let has_allow_addons = config.user_args.iter().any(|a| a == "--allow-addons");
+    // Every scan for the user's Node flags reads only Node's own options: an argument
+    // after the entry (`nub app.js --permission`) is the program's. Two readers keep
+    // the full argv on purpose: `force_async_tier_env` looks for a `tsx` ENTRY, and
+    // `gc::eligible` inspects where the entry sits.
+    let node_args = super::argv::leading_options(config.user_args);
+    let has_permission = node_args.iter().any(|a| is_permission_flag(a));
+    let has_allow_addons = node_args.iter().any(|a| a == "--allow-addons");
 
     if has_permission && !has_allow_addons && !config.compat_mode {
         anyhow::bail!(
@@ -935,16 +919,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
              \x20\x20Add --allow-addons to your Node permission flags,\n\
              \x20\x20or use --node to run without Nub's augmentation."
         );
-    }
-
-    if has_permission && !config.compat_mode {
-        // Auto-grant read access to Nub's install directory.
-        let install_dir = config
-            .nub_binary
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(config.nub_binary);
-        cmd.arg(format!("--allow-fs-read={}", install_dir.display()));
     }
 
     // Removes the compile-cache sentinel (R8) on drop, after the child exits.
@@ -957,6 +931,24 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // substring, which would false-positive on a user's own `--import` of an
     // unrelated file named preload.mjs and silently disable augmentation (A26).
     let preload = find_preload(config.nub_binary);
+
+    if has_permission && !config.compat_mode {
+        // Auto-grant read access to Nub's install directory, and to the runtime
+        // directory the preload and addon load from. The runtime is not under the
+        // install directory: a shipped build extracts it to the cache, and a dev build
+        // reads the in-repo `runtime/`. Derived from the same `preload` the
+        // `--require`/`--import` token is built from, so the two cannot disagree.
+        let install_dir = config
+            .nub_binary
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(config.nub_binary);
+        cmd.arg(format!("--allow-fs-read={}", install_dir.display()));
+        if let Some(runtime_dir) = preload.as_deref().and_then(|p| Path::new(p).parent()) {
+            cmd.arg(format!("--allow-fs-read={}", runtime_dir.display()));
+        }
+    }
+
     // The injected form is tier-specific: `--require <path>` (fast tier, CJS
     // preload.cjs) or `--import <url>` (compat tier, ESM preload.mjs). Re-entrancy
     // is detected by finding that exact `--flag=value` token in the child's
@@ -1016,7 +1008,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         );
         flags::compute_inject_flags(
             config.node.version.clone(),
-            config.user_args,
+            node_args,
             node_options.as_deref(),
             config.show_warnings,
             accepted.as_ref(),
@@ -1126,7 +1118,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         if flags::test_coverage_exclude_supported(&config.node.version) {
             for glob in coverage_exclude_globs(
                 &config.node.version,
-                config.user_args,
+                node_args,
                 node_options.as_deref(),
                 preload.as_deref(),
             ) {
@@ -1167,7 +1159,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // NODE_DISABLE_COMPILE_CACHE=1 so descendants boot cache-off).
         let node_v8_coverage = env::var("NODE_V8_COVERAGE").ok();
         let coverage = coverage_active_for_cache(
-            config.user_args,
+            node_args,
             node_options.as_deref(),
             node_v8_coverage.as_deref(),
         );
@@ -1294,7 +1286,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             .map(str::to_string);
         let mut node_opts_parts: Vec<String> = flags::node_options_safe_inject_flags(
             &config.node.version,
-            config.user_args,
+            node_args,
             node_options.as_deref(),
         )
         .into_iter()
@@ -1475,7 +1467,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // nub never re-enables over a user negation).
         if flags::should_inject_experimental_webstorage(
             &config.node.version,
-            config.user_args,
+            node_args,
             node_options.as_deref(),
         ) {
             cmd.arg("--experimental-webstorage");
@@ -1497,7 +1489,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // (brand-boundary-permitted plumbing).
         if flags::should_neutralize_experimental_webstorage_localstorage(
             &config.node.version,
-            config.user_args,
+            node_args,
             node_options.as_deref(),
         ) {
             cmd.env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
@@ -1534,7 +1526,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         let argv_only = flags::argv_inject_flags(
             Some(config.node.path.as_std_path()),
             &config.node.version,
-            config.user_args,
+            node_args,
         );
         // Tell the preload which flags to hide from `process.execArgv`; see
         // `flags::ARGV_ONLY_FLAGS_ENV` for why leaving them visible breaks real builds.
@@ -1549,7 +1541,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         let runtime_v8 = flags::runtime_inject_flags(
             Some(config.node.path.as_std_path()),
             &config.node.version,
-            config.user_args,
+            node_args,
         );
         if !runtime_v8.is_empty() {
             cmd.env(
@@ -1639,7 +1631,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         .with_context(|| format!("failed to spawn {}", config.node.path))?;
 
     // Forward terminating/diagnostic signals to the child's process GROUP.
-    // Registered once; the current target lives in a global atomic (see `ctrl_c`).
+    // Registered once; the live targets are held in a global set (see `ctrl_c`).
     // The child is its own group leader (see `group_on_spawn` above), so the
     // negative target signals the child and its descendants exactly once.
     // (No-op off Unix.)
@@ -2211,8 +2203,9 @@ fn shim_dir_utf8(path: PathBuf) -> Result<Utf8PathBuf> {
 /// Compute the augmentation environment variables (NODE_OPTIONS + PATH)
 /// that script runners need to set on child shells so that `node` invocations
 /// inside scripts get nub's transpilation, polyfills, and flag injection — the
-/// same augmentation `nub <file>` applies via direct args. (Web Storage is
-/// opt-in and never injected here; see `spawn_node`.)
+/// same augmentation `nub <file>` applies via direct args. (Web Storage's flag
+/// rides only the argv of each `node` that re-enters through the shim, never this
+/// inherited environment; see `spawn_node`.)
 ///
 /// Returns `None` if already re-entrant (parent nub already set up augmentation)
 /// or if compat mode is active.
@@ -2456,15 +2449,6 @@ impl AugmentationEnv {
         }
     }
 
-    /// The PATH-shim's `node` entry (a symlink/hardlink → nub), suitable as the
-    /// `$NODE` value that npm/pnpm set so userland `$NODE child.js` (and
-    /// `spawn(process.env.NODE, …)`) invoke "the same Node this script runs under."
-    /// Pointing `$NODE` here — rather than the raw binary — makes an absolute-path
-    /// `$NODE` re-enter nub and stay augmented, identical to a bare `node` (which
-    /// reaches the shim via PATH). The shim is a faithful node front-end
-    /// (`$NODE --version` prints Node's version; `process.execPath` still reports the
-    /// real binary), so introspection is preserved. `None` when no shim was set up
-    /// (then callers fall back to the real binary for plain npm/pnpm parity).
     /// Apply the localStorage-neutralize signal to a child command's environment
     /// when this augmentation calls for it (sets the internal
     /// `__NUB_NEUTRALIZE_LOCALSTORAGE` env var the preload reads, then deletes). A
@@ -2478,6 +2462,15 @@ impl AugmentationEnv {
         }
     }
 
+    /// The PATH-shim's `node` entry (a symlink/hardlink → nub), suitable as the
+    /// `$NODE` value that npm/pnpm set so userland `$NODE child.js` (and
+    /// `spawn(process.env.NODE, …)`) invoke "the same Node this script runs under."
+    /// Pointing `$NODE` here — rather than the raw binary — makes an absolute-path
+    /// `$NODE` re-enter nub and stay augmented, identical to a bare `node` (which
+    /// reaches the shim via PATH). The shim is a faithful node front-end
+    /// (`$NODE --version` prints Node's version; `process.execPath` still reports the
+    /// real binary), so introspection is preserved. `None` when no shim was set up
+    /// (then callers fall back to the real binary for plain npm/pnpm parity).
     pub fn node_shim_exe(&self) -> Option<OsString> {
         self.shim_dir.as_deref().map(|dir| {
             #[cfg(windows)]
@@ -3157,7 +3150,8 @@ fn coverage_active(user_args: &[String], node_options: Option<&str>) -> bool {
         .any(|a| a == "--experimental-test-coverage");
     let in_opts = node_options
         .map(|o| {
-            o.split_whitespace()
+            split_node_options(o)
+                .iter()
                 .any(|t| t == "--experimental-test-coverage")
         })
         .unwrap_or(false);
@@ -3589,15 +3583,6 @@ fn is_nub_runtime_dir(dir: &str) -> bool {
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
-/// Split a NODE_OPTIONS-shaped string into individual flag tokens — the inverse of
-/// [`node_options_token`], mirroring Node's own `ParseNodeOptionsEnvVar`
-/// (.repos/node/src/node_options.cc): split on whitespace EXCEPT inside a
-/// double-quoted run, where a backslash escapes the next character.
-///
-/// Needed because callers that accept a raw NODE_OPTIONS string from OUTSIDE
-/// nub.jsonc (npm's `node-options` npmrc field) must hand `compute_augmentation_env`
-/// one element PER FLAG: it re-quotes every element individually, so pushing
-/// `--a --b` as a single element would emit the one broken token `"--a --b"`.
 /// Preload entries carried by an INHERITED `NODE_OPTIONS`, split out so nub can fold
 /// them into its own chainers instead of letting them ride as extra tokens.
 ///
@@ -3741,7 +3726,14 @@ fn reentrant_node_options(existing: Option<&str>, runtime_options: &[String]) ->
 }
 
 /// `NODE_OPTIONS` read the way Node's `ParseNodeOptionsEnvVar` reads it: only a space
-/// separates tokens, so a tab or newline stays inside one.
+/// separates tokens, so a tab or newline stays inside one. The inverse of
+/// [`node_options_token`]: inside a double-quoted run a backslash escapes the next
+/// character.
+///
+/// Needed because callers that accept a raw NODE_OPTIONS string from OUTSIDE
+/// nub.jsonc (npm's `node-options` npmrc field) must hand `compute_augmentation_env`
+/// one element PER FLAG: it re-quotes every element individually, so pushing
+/// `--a --b` as a single element would emit the one broken token `"--a --b"`.
 pub fn split_node_options(value: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut in_string = false;
@@ -6487,6 +6479,12 @@ mod tests {
         assert!(coverage_active_for_cache(
             &plain_argv,
             Some("--experimental-test-coverage"),
+            None
+        ));
+        // Node unquotes a NODE_OPTIONS token, so a quoted flag engages coverage too.
+        assert!(coverage_active_for_cache(
+            &plain_argv,
+            Some(r#"--no-warnings "--experimental-test-coverage""#),
             None
         ));
         // (3) Coverage via NODE_V8_COVERAGE env (no flag anywhere) — the channel

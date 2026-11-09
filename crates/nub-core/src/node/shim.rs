@@ -2,8 +2,8 @@
 //!
 //! A fresh machine with no Node can use nub as its default node runner. This
 //! module installs a `node` (Unix) / `node.exe` (Windows) hardlink to nub in a
-//! DEDICATED dir (`~/.nub/node-shim`, or `$XDG_DATA_HOME/nub/node-shim` on a
-//! fresh unix install — see `pm::shim::resolve_shim_dir`) and wires it onto PATH — so a
+//! DEDICATED dir ([`node_shim_dir`], `<data dir>/nub/node-shim` — see
+//! `pm::shim::resolve_shim_dir`) and wires it onto PATH — so a
 //! bare-shell `node foo.js` resolves through nub (version resolution + the
 //! no-pin/no-node auto-provision of #294), NOT to a missing binary.
 //!
@@ -62,7 +62,7 @@ const NODE_SHIM_DIR_MARKER: &str = "nub/node-shim";
 /// The name the shim intercepts.
 const NODE: &str = "node";
 
-/// The `~/.nub/<leaf>` basename for this shim family.
+/// The `<data dir>/nub/<leaf>` basename for this shim family.
 const NODE_SHIM_LEAF: &str = "node-shim";
 
 /// [`NODE_SHIM_LEAF`] for callers outside this crate (the CLI's migration path).
@@ -82,7 +82,7 @@ pub fn remove_node_path_block() -> Result<Vec<PathBuf>> {
 }
 
 /// `$XDG_DATA_HOME/nub/node-shim`, else `%LOCALAPPDATA%\nub\node-shim` on Windows,
-/// else `~/.local/share/node-shim`'s parent — see
+/// else `~/.local/share/nub/node-shim` — see
 /// [`crate::pm::shim::resolve_shim_dir`] for the one rule both families share.
 ///
 /// Data, never cache: a shim the user opted into must not vanish when a cache is
@@ -155,12 +155,10 @@ pub(crate) fn is_node_shim_dir_shape(dir: &Path) -> bool {
             .is_some_and(|n| n == "nub" || n == ".nub")
 }
 
-/// `nub node shim`: hardlink the running nub as `node` in [`node_shim_dir`],
-/// write the marked PATH block into the shell profiles, and return the entry +
-/// profile outcome for the CLI to report. Idempotent — re-running re-links,
-/// which is how the shim is refreshed after `nub upgrade` (same story as the PM
-/// shims). PATH wiring is skipped on Windows (profile editing isn't automated
-/// there yet — the CLI prints the dir to add).
+/// `nub node shim`: hardlink the running nub as `node` in [`node_shim_dir`] and
+/// return the entry for the CLI to report; [`add_node_path_block`] wires PATH
+/// separately. Idempotent — re-running re-links, which is how the shim is
+/// refreshed after `nub upgrade` (same story as the PM shims).
 pub fn install_node_shim(nub_binary: &Path) -> Result<InstalledShim> {
     let dir = node_shim_dir()?;
     let mut report = shim::install_named_shims(&dir, &[NODE], nub_binary)?;

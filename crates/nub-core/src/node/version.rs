@@ -234,9 +234,12 @@ impl VersionPin {
 /// grammar Cargo's `semver` crate parses:
 ///   - hyphen ranges: `20.0.0 - 22.1.0` → `>=20.0.0, <=22.1.0`;
 ///   - space-separated AND-comparators: `>=20 <23` → `>=20, <23`;
-///   - operator-space form (legal node-semver): `>= 20` → `>=20`.
+///   - operator-space form (legal node-semver): `>= 20` → `>=20`;
+///   - bare versions: `20.11` → `=20.11`. The `semver` crate reads an
+///     operator-less version as a caret requirement, node-semver as an X-range,
+///     so `20.11.0 || 22` would otherwise admit 20.18.0.
 ///
-/// Single comparators, bare versions, and already-comma'd specs pass through
+/// Operator-prefixed comparators and already-comma'd specs pass through
 /// untouched. A dangling trailing operator is kept verbatim so the parse fails
 /// (better an honest error than a silently dropped comparator).
 fn normalize_node_range(spec: &str) -> String {
@@ -253,6 +256,8 @@ fn normalize_node_range(spec: &str) -> String {
             pending_op = Some(token);
         } else if let Some(op) = pending_op.take() {
             comparators.push(format!("{op}{token}"));
+        } else if token.starts_with(|c: char| c.is_ascii_digit()) {
+            comparators.push(format!("={token}"));
         } else {
             comparators.push(token.to_string());
         }
@@ -460,6 +465,28 @@ mod tests {
         // One bad alternative poisons the whole spec — never half-honor a range.
         assert!(VersionPin::parse_allowing_ranges(">=20 || nonsense").is_err());
         assert!(VersionPin::parse_allowing_ranges(">=").is_err());
+    }
+
+    #[test]
+    fn bare_versions_inside_a_range_are_x_ranges_not_carets() {
+        let p = |s: &str| VersionPin::parse_allowing_ranges(s).unwrap();
+        let exact_or = p("20.11.0 || 22.1.0");
+        assert!(NodeVersion::new(20, 11, 0).satisfies(&exact_or));
+        assert!(NodeVersion::new(22, 1, 0).satisfies(&exact_or));
+        assert!(
+            !NodeVersion::new(20, 18, 0).satisfies(&exact_or),
+            "node-semver reads a bare full version as exact"
+        );
+        let partial_or = p("20.11 || 22");
+        assert!(NodeVersion::new(20, 11, 5).satisfies(&partial_or));
+        assert!(NodeVersion::new(22, 5, 0).satisfies(&partial_or));
+        assert!(
+            !NodeVersion::new(20, 12, 0).satisfies(&partial_or),
+            "node-semver reads `20.11` as 20.11.x"
+        );
+        let wild = p("20.11.x || 22");
+        assert!(NodeVersion::new(20, 11, 5).satisfies(&wild));
+        assert!(!NodeVersion::new(20, 12, 0).satisfies(&wild));
     }
 
     #[test]
