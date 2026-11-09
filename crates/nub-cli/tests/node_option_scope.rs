@@ -84,11 +84,15 @@ fn the_permission_model_starts_with_nubs_runtime_readable() {
     )
     .unwrap();
     let grant = format!("--allow-fs-read={}", dir.display());
+    let mut args = vec!["--permission", "--allow-addons", grant.as_str()];
+    // Before 22.15 Nub's hooks run on a loader worker thread, which the
+    // permission model gates on its own flag. That grant is the user's to make.
+    if version < (22, 15) {
+        args.push("--allow-worker");
+    }
+    args.extend(["app.js", "x"]);
 
-    let (stdout, stderr, code) = run_nub(
-        &dir,
-        &["--permission", "--allow-addons", &grant, "app.js", "x"],
-    );
+    let (stdout, stderr, code) = run_nub(&dir, &args);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout.trim(), r#"["x"]"#, "stderr: {stderr}");
 }
