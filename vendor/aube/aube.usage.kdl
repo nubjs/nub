@@ -367,6 +367,7 @@ Snapshots `package.json` and the lockfile, links the named packages into `node_m
 Handy for one-off experiments and for scripts that install a tool transiently. Mirrors `pnpm add --no-save`. Conflicts with `-g`/`--global`, which has to persist the install to its global manifest.
 """#
     }
+    flag --no-save-types help="Inverse of `--save-types`, for a project with `saveTypes` turned on." overrides=--save-types
     flag --no-save-workspace-protocol help="Inverse of `--save-workspace-protocol`." overrides=--save-workspace-protocol {
         long_help #"""
 Inverse of `--save-workspace-protocol`.
@@ -374,7 +375,6 @@ Inverse of `--save-workspace-protocol`.
 Forces the manifest specifier into a registry-style spec (`^<version>`) for this invocation, even when `linkWorkspacePackages` matched a local sibling. The install pipeline still prefers the local workspace copy at resolve time — this flag only controls what's written to `package.json`. Mirrors `pnpm add --no-save-workspace-protocol`.
 """#
     }
-    flag --no-save-types help="Inverse of `--save-types`, for a project with `saveTypes` turned on." overrides=--save-types
     flag --save-catalog help="Save the new dependency into the workspace's default catalog." {
         long_help #"""
 Save the new dependency into the workspace's default catalog.

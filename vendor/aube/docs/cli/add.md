@@ -44,10 +44,10 @@ Add a dependency
   Snapshots `package.json` and the lockfile, links the named packages into `node_modules`, and then restores both files — so the dependency is usable for the current process but the project's committed state is untouched.
 
   Handy for one-off experiments and for scripts that install a tool transiently. Mirrors `pnpm add --no-save`. Conflicts with `-g`/`--global`, which has to persist the install to its global manifest.
+- **`--no-save-types`** — Inverse of `--save-types`, for a project with `saveTypes` turned on.
 - **`--no-save-workspace-protocol`** — Inverse of `--save-workspace-protocol`.
 
   Forces the manifest specifier into a registry-style spec (`^<version>`) for this invocation, even when `linkWorkspacePackages` matched a local sibling. The install pipeline still prefers the local workspace copy at resolve time — this flag only controls what's written to `package.json`. Mirrors `pnpm add --no-save-workspace-protocol`.
-- **`--no-save-types`** — Inverse of `--save-types`, for a project with `saveTypes` turned on.
 - **`--save-catalog`** — Save the new dependency into the workspace's default catalog.
 
   Writes `catalog:` into `package.json` and seeds/upserts the resolved range under `catalog:` in the workspace yaml. Mirrors `pnpm add --save-catalog`.

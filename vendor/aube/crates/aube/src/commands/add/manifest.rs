@@ -264,9 +264,7 @@ pub(super) async fn update_manifest_for_add(
         let registry_supports_time_field =
             aube_settings::resolved::registry_supports_time_field(ctx);
         let cache_dir = crate::commands::resolved_cache_dir_with_ctx(cwd, ctx);
-        let save_types = opts
-            .save_types
-            .unwrap_or_else(|| aube_settings::resolved::save_types(ctx));
+        let save_types = aube_settings::resolved::save_types(ctx);
         (
             tag,
             prefix,
@@ -280,16 +278,23 @@ pub(super) async fn update_manifest_for_add(
     let workspace_settings_cwd = crate::dirs::find_workspace_yaml_root(cwd)
         .or_else(|| crate::dirs::find_workspace_root(cwd))
         .unwrap_or_else(|| cwd.to_path_buf());
-    let (link_workspace_packages, save_workspace_protocol_setting, root_catalog_mode) =
-        crate::commands::with_settings_ctx(&workspace_settings_cwd, |ctx| {
-            (
-                aube_settings::resolved::link_workspace_packages(ctx),
-                aube_settings::resolved::save_workspace_protocol(ctx),
-                aube_settings::resolved::catalog_mode(ctx),
-            )
-        });
-    // The workspace yaml is read from the root, so a mode set there has to
-    // reach a member; a member's own `.npmrc` still wins with a stricter one.
+    let (
+        link_workspace_packages,
+        save_workspace_protocol_setting,
+        root_catalog_mode,
+        root_save_types,
+    ) = crate::commands::with_settings_ctx(&workspace_settings_cwd, |ctx| {
+        (
+            aube_settings::resolved::link_workspace_packages(ctx),
+            aube_settings::resolved::save_workspace_protocol(ctx),
+            aube_settings::resolved::catalog_mode(ctx),
+            aube_settings::resolved::save_types(ctx),
+        )
+    });
+    // The workspace yaml is read from the root, so a value set there has to
+    // reach a member; the member's own setting wins only when it turns it on.
+    // The flags beat both.
+    let save_types = opts.save_types.unwrap_or(save_types || root_save_types);
     let catalog_mode = if matches!(catalog_mode, CatalogMode::Manual) {
         root_catalog_mode
     } else {
@@ -1813,19 +1818,28 @@ mod tests {
             project.path().join(".npmrc"),
             format!(
                 "registry={registry}\n@types:registry={registry}types/\n\
-                 cache-dir={}\nminimumReleaseAge=0\nsave-types=true\n",
+                 cache-dir={}\nminimumReleaseAge=0\n",
                 project.path().join("cache").display()
             ),
         )
         .unwrap();
-        let manifest_path = project.path().join("package.json");
+        // Set only in the root yaml, so a member has to inherit it.
+        std::fs::write(
+            project.path().join("pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\nsaveTypes: true\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join("package.json"), "{}").unwrap();
+        let member = project.path().join("packages/member");
+        std::fs::create_dir_all(&member).unwrap();
+        let manifest_path = member.join("package.json");
         std::fs::write(&manifest_path, "{}").unwrap();
         for (name, save_types) in [("one", None), ("two", Some(false))] {
             let options = AddManifestOptions {
                 save_types,
                 ..opts(false, false, false)
             };
-            update_manifest_for_add(project.path(), &[name.to_string()], options, false)
+            update_manifest_for_add(&member, &[name.to_string()], options, false)
                 .await
                 .unwrap();
         }

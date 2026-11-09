@@ -360,6 +360,9 @@ pub struct AddArgs {
     /// manifest.
     #[usage(long, conflicts = "--global")]
     pub no_save: bool,
+    /// Inverse of `--save-types`, for a project with `saveTypes` turned on.
+    #[usage(long, overrides = "--save-types")]
+    pub no_save_types: bool,
     /// Inverse of `--save-workspace-protocol`.
     ///
     /// Forces the manifest specifier into a registry-style spec
@@ -423,9 +426,6 @@ pub struct AddArgs {
     /// package, or when the registry has no matching release.
     #[usage(long, conflicts = "--global", overrides = "--no-save-types")]
     pub save_types: bool,
-    /// Inverse of `--save-types`, for a project with `saveTypes` turned on.
-    #[usage(long, overrides = "--save-types")]
-    pub no_save_types: bool,
     /// Force the manifest specifier into `workspace:` form for this
     /// invocation, overriding `saveWorkspaceProtocol` from the
     /// workspace yaml / `.npmrc` / env.
