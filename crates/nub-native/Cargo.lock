@@ -576,20 +576,17 @@ name = "nub-native"
 version = "0.10.0"
 dependencies = [
  "blake3",
- "jsonc-parser",
  "libloading",
  "napi",
  "napi-build",
  "napi-derive",
  "nub-cache-key",
  "nub-data-formats",
- "nub-json-guard",
  "nub-tsconfig",
  "oxc",
  "oxc_napi",
  "oxc_sourcemap",
  "rustc-hash",
- "serde",
  "serde_json",
 ]
 

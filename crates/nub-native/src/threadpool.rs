@@ -157,7 +157,7 @@ unsafe extern "C" fn after_work(_req: *mut c_void, _status: c_int) {}
 /// so the pool exists (sized from the environment at that moment) with no request
 /// or callback left behind on Node's loop. `false` when the host exports no libuv;
 /// the JS caller then submits through `fs` instead.
-#[napi]
+#[napi(catch_unwind)]
 pub fn warm_threadpool() -> bool {
     let Some(uv) = uv() else {
         return false;
@@ -202,7 +202,7 @@ thread_local! {
 /// back), and it is closed inside the turn that runs it, so no extra turn follows.
 /// `false` when the host exports no libuv or a callback is already armed; the
 /// caller then does the work at once.
-#[napi]
+#[napi(catch_unwind)]
 pub fn on_first_loop_turn(env: Env, callback: Function<'_>) -> bool {
     let Some(uv) = uv() else {
         return false;

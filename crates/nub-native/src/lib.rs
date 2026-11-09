@@ -1,14 +1,13 @@
 //! Nub N-API addon: data-format parsers + the in-process TS/JSX transpiler,
 //! exposed to the JS preload.
 //!
-//! The parser functions take a source string and return a parsed value as a JS
-//! object (via napi's serde-json bridge). The [`transform`](transform::transform)
+//! The parser functions take a source string and return the JavaScript expression
+//! that recreates the parsed value. The [`transform`](transform::transform)
 //! function transpiles TS/JSX, mirroring `oxc-transform@0.140.0`'s `transformSync`
 //! for byte-for-byte emit parity.
 
 // `collapsible_if` fires on intentional nested `if let { if let }` sites;
-// collapsing every site is cosmetic churn (and tsconfig.rs is a verbatim
-// get-tsconfig mirror), so allow it.
+// collapsing every site is cosmetic churn, so allow it.
 #![allow(clippy::collapsible_if)]
 
 // This addon must NEVER link the MSVC C runtime statically. It is a cdylib that Node
@@ -35,6 +34,10 @@ compile_error!(
      cannot be overridden from here. Scope that flag to the nub.exe/launcher build steps."
 );
 
+// Every exported function carries `#[napi(catch_unwind)]`. `panic = "unwind"` alone
+// does not turn a panic into a JavaScript error: napi-rs only catches one where
+// that attribute asks it to, and without it the unwind finds no handler on its way
+// out of the N-API callback and aborts the host process.
 mod cache;
 mod detect;
 mod resolve;
@@ -59,22 +62,22 @@ pub use tsconfig::load_tsconfig;
 /// expression the module's default export is, not a value: a NaN, a `-0`, a
 /// `BigInt`, a `Date` and an own `__proto__` key all survive as source text,
 /// and the preload emits it verbatim.
-#[napi]
+#[napi(catch_unwind)]
 pub fn yaml_to_js(source: String) -> napi::Result<String> {
     data_to_js(nub_data_formats::parse_yaml(&source))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn toml_to_js(source: String) -> napi::Result<String> {
     data_to_js(nub_data_formats::parse_toml(&source))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn json5_to_js(source: String) -> napi::Result<String> {
     data_to_js(nub_data_formats::parse_json5(&source))
 }
 
-#[napi]
+#[napi(catch_unwind)]
 pub fn jsonc_to_js(source: String) -> napi::Result<String> {
     data_to_js(nub_data_formats::parse_jsonc(&source))
 }

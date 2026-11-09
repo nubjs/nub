@@ -62,9 +62,8 @@ pub struct TransformResult {
     pub errors: Vec<OxcError>,
 }
 
-/// Options for transforming a JS/TS file. Mirror of oxc's `TransformOptions`,
-/// minus `cwd` is kept (nub may set it), but the isolated-declaration path is
-/// dropped from `TypeScriptOptions`.
+/// Options for transforming a JS/TS file. Mirror of oxc's `TransformOptions`, with
+/// the isolated-declaration path dropped from `TypeScriptOptions`.
 #[napi(object)]
 #[derive(Default)]
 pub struct TransformOptions {
@@ -566,11 +565,11 @@ impl CompilerInterface for Compiler {
 
 /// Transpile a JavaScript or TypeScript file into a target ECMAScript version.
 ///
-/// Byte-compatible mirror of `oxc-transform@0.140.0`'s `transformSync`. The JS
-/// preload consumes `code`, `map`, and `errors`; `helpers_used` is carried for
-/// parity but unused.
+/// Byte-compatible mirror of `oxc-transform@0.140.0`'s `transformSync`.
+/// [`transform_cached`](crate::transform_cached) consumes `code`, `map`, and
+/// `errors`; `helpers_used` is carried for parity but unused.
 #[allow(clippy::needless_pass_by_value, clippy::allow_attributes)]
-#[napi]
+#[napi(catch_unwind)]
 pub fn transform(
     filename: String,
     source_text: String,

@@ -75,7 +75,7 @@ pub struct ModuleInfo {
 /// or `'jsx'` (matching the JS callers); it selects the parser's `SourceType`
 /// exactly as the `transform` path does via `get_source_type`.
 #[allow(clippy::needless_pass_by_value, clippy::allow_attributes)]
-#[napi]
+#[napi(catch_unwind)]
 pub fn detect_module_info(
     filename: String,
     source_text: String,
@@ -165,21 +165,17 @@ fn has_value_esm(body: &[Statement<'_>], has_module_syntax: bool, has_import_met
                     continue;
                 }
                 // `export const x = ...` (a declaration) or any non-type specifier
-                // is a value export. `export {}` (the empty marker) carries module
-                // syntax but no value binding — matched by the has_module_syntax
-                // top-level-await fallthrough below, exactly like the old JS
-                // (`se.entries.length === 0` counted as a value export there, but
-                // the empty-export marker is stripped post-transpile, so treating
-                // a lone `export {}` as the module-syntax/TLA case is equivalent —
-                // both yield `module`).
+                // is a value export.
                 if decl.declaration.is_some()
                     || decl.specifiers.iter().any(|s| !s.export_kind.is_type())
                 {
                     return true;
                 }
                 // A lone bare `export {}` (no declaration, no specifiers): value
-                // export per the old JS `entries.length === 0` rule.
-                if decl.declaration.is_none() && decl.specifiers.is_empty() {
+                // export per the old JS `entries.length === 0` rule. It has to be
+                // decided here, because `saw_import_export` keeps the
+                // top-level-await fallthrough below from seeing it.
+                if decl.specifiers.is_empty() {
                     return true;
                 }
             }

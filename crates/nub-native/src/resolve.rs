@@ -34,7 +34,7 @@ const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 /// `preserve_symlinks` mirrors Node's flag of the same name. The caller passes it
 /// because the flag reaches a process two ways — argv and `NODE_OPTIONS` — and only
 /// the JS side sees both.
-#[napi]
+#[napi(catch_unwind)]
 pub fn resolve_ts(
     specifier: String,
     parent_path: String,
@@ -279,37 +279,23 @@ fn try_resolve_file(
         return Some(target.to_string());
     }
 
-    // 2. Emit-convention swaps (only when the ext matches).
-    match existing_ext.as_str() {
-        ".js" => {
-            let ts = format!("{}.ts", &target[..target.len() - 3]);
-            if is_file(&ts) {
-                return Some(ts);
-            }
-            let tsx = format!("{}.tsx", &target[..target.len() - 3]);
-            if is_file(&tsx) {
-                return Some(tsx);
-            }
-        }
-        ".jsx" => {
-            let tsx = format!("{}.tsx", &target[..target.len() - 4]);
-            if is_file(&tsx) {
-                return Some(tsx);
-            }
-        }
-        ".mjs" => {
-            let mts = format!("{}.mts", &target[..target.len() - 4]);
-            if is_file(&mts) {
-                return Some(mts);
+    // 2. Emit-convention swaps (only when the ext matches). `extname` reads past a
+    // `?query`, so the extension is not always the path's tail: a target that does
+    // not END in it has no stem to swap onto.
+    let swaps: &[&str] = match existing_ext.as_str() {
+        ".js" => &[".ts", ".tsx"],
+        ".jsx" => &[".tsx"],
+        ".mjs" => &[".mts"],
+        ".cjs" => &[".cts"],
+        _ => &[],
+    };
+    if let Some(stem) = target.strip_suffix(existing_ext.as_str()) {
+        for ext in swaps {
+            let swapped = format!("{stem}{ext}");
+            if is_file(&swapped) {
+                return Some(swapped);
             }
         }
-        ".cjs" => {
-            let cts = format!("{}.cts", &target[..target.len() - 4]);
-            if is_file(&cts) {
-                return Some(cts);
-            }
-        }
-        _ => {}
     }
 
     // 3. Extensionless: probe in parent-ext-aware order.

@@ -75,8 +75,17 @@ pub fn check_nesting_depth(text: &str, max_depth: usize) -> Result<(), String> {
                 _ if b == quote => state = State::Code,
                 _ => {}
             },
+            // JSON5 ends a line comment at any ECMAScript line terminator, not
+            // just `\n`; stopping only at `\n` would hide nesting that follows a
+            // `\r`, U+2028 or U+2029 from this scan while the parser still
+            // descends into it. JSONC ends one at `\n` alone, so for it this can
+            // only count more, never less.
             State::LineComment => {
-                if b == b'\n' {
+                if b == b'\n'
+                    || b == b'\r'
+                    || bytes[i..].starts_with("\u{2028}".as_bytes())
+                    || bytes[i..].starts_with("\u{2029}".as_bytes())
+                {
                     state = State::Code;
                 }
             }
@@ -124,6 +133,19 @@ mod tests {
 
         // Sibling blocks nest independently — depth is a maximum, not a total.
         assert!(ok(&format!("[{}]", "[1],".repeat(500))));
+    }
+
+    /// JSON5 ends a `//` comment at `\r`, U+2028 and U+2029 as well as `\n`, so
+    /// nesting after any of them is code the parser descends into and must count.
+    #[test]
+    fn a_line_comment_ends_at_every_json5_line_terminator() {
+        for terminator in ["\n", "\r", "\u{2028}", "\u{2029}"] {
+            let text = format!("// c{terminator}{}", nest(65));
+            assert!(
+                check_nesting_depth(&text, 64).is_err(),
+                "nesting after a comment ended by {terminator:?} was not counted"
+            );
+        }
     }
 
     /// A file truncated mid-string or mid-comment leaves the scanner in a

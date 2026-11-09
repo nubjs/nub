@@ -812,6 +812,12 @@ mod tests {
         let deep = format!("{}{}", "[".repeat(600), "]".repeat(600));
         assert!(parse_json5(&deep).unwrap_err().contains("JSON5"));
         assert!(parse_jsonc(&deep).unwrap_err().contains("JSONC"));
+        // JSON5 ends this comment at the `\r`, so the nesting after it is code.
+        assert!(
+            parse_json5(&format!("// c\r{deep}"))
+                .unwrap_err()
+                .contains("JSON5")
+        );
 
         let nested = format!(
             "a:\n{}",
