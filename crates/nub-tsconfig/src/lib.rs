@@ -1189,7 +1189,7 @@ fn read_jsonc(path: &str) -> Result<Value, String> {
     // `extends` chain — is re-opened here, so the same one marker has to be
     // stripped again or a valid configuration silently falls back to no matcher.
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH)
+    nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH, nub_json_guard::Dialect::Jsonc)
         .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
     // The `Option` is the deserialization target, not a wrapper the parser adds.
     // It collapses an empty document and a literal `null` into `None`; a tsconfig
