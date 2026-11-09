@@ -206,7 +206,7 @@ jobs:
             pnp_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"},{"os":"macos-15","node":"24"}]'
           fi
           # Linux-only Node-version tier representatives (same on PR and trunk).
-          test_tiers='[{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"22.13"},{"os":"ubuntu-latest","node":"20.11"},{"os":"ubuntu-latest","node":"18.19"}]'
+          test_tiers='[{"os":"ubuntu-latest","node":"26"},{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"22.13"},{"os":"ubuntu-latest","node":"20.11"},{"os":"ubuntu-latest","node":"18.19"}]'
           pnp_tiers='[{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"18.19"}]'
           test=$(jq -cn --argjson a "$test_os" --argjson b "$test_tiers" '{include: ($a + $b)}')
           pnp=$(jq -cn --argjson a "$pnp_os" --argjson b "$pnp_tiers" '{include: ($a + $b)}')
@@ -1168,7 +1168,9 @@ jobs:
       #
       # Node matrix spans the support range so the integration suite (which
       # nub runs against whatever `node` is first on PATH) exercises every
-      # tier + capability boundary. 24 = current line; 22.15 = fast-path floor
+      # tier + capability boundary. 24 = current line; 26 = the newest release
+      # line (the 26.5.0 that version_tiers side-installs is the floor of a
+      # flag band, not the current release); 22.15 = fast-path floor
       # (sync registerHooks); 22.13 = compat-tier top (async module.register,
       # has require(esm)+detect-module+webstorage); 20.11 = compat mid (NO
       # require(esm) — exercises the dynamic-import oxc-parser path — and NO
@@ -1190,8 +1192,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      # Keyed by OS only (not the node version) so the 4 ubuntu node-tier legs
-      # share ONE cache instead of writing four. save-if:main → read-only on PRs.
+      # Keyed by OS only (not the node version) so the ubuntu node-tier legs
+      # share ONE cache instead of writing one each. save-if:main → read-only on PRs.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: ci-test-${{ runner.os }}
@@ -1212,7 +1214,7 @@ jobs:
           node-version: ${{ matrix.node }}
       # Side-install the off-matrix tier representatives for the version_tiers
       # integration test: compat 22.13, unsupported 18.18, detect-module in-band
-      # 20.11 (flag still required there), 26.12 (carries the node:ffi/vfs/
+      # 20.11 (flag still required there), 26.5 (carries the node:ffi/vfs/
       # stream-iter enabler modules), and 22.23 (the async tier with Node's permissive
       # load validator, for foreign_register_cjs). actions/setup-node only manages one
       # PATH-active Node per job; these go into private dirs and are exposed to
@@ -1237,18 +1239,18 @@ jobs:
           dir_22_13=$(install_node 22.13.0)
           dir_18_18=$(install_node 18.18.0)
           dir_20_11=$(install_node 20.11.0)
-          dir_26_12=$(install_node 26.12.1)
+          dir_26_5=$(install_node 26.5.0)
           dir_22_23=$(install_node 22.23.3)
           "$dir_22_13/node" --version
           "$dir_18_18/node" --version
           "$dir_20_11/node" --version
-          "$dir_26_12/node" --version
+          "$dir_26_5/node" --version
           "$dir_22_23/node" --version
           {
             echo "TEST_NODE_BIN_22_13_0=$dir_22_13"
             echo "TEST_NODE_BIN_18_18_0=$dir_18_18"
             echo "TEST_NODE_BIN_20_11_0=$dir_20_11"
-            echo "TEST_NODE_BIN_26_12_1=$dir_26_12"
+            echo "TEST_NODE_BIN_26_5_0=$dir_26_5"
             echo "TEST_NODE_BIN_22_23_3=$dir_22_23"
           } >> "$GITHUB_ENV"
       - name: pinned package managers + socket firewall
@@ -1264,9 +1266,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           # The soak scripts are erasable-TS .mts and need a type-stripping
-          # Node; the compat legs run them with the side-installed 26.12
+          # Node; the compat legs run them with the side-installed 26.5
           # instead of the PATH Node (18/20 can't execute .mts).
-          NODE_BIN="${TEST_NODE_BIN_26_12_1:+$TEST_NODE_BIN_26_12_1/node}"
+          NODE_BIN="${TEST_NODE_BIN_26_5_0:+$TEST_NODE_BIN_26_5_0/node}"
           NODE_BIN="${NODE_BIN:-node}"
           # Pinned pnpm/npm only on the current-line leg: the compat legs
           # exist to test OLD Nodes, which the pinned PMs don't support.

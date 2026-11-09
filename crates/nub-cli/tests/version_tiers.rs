@@ -642,12 +642,10 @@ fn import_text_works_on_fast_tier_without_native_flag() {
 /// the mechanism swap is transparent, and the experimental warning native emits must
 /// stay suppressed by nub's injected `--disable-warning=ExperimentalWarning`.
 #[test]
-fn import_text_works_via_native_on_26_12() {
-    let Some((stdout, stderr, code)) = run_nub_against_node((26, 12, 1), "import-text", "main.ts")
+fn import_text_works_via_native_on_26_5() {
+    let Some((stdout, stderr, code)) = run_nub_against_node((26, 5, 0), "import-text", "main.ts")
     else {
-        eprintln!(
-            "skipping: Node 26.12.1 not installed (set TEST_NODE_BIN_26_12_1 or nvm install)"
-        );
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
         return;
     };
     assert_eq!(
@@ -957,16 +955,14 @@ fn detect_module_ambiguous_esm_runs_as_esm_on_compat_tier() {
 /// The node:ffi (26.1+), node:vfs (26.4+), and node:stream/iter (25.9+) enabler bands.
 /// Each module is flag-gated and default-off — bare Node throws
 /// ERR_UNKNOWN_BUILTIN_MODULE on import — so nub injecting the three `--experimental-*`
-/// flags from the matrix is exactly what makes them importable. Run on Node 26.12.1, which
+/// flags from the matrix is exactly what makes them importable. Run on Node 26.5.0, which
 /// carries all three; the fixture imports each and the markers all read true.
 #[test]
 fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
     let Some((stdout, stderr, code)) =
-        run_nub_against_node((26, 12, 1), "module-enablers", "enablers.mjs")
+        run_nub_against_node((26, 5, 0), "module-enablers", "enablers.mjs")
     else {
-        eprintln!(
-            "skipping: Node 26.12.1 not installed (set TEST_NODE_BIN_26_12_1 or nvm install)"
-        );
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
         return;
     };
     assert_eq!(
@@ -995,12 +991,9 @@ fn module_enabler_flags_make_ffi_vfs_stream_iter_importable() {
 /// transpiler path the docs page advertises.
 #[test]
 fn import_defer_actually_defers_evaluation() {
-    let Some((stdout, stderr, code)) =
-        run_nub_against_node((26, 12, 1), "import-defer", "entry.ts")
+    let Some((stdout, stderr, code)) = run_nub_against_node((26, 5, 0), "import-defer", "entry.ts")
     else {
-        eprintln!(
-            "skipping: Node 26.12.1 not installed (set TEST_NODE_BIN_26_12_1 or nvm install)"
-        );
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
         return;
     };
     assert_eq!(
@@ -1039,11 +1032,9 @@ fn import_defer_actually_defers_evaluation() {
 #[test]
 fn import_defer_flag_stays_off_for_a_program_that_never_uses_it() {
     let Some((stdout, stderr, code)) =
-        run_nub_against_node((26, 12, 1), "import-defer", "dynamic-only.mjs")
+        run_nub_against_node((26, 5, 0), "import-defer", "dynamic-only.mjs")
     else {
-        eprintln!(
-            "skipping: Node 26.12.1 not installed (set TEST_NODE_BIN_26_12_1 or nvm install)"
-        );
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
         return;
     };
     assert_eq!(
@@ -1072,11 +1063,9 @@ fn import_defer_flag_stays_off_for_a_program_that_never_uses_it() {
 #[test]
 fn import_defer_user_negation_survives_an_inherited_signal() {
     let Some((stdout, stderr, code)) =
-        run_nub_against_node((26, 12, 1), "import-defer", "nested-negation.mjs")
+        run_nub_against_node((26, 5, 0), "import-defer", "nested-negation.mjs")
     else {
-        eprintln!(
-            "skipping: Node 26.12.1 not installed (set TEST_NODE_BIN_26_12_1 or nvm install)"
-        );
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
         return;
     };
     assert_eq!(
@@ -1110,11 +1099,9 @@ fn import_defer_user_negation_survives_an_inherited_signal() {
 #[test]
 fn import_defer_works_inside_a_worker_fed_exec_argv() {
     let Some((stdout, stderr, code)) =
-        run_nub_against_node((26, 12, 1), "import-defer", "execargv.mjs")
+        run_nub_against_node((26, 5, 0), "import-defer", "execargv.mjs")
     else {
-        eprintln!(
-            "skipping: Node 26.12.1 not installed (set TEST_NODE_BIN_26_12_1 or nvm install)"
-        );
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
         return;
     };
     assert_eq!(
@@ -1167,11 +1154,9 @@ fn import_defer_works_inside_a_worker_fed_exec_argv() {
 #[test]
 fn injected_argv_only_flags_are_hidden_inside_an_inherited_worker() {
     let Some((stdout, stderr, code)) =
-        run_nub_against_node((26, 12, 1), "import-defer", "execargv-inherited.mjs")
+        run_nub_against_node((26, 5, 0), "import-defer", "execargv-inherited.mjs")
     else {
-        eprintln!(
-            "skipping: Node 26.12.1 not installed (set TEST_NODE_BIN_26_12_1 or nvm install)"
-        );
+        eprintln!("skipping: Node 26.5.0 not installed (set TEST_NODE_BIN_26_5_0 or nvm install)");
         return;
     };
     assert_eq!(
@@ -1335,7 +1320,7 @@ fn a_foreign_hook_rewriting_the_entry_url_does_not_hold_the_process() {
 /// the control: it proves the body's line marks each evaluation.
 #[test]
 fn a_file_node_does_not_run_as_the_program_is_not_evaluated_on_both_tiers() {
-    for want in [(22, 13, 0), (26, 12, 1)] {
+    for want in [(22, 13, 0), (26, 5, 0)] {
         let (maj, min, pat) = want;
         for (args, evaluations) in [
             (&["counts.test.mjs"][..], 1),
@@ -1385,7 +1370,7 @@ fn a_file_node_does_not_run_as_the_program_is_not_evaluated_on_both_tiers() {
 /// The plain run is the control: it proves the export is served.
 #[test]
 fn a_handler_file_is_served_exactly_when_node_runs_it_as_the_program_on_both_tiers() {
-    'tiers: for want in [(22, 13, 0), (26, 12, 1)] {
+    'tiers: for want in [(22, 13, 0), (26, 5, 0)] {
         let (maj, min, pat) = want;
         for args in [
             &["serves.test.mjs"][..],
@@ -1439,7 +1424,7 @@ fn a_handler_file_is_served_exactly_when_node_runs_it_as_the_program_on_both_tie
 /// regression here recurses until the deadline, which kills the whole process group.
 #[test]
 fn a_valued_test_flag_runs_the_file_once_instead_of_recursing() {
-    for want in [(20, 11, 0), (26, 12, 1)] {
+    for want in [(20, 11, 0), (26, 5, 0)] {
         let (maj, min, pat) = want;
         let Some((stdout, stderr, code)) = run_nub_args_against_node(
             want,
@@ -1488,7 +1473,7 @@ fn watch_flags_node_would_pass_to_its_child_still_run_the_program() {
         (&["watch", "watched.mjs"], &[watch_path]),
         (&["watch", "watched.mjs"], &[watch_path, COMPAT]),
     ];
-    for want in [(20, 11, 0), (26, 12, 1)] {
+    for want in [(20, 11, 0), (26, 5, 0)] {
         let (maj, min, pat) = want;
         for (args, env) in cases {
             let Some((seen, stdout)) = run_nub_args_until_with_env(
