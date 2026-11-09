@@ -433,11 +433,14 @@ pub(super) async fn update_manifest_for_add(
         packuments.insert(name, packument);
     }
     // `--save-types` candidates: (manifest key, registry name, installed version).
-    let mut types_candidates = Vec::new();
+    let mut types_candidates: Vec<(String, String, String)> = Vec::new();
 
     // Resolve each package and update manifest.
     for (spec, orig) in parsed.iter().zip(packages.iter()) {
         let pkg_name_for_manifest = spec.alias.as_deref().unwrap_or(&spec.name);
+        // A later spec for the same name replaces the dependency, so it also
+        // replaces (or drops) that name's `@types` candidate.
+        types_candidates.retain(|(key, ..)| key != pkg_name_for_manifest);
 
         // Workspace-protocol specs (`pkg@workspace:*`, `pkg@workspace:^`,
         // `pkg@workspace:1.2.0`) bypass the registry path entirely:
@@ -1515,6 +1518,8 @@ mod tests {
             registry_doc("@private/lib", &["1.0.0"], json!({})),
             registry_doc("@types/private__lib", &["1.0.0"], json!({})),
             registry_doc("denied", &["1.0.0"], json!({})),
+            registry_doc("twice", &["4.0.0", "5.0.0"], json!({})),
+            registry_doc("@types/twice", &["4.0.0", "5.0.0"], json!({})),
             ("@types/denied".to_string(), 401, String::new()),
         ];
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1590,6 +1595,8 @@ mod tests {
                     "no-dt",
                     "kept",
                     "@private/lib",
+                    "twice@4.0.0",
+                    "twice@5.0.0",
                 ]
                 .map(String::from),
                 save_types(),
@@ -1602,14 +1609,17 @@ mod tests {
         // `@types/untyped` stays on its library's major, not on `latest`, and
         // comes from the `@types` registry although `untyped` doesn't.
         // `@types/private__lib` is never asked of a registry `@private`
-        // doesn't use, and the add says so.
+        // doesn't use, and the add says so. The last spec for a name picks both
+        // the dependency and its `@types`.
         assert_eq!(
             manifest.dev_dependencies,
             BTreeMap::from([
                 ("@types/scope__untyped".to_string(), "^3.0.1".to_string()),
+                ("@types/twice".to_string(), "^5.0.0".to_string()),
                 ("@types/untyped".to_string(), "^1.0.5".to_string()),
             ]),
         );
+        assert_eq!(manifest.dependencies["twice"], "5.0.0");
         assert_eq!(manifest.dependencies["@types/kept"], "~0.1.0");
         let output = reporter.0.lock().unwrap().clone();
         let skip =
