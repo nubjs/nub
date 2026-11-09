@@ -77,7 +77,7 @@ impl Manifest {
         let name = v.get("name")?.as_str()?.to_string();
 
         let mut m = Manifest {
-            name: name.clone(),
+            name,
             ..Default::default()
         };
 
@@ -301,10 +301,11 @@ fn normalize_rel(p: &str) -> String {
 /// and `"./dist"` → `./dist/index.js` at runtime, and the graph walk's
 /// `resolve_entry` runs that SAME ladder, so on-disk resolution is deferred to
 /// it (a path that resolves to nothing is simply never analyzed — no false
-/// entry). A non-JS asset/type extension (`.json`/`.node`/`.wasm`/`.css`, a
-/// `.d.ts` stub) carries no analyzable imports, so it is dropped here and never
-/// costs a resolver probe. The `is_js_like`-only gate this replaced dropped
-/// extensionless mains outright → `files_analyzed: 0` → every phantom missed.
+/// entry). A `.d.ts` is admitted for the `Types` surface this same filter
+/// seeds. A non-JS asset extension (`.json`/`.node`/`.wasm`/`.css`) carries no
+/// analyzable imports, so it is dropped here and never costs a resolver probe.
+/// The `is_js_like`-only gate this replaced dropped extensionless mains
+/// outright → `files_analyzed: 0` → every phantom missed.
 fn is_entry_candidate(path: &str) -> bool {
     is_js_like(path) || is_sfc_like(path) || is_dts_like(path) || extension(path).is_none()
 }
@@ -607,8 +608,8 @@ mod tests {
         // The recall bug: an extensionless `main` (Node resolves `./dist/index`
         // → `./dist/index.js`) must survive as a candidate for the graph walk to
         // resolve — not be dropped for lacking a literal JS extension. A
-        // directory-style main is the same shape. `.json`/`.node`/`.d.ts` targets
-        // carry no analyzable imports and stay filtered.
+        // directory-style main is the same shape. `.json`/`.node` targets carry
+        // no analyzable imports and stay filtered.
         let has = |m: &Manifest, p: &str| m.entry_points.iter().any(|e| e.path == p);
 
         let ext = Manifest::parse(br#"{"name":"p","main":"./dist/index"}"#).unwrap();

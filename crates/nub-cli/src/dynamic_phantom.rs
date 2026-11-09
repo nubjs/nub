@@ -148,20 +148,8 @@ pub fn register() {
 /// per-content sidecar. Best-effort throughout — any failure simply leaves no
 /// sidecar for the linker to find. The linker retries the scan from the CAS;
 /// only an unavailable index or failed retry degrades to "no eject" (a scan
-/// miss must never itself force materialization).
-///
-/// Panic-safety rests on the scan being panic-free BY CONSTRUCTION, not on the
-/// `catch_unwind`: oxc reports an unparseable/hostile file via a return flag (not
-/// an unwind), `serde`/`fs` return `Result`, and the graph walk is depth- and
-/// size-bounded — so a crafted tarball degrades to a scan miss, never a crash.
-/// The `catch_unwind` is a redundant guard that only engages under an unwinding
-/// profile (dev/test); the shipped release profile is `panic = "abort"`, where it
-/// is inert. Do not treat it as a production safety net.
-///
-/// The written JSON is the serialized [`nub_phantom_scan::ScanResult`], read back
-/// by the CONSUMER ([`crate::pm_engine::phantom_closure`]) — which, being in
-/// nub-cli, deserializes it into the typed `ScanResult` (no cross-fork string
-/// coupling) to seed the disk-materialize closure.
+/// miss must never itself force materialization). Panic safety and the sidecar
+/// format are documented on [`scan_of_index`] and [`write_sidecar_atomic`].
 fn scan_and_cache(dir: &Path, index: &PackageIndex) {
     let fingerprint = index_content_fingerprint(index);
     let sidecar = sidecar_path(dir, &fingerprint);
@@ -343,7 +331,7 @@ pub(crate) fn phantom_cache_dir() -> Option<PathBuf> {
 /// after upgrade; harmless and expected (the whole point is to pick up the better
 /// verdict). Just bump the number when the scanner logic changes — the coupling
 /// is structural, nothing else to remember.
-pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 6;
+pub(crate) const PHANTOM_SCANNER_VERSION: u32 = 7;
 
 /// Version of what the linker's GVS-populate pass WRITES TO DISK for a given eject
 /// set — bumped when the same plan produces a different on-disk shape.

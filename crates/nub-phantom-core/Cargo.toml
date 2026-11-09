@@ -9,10 +9,9 @@
 # — none of which specifier extraction needs. Because `nub-cli` links this crate,
 # keeping to the parser-only subset is what lets the phantom scan reuse the SAME
 # oxc 0.140.0 parser nub transpiles with (byte-identical extraction semantics)
-# WITHOUT dragging the full-oxc compile into the shipped CLI + every CI leg (the
-# reason the main workspace excludes `crates/nub-phantom`). The versions are
-# pinned EXACT to the workspace's `oxc` pin (=0.140.0) and move in lockstep with
-# it — see the root Cargo.toml OXC_VERSION note.
+# WITHOUT dragging the full-oxc compile into the shipped CLI + every CI leg. The
+# versions are pinned EXACT to the workspace's `oxc` pin (=0.140.0) and move in
+# lockstep with it — see the root Cargo.toml OXC_VERSION note.
 [package]
 name = "nub-phantom-core"
 version.workspace = true

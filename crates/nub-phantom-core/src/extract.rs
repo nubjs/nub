@@ -9,7 +9,8 @@
 //! spec classifies soft (e.g. `if (typeof phantom !== 'undefined') require('system')`,
 //! or `try { require('opt') } catch {}`). A top-level, unconditional require is
 //! hard. Type-only imports/exports are dropped — they are erased before runtime
-//! and would false-flag a devDep-typed package as a phantom. A dynamic
+//! and would false-flag a devDep-typed package as a phantom. TypeScript's
+//! `import x = require('y')` is a require. A dynamic
 //! `import(...)`/`require(...)`/`createRequire(...)(...)` is recorded only when
 //! its argument is a STATIC string (a literal, or a no-substitution template);
 //! a substituted-template or computed specifier cannot be attributed to a
@@ -23,8 +24,9 @@
 use oxc_allocator::Allocator;
 use oxc_ast::AstKind;
 use oxc_ast::ast::{
-    Argument, BindingPattern, ConditionalExpression, Expression, FormalParameters, IfStatement,
-    ImportDeclarationSpecifier, LogicalExpression, Statement, TSImportType, TryStatement,
+    BindingPattern, ConditionalExpression, Expression, FormalParameters, IfStatement,
+    ImportDeclarationSpecifier, LogicalExpression, Statement, TSImportEqualsDeclaration,
+    TSImportType, TSModuleReference, TryStatement,
 };
 use oxc_ast_visit::{Visit, walk};
 use oxc_parser::Parser;
@@ -46,7 +48,8 @@ pub enum RefKind {
 pub struct Occurrence {
     /// The raw specifier string, exactly as written (`./x`, `lodash/fp`, `node:fs`).
     pub spec: String,
-    /// Inside a `try`/`catch`/`finally` — a guarded (soft) load.
+    /// Inside a runtime guard (a `try`/`catch`/`finally` or a conditional
+    /// branch) — a soft load.
     pub soft: bool,
     pub kind: RefKind,
 }
@@ -88,7 +91,8 @@ pub fn extract(path: &str, source: &str) -> Vec<Occurrence> {
 
 /// Parse `source` as `source_type` and collect specifier occurrences.
 /// `capture_types` retains type-only import/re-export specifiers — set only for
-/// SFC script blocks; false on the runtime path preserves the type-only drop.
+/// SFC script blocks and declaration files; false on the runtime path preserves
+/// the type-only drop.
 fn parse_and_visit(source: &str, source_type: SourceType, capture_types: bool) -> Vec<Occurrence> {
     let allocator = Allocator::default();
     let ret = Parser::new(&allocator, source, source_type).parse();
@@ -112,7 +116,8 @@ struct SpecVisitor {
     guard_depth: u32,
     out: Vec<Occurrence>,
     /// Retain type-only import/re-export specifiers. Set only for SFC script
-    /// blocks, where a type-position phantom still breaks GVS resolution (nub#450).
+    /// blocks and declaration files, where a type-position phantom still breaks
+    /// GVS resolution (nub#450).
     capture_types: bool,
     /// Lexical nesting inside a function that takes a PARAMETER named `require`.
     /// Nonzero means a `require(...)` here resolves against that parameter, not
@@ -203,7 +208,7 @@ impl<'a> Visit<'a> for SpecVisitor {
             }
             // Runtime re-exports. `export { x } from 'y'` (value) and
             // `export * from 'y'` load the module; `export type { … }` does not
-            // (unless `capture_types`, for SFC script blocks).
+            // (unless `capture_types`, for SFC script blocks and declaration files).
             Statement::ExportNamedDeclaration(decl) => {
                 if let Some(src) = &decl.source
                     && (self.capture_types
@@ -269,6 +274,19 @@ impl<'a> Visit<'a> for SpecVisitor {
             self.record(&it.source.value, RefKind::StaticImport);
         }
         walk::walk_ts_import_type(self, it);
+    }
+
+    /// TypeScript's CommonJS import, `import x = require("pkg")`, which compiles
+    /// to a `require`. Visited here rather than in `visit_statement` so the
+    /// `export import x = require(...)` form, a declaration inside an export, is
+    /// caught too. `import type x = require(...)` is erased, like `import type`.
+    fn visit_ts_import_equals_declaration(&mut self, it: &TSImportEqualsDeclaration<'a>) {
+        if let TSModuleReference::ExternalModuleReference(ext) = &it.module_reference
+            && (self.capture_types || !it.import_kind.is_type())
+        {
+            self.record(&ext.expression.value, RefKind::Require);
+        }
+        walk::walk_ts_import_equals_declaration(self, it);
     }
 }
 
@@ -392,7 +410,8 @@ fn strip_html_comments(source: &str) -> String {
 
 /// If `call` is `require("lit")`, `require.resolve("lit")`, or the immediately-
 /// invoked `createRequire(...)("lit")`, return the literal specifier and which.
-/// Any non-string-literal argument yields `None`.
+/// The argument must be a static string ([`static_string`]); anything else
+/// yields `None`.
 fn require_call<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> Option<(&'a str, RefKind)> {
     let kind = match &call.callee {
         Expression::Identifier(id) if id.name == "require" => RefKind::Require,
@@ -410,10 +429,8 @@ fn require_call<'a>(call: &'a oxc_ast::ast::CallExpression<'a>) -> Option<(&'a s
         Expression::CallExpression(inner) if is_create_require(&inner.callee) => RefKind::Require,
         _ => return None,
     };
-    match call.arguments.first() {
-        Some(Argument::StringLiteral(s)) => Some((&s.value, kind)),
-        _ => None,
-    }
+    let spec = static_string(call.arguments.first()?.as_expression()?)?;
+    Some((spec, kind))
 }
 
 /// Whether `kind` is a function whose PARAMETER list binds the name `require`,
@@ -757,6 +774,51 @@ mod tests {
             "#,
         );
         assert!(got.is_empty(), "no attributable string literal → skip");
+    }
+
+    #[test]
+    fn a_no_substitution_template_require_is_an_edge() {
+        // `` require(`pkg`) `` names its package as surely as `require('pkg')`,
+        // as the `` import(`pkg`) `` form already does; a substituted template
+        // still cannot be attributed and stays skipped.
+        let got = specs(
+            r#"
+            const a = require(`tpl-req`);
+            require.resolve(`tpl-resolve`);
+            const b = createRequire(import.meta.url)(`tpl-cr`);
+            const c = require(`pre-${x}`);
+            "#,
+        );
+        let names: Vec<_> = got.iter().map(|(s, _, _)| s.as_str()).collect();
+        assert_eq!(names, vec!["tpl-req", "tpl-resolve", "tpl-cr"]);
+        assert!(
+            got.iter().all(|(_, soft, _)| !soft),
+            "top-level template requires are hard: {got:?}"
+        );
+    }
+
+    #[test]
+    fn typescript_import_equals_require_is_an_edge() {
+        // `import x = require('pkg')` is TypeScript's CommonJS import and compiles
+        // to a real `require`, including under `export`. `import type x =
+        // require(...)` is erased on the runtime path and kept on the declaration
+        // surface, like every other type import; an alias of a namespace
+        // (`import A = N.M`) is not a module reference at all.
+        let names = |path: &str, src: &str| {
+            extract(path, src)
+                .into_iter()
+                .map(|o| o.spec)
+                .collect::<Vec<_>>()
+        };
+        let src = "import fs = require('fs-extra');\n\
+                   export import lo = require('lodash');\n\
+                   import type T = require('types-only');\n\
+                   import Alias = Some.Namespace;\n";
+        assert_eq!(names("mod.cts", src), vec!["fs-extra", "lodash"]);
+        assert_eq!(
+            names("index.d.ts", "import type T = require('types-only');\n"),
+            vec!["types-only"]
+        );
     }
 
     #[test]
