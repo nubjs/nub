@@ -2,7 +2,7 @@ pub(crate) mod build_flags;
 mod filtered;
 mod global;
 mod manifest;
-mod no_save;
+mod rollback;
 mod spec;
 mod supply_chain;
 
@@ -105,10 +105,9 @@ pub(super) fn apply_add_lifecycle(
 ///
 /// This is the in-process counterpart to [`run`] for embedders. It holds the
 /// project lock across both manifest mutation and installation, and never
-/// consults or changes the process-global logical cwd. Cancellation rolls the
-/// manifest and lockfile back to their pre-call bytes. Other install failures
-/// preserve the manifest change, matching CLI `add`, so the host can retry the
-/// install without repeating the add operation.
+/// consults or changes the process-global logical cwd. Any failure, cancellation
+/// included, rolls the manifest and lockfile back to their pre-call bytes,
+/// matching CLI `add`.
 pub async fn add_to_project(
     project_dir: &std::path::Path,
     packages: &[String],
@@ -139,19 +138,9 @@ pub(crate) async fn add_to_project_with_overrides(
     options.control.check_cancelled()?;
     let mut setting_overrides = Vec::new();
     overrides.append_to(&mut setting_overrides);
-    let manifest_path = project_dir.join("package.json");
-    let original_manifest = std::fs::read(&manifest_path)
-        .into_diagnostic()
-        .wrap_err("failed to snapshot package.json before embedded add")?;
-    let lockfile_path = no_save::lockfile_path_for_project(lock.project_dir())?;
-    let original_lockfile = no_save::snapshot_lockfile(&lockfile_path)?;
-    // The rollback set must match what `--no-save` snapshots (`no_save::Snapshot`
-    // and the filtered add's root snapshot): the current-name lockfile *plus*
-    // every pre-rename legacy basename. A write during the add MIGRATES the
-    // legacy name (writes the current name, deletes the legacy file), so
-    // restoring only `lockfile_path` would leave the host's checked-in legacy
-    // lockfile deleted. Empty — hence inert — for standalone aube.
-    let original_legacy = no_save::snapshot_legacy_lockfiles(&lockfile_path)?;
+    let mut snapshot = rollback::Snapshot::default();
+    snapshot.capture_project(project_dir)?;
+    snapshot.capture_install_root(lock.project_dir())?;
     let mutation_control = options.control.clone();
     let mutation_result = install::control::scope(options.control.clone(), async {
         tokio::select! {
@@ -223,39 +212,14 @@ pub(crate) async fn add_to_project_with_overrides(
         let cancelled = error
             .code()
             .is_some_and(|code| code.to_string() == aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED);
-        if cancelled {
-            let manifest_restore =
-                aube_util::fs_atomic::atomic_write(&manifest_path, &original_manifest);
-            let lockfile_restore = no_save::restore_lockfile(&lockfile_path, &original_lockfile);
-            // Every path is attempted before any error is surfaced, so one
-            // unwritable file cannot strand the rest half-restored.
-            let mut legacy_restore: Result<(), miette::Report> = Ok(());
-            for (path, bytes) in &original_legacy {
-                if let Err(error) = no_save::restore_lockfile(path, bytes)
-                    && legacy_restore.is_ok()
-                {
-                    legacy_restore = Err(error);
-                }
-            }
-            if let Err(restore_error) = manifest_restore {
-                return Err(miette!(
-                    code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
-                    "install cancelled and package.json rollback failed: {restore_error}"
-                ));
-            }
-            if let Err(restore_error) = lockfile_restore {
-                return Err(miette!(
-                    code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
-                    "install cancelled and lockfile rollback failed: {restore_error}"
-                ));
-            }
-            if let Err(restore_error) = legacy_restore {
-                return Err(miette!(
-                    code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
-                    "install cancelled and lockfile rollback failed: {restore_error}"
-                ));
-            }
+        let restored = snapshot.restore();
+        if cancelled && let Some(restore_error) = restored.errors.first() {
+            return Err(miette!(
+                code = aube_codes::errors::ERR_AUBE_INSTALL_CANCELLED,
+                "install cancelled and project rollback failed: {restore_error:#}"
+            ));
         }
+        rollback::warn_restore_failures(&restored.errors);
         return Err(error);
     }
     Ok(())
@@ -660,154 +624,128 @@ pub async fn run(
     }
 
     let lock = super::take_install_project_lock(&cwd)?;
-    let manifest_path = cwd.join("package.json");
 
-    // 1. Read existing package.json. Snapshot the raw bytes when
-    // `--no-save` is in effect so we can restore both the manifest
-    // *and* the lockfile after the resolver/install pipeline (both
-    // re-read from disk) has done its work — the user gets the new
-    // package linked into `node_modules` while their committed
-    // project state stays exactly as they wrote it.
-    //
-    // The lockfile path matches whatever
-    // the install pipeline will write to: detect the existing lockfile
-    // kind on disk (pnpm, npm, yarn, bun, …) so a
-    // project using `pnpm-lock.yaml` doesn't end up with both a
-    // restored aube-lock.yaml *and* a leftover modified pnpm-lock.yaml.
-    // When no lockfile exists yet the resolver uses the configured
-    // creation default, so we target that path and the restore step
-    // deletes it (since `lockfile_bytes` is `None`).
-    let lockfile_path = no_save::lockfile_path_for_project(&cwd)?;
-    let no_save_snapshot = if no_save {
-        Some(no_save::snapshot_manifest_and_lockfile(
-            &manifest_path,
-            &lockfile_path,
-        )?)
-    } else {
-        None
-    };
-    // `--allow-build=<pkg>` / `--deny-build=<pkg>` pre-review dep
-    // lifecycle scripts as part of the add. The install pipeline
-    // re-reads the map from disk, so writing before manifest mutation
-    // keeps failure-mode reasoning local.
-    if !allow_build.is_empty() {
-        apply_allow_build_flags(&cwd, &allow_build)?;
-    }
-    if !deny_build.is_empty() {
-        apply_deny_build_flags(&cwd, &deny_build)?;
-    }
+    // Snapshot before anything is written. A failed add leaves the project as
+    // it found it, and `--no-save` restores after a successful one too, so the
+    // new package is linked into `node_modules` while the committed project
+    // state stays as the user wrote it. A member's add writes its own manifest
+    // and the workspace root's lockfile, so both directories are captured.
+    let mut snapshot = rollback::Snapshot::default();
+    snapshot.capture_project(&cwd)?;
+    snapshot.capture_install_root(lock.project_dir())?;
 
-    // OSV / downloads gates fire pre-manifest-mutation — they're
-    // human-intent signals that key off the typed package names,
-    // so a refusal here leaves `package.json` untouched. The
-    // Bun-style `securityScanner` is intentionally NOT called
-    // here: it runs post-resolve from `install::run` against the
-    // full resolved graph (matching Bun's contract), with
-    // concrete versions + transitives the OSV/downloads probes
-    // wouldn't see at this stage.
-    supply_chain::run_cli_name_gates(
-        &cwd,
-        packages,
-        crate::commands::add_supply_chain::ReputationOverrides {
-            similar_name: allow_similar_name,
-            new_name: allow_new_name,
-            low_downloads: allow_low_downloads,
-        },
-        crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
-        &[],
-    )
-    .await?;
-
-    update_manifest_for_add(
-        &cwd,
-        packages,
-        AddManifestOptions {
-            save_dev,
-            save_exact,
-            save_optional,
-            save_peer,
-            network_mode: aube_registry::NetworkMode::Online,
-            save_catalog: save_catalog_target,
-            workspace_protocol_override: workspace_protocol_override_from_flags(
-                save_workspace_protocol,
-                no_save_workspace_protocol,
-            ),
-            setting_overrides: Vec::new(),
-        },
-        !no_save,
-    )
-    .await?;
-
-    // 4. Run install. It re-reads the mutated package.json, runs the
-    // resolver (reusing locked entries for unchanged specs), writes the
-    // lockfile, and links node_modules in one pipeline. `Fix` mode is
-    // the right semantic here: package.json just gained a new spec,
-    // so the lockfile is by definition stale on that one entry — Prefer
-    // would risk taking the from-lockfile fast path and missing the
-    // new dep. Wrapping in a `Result` so the restore step below runs
-    // even on failure — a network error mid-resolve would otherwise
-    // leave the mutated `package.json` on disk, breaking `--no-save`.
-    // `with_mode()` already skips root lifecycle hooks (chained-call
-    // contract) so `aube add` doesn't re-run the root postinstall /
-    // prepare on every invocation.
-    // `osv_transitive_check = true` routes the resolved transitive
-    // set through OSV's `MAL-*` batch query post-resolve, so a
-    // malicious dep-of-dep fails the install with the same
-    // `ERR_AUBE_MALICIOUS_PACKAGE` as the CLI-name gate above.
-    let mut install_opts =
-        install::InstallOptions::with_mode(super::chained_frozen_mode(install::FrozenMode::Fix));
-    apply_dangerously_allow_all_builds(&mut install_opts, dangerously_allow_all_builds);
-    install_opts.ignore_scripts = ignore_scripts;
-    install_opts.run_dev_preinstall = true;
-    install_opts.script_command = "add";
-    apply_add_lifecycle(&mut install_opts, std::slice::from_ref(&cwd))?;
-    install_opts.osv_transitive_check = true;
-    // `--lockfile-only`: the resolver still runs and the lockfile +
-    // manifest are written, but the linker never touches `node_modules`.
-    install_opts.lockfile_only = lockfile_only;
-    // The chained install is what actually runs the hooks, so `add`'s
-    // pnpmfile flags only mean anything once they land here.
-    install_opts.pnpmfile = pnpmfile;
-    install_opts.global_pnpmfile = global_pnpmfile;
-    install_opts.ignore_pnpmfile = ignore_pnpmfile;
-    let pipeline_result: miette::Result<()> =
-        install::run_with_project_lock(install_opts, &lock).await;
-
-    // 5. Under `--no-save`, restore the snapshotted `package.json` and
-    // lockfile so neither shows up in `git status`. The user's
-    // `node_modules` keeps the freshly linked package — matching
-    // pnpm's `--no-save` semantics. We do this regardless of whether
-    // the install succeeded so failures still leave the project
-    // pristine. If the lockfile didn't exist before, delete the one
-    // we just wrote.
-    //
-    // Both restores are attempted independently — if the manifest
-    // write fails, we still try the lockfile restore so the project
-    // doesn't get stuck in a half-mutated state. Any errors from this
-    // step (and the captured `pipeline_result`) are folded together
-    // before returning, so the caller sees the *first* relevant
-    // failure rather than silently dropping later ones.
-    let restore_errors = if let Some(snapshot) = no_save_snapshot {
-        let errors =
-            no_save::restore_manifest_and_lockfile(snapshot, &manifest_path, &lockfile_path);
-        if errors.is_empty() {
-            eprintln!("Restored package.json and lockfile (--no-save)");
+    let pipeline_result: miette::Result<()> = async {
+        // `--allow-build=<pkg>` / `--deny-build=<pkg>` pre-review dep
+        // lifecycle scripts as part of the add. The install pipeline
+        // re-reads the map from disk, so writing before manifest mutation
+        // keeps failure-mode reasoning local.
+        if !allow_build.is_empty() {
+            apply_allow_build_flags(&cwd, &allow_build)?;
         }
-        errors
-    } else {
-        Vec::new()
-    };
+        if !deny_build.is_empty() {
+            apply_deny_build_flags(&cwd, &deny_build)?;
+        }
+
+        // OSV / downloads gates fire pre-manifest-mutation — they're
+        // human-intent signals that key off the typed package names,
+        // so a refusal here leaves `package.json` untouched. The
+        // Bun-style `securityScanner` is intentionally NOT called
+        // here: it runs post-resolve from `install::run` against the
+        // full resolved graph (matching Bun's contract), with
+        // concrete versions + transitives the OSV/downloads probes
+        // wouldn't see at this stage.
+        supply_chain::run_cli_name_gates(
+            &cwd,
+            packages,
+            crate::commands::add_supply_chain::ReputationOverrides {
+                similar_name: allow_similar_name,
+                new_name: allow_new_name,
+                low_downloads: allow_low_downloads,
+            },
+            crate::commands::add_supply_chain::LowDownloadPrompt::Terminal,
+            &[],
+        )
+        .await?;
+
+        update_manifest_for_add(
+            &cwd,
+            packages,
+            AddManifestOptions {
+                save_dev,
+                save_exact,
+                save_optional,
+                save_peer,
+                network_mode: aube_registry::NetworkMode::Online,
+                save_catalog: save_catalog_target,
+                workspace_protocol_override: workspace_protocol_override_from_flags(
+                    save_workspace_protocol,
+                    no_save_workspace_protocol,
+                ),
+                setting_overrides: Vec::new(),
+            },
+            !no_save,
+        )
+        .await?;
+
+        // 4. Run install. It re-reads the mutated package.json, runs the
+        // resolver (reusing locked entries for unchanged specs), writes the
+        // lockfile, and links node_modules in one pipeline. `Fix` mode is
+        // the right semantic here: package.json just gained a new spec,
+        // so the lockfile is by definition stale on that one entry — Prefer
+        // would risk taking the from-lockfile fast path and missing the
+        // new dep. Wrapping in a `Result` so the restore step below runs
+        // even on failure — a network error mid-resolve would otherwise
+        // leave the mutated `package.json` on disk, breaking `--no-save`.
+        // `with_mode()` already skips root lifecycle hooks (chained-call
+        // contract) so `aube add` doesn't re-run the root postinstall /
+        // prepare on every invocation.
+        // `osv_transitive_check = true` routes the resolved transitive
+        // set through OSV's `MAL-*` batch query post-resolve, so a
+        // malicious dep-of-dep fails the install with the same
+        // `ERR_AUBE_MALICIOUS_PACKAGE` as the CLI-name gate above.
+        let mut install_opts = install::InstallOptions::with_mode(super::chained_frozen_mode(
+            install::FrozenMode::Fix,
+        ));
+        apply_dangerously_allow_all_builds(&mut install_opts, dangerously_allow_all_builds);
+        install_opts.ignore_scripts = ignore_scripts;
+        install_opts.run_dev_preinstall = true;
+        install_opts.script_command = "add";
+        apply_add_lifecycle(&mut install_opts, std::slice::from_ref(&cwd))?;
+        install_opts.osv_transitive_check = true;
+        // `--lockfile-only`: the resolver still runs and the lockfile +
+        // manifest are written, but the linker never touches `node_modules`.
+        install_opts.lockfile_only = lockfile_only;
+        // The chained install is what actually runs the hooks, so `add`'s
+        // pnpmfile flags only mean anything once they land here.
+        install_opts.pnpmfile = pnpmfile;
+        install_opts.global_pnpmfile = global_pnpmfile;
+        install_opts.ignore_pnpmfile = ignore_pnpmfile;
+        install::run_with_project_lock(install_opts, &lock).await
+    }
+    .await;
 
     // Order matters: surface the pipeline error first when present —
     // it's the root cause and the restore errors are downstream
     // fallout. With no pipeline error, surface the first restore
     // failure (subsequent ones are usually variants of the same
     // filesystem problem).
-    pipeline_result?;
-    if let Some(first) = restore_errors.into_iter().next() {
-        return Err(first);
+    if no_save || pipeline_result.is_err() {
+        let restored = snapshot.restore();
+        if pipeline_result.is_err() {
+            rollback::warn_restore_failures(&restored.errors);
+            if restored.changed && restored.errors.is_empty() {
+                eprintln!("Install failed; restored package.json and lockfile");
+            }
+        } else if restored.errors.is_empty() {
+            eprintln!("Restored package.json and lockfile (--no-save)");
+        }
+        pipeline_result?;
+        if let Some(first) = restored.errors.into_iter().next() {
+            return Err(first);
+        }
+        return Ok(());
     }
-    Ok(())
+    pipeline_result
 }
 
 pub(super) fn apply_dangerously_allow_all_builds(

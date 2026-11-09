@@ -776,6 +776,36 @@ async fn cancelled_manifest_mutation_is_rolled_back() {
     assert!(!workspace.path().join("testhost-lock.yaml").exists());
 }
 
+#[tokio::test]
+async fn failed_add_leaves_the_project_as_it_found_it() {
+    initialize_test_host();
+    let (workspace, app) = workspace_fixture();
+    std::fs::write(
+        workspace.path().join("packages/library/package.json"),
+        r#"{"name":"library","version":"1.0.0","dependencies":{"missing":"1.0.0"}}
+"#,
+    )
+    .unwrap();
+    let original_manifest = std::fs::read(app.join("package.json")).unwrap();
+
+    aube::embed::add(
+        &app,
+        &["library@workspace:*".to_string()],
+        aube::embed::AddToProjectOptions {
+            offline: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect_err("offline, the library's dependency cannot resolve");
+
+    assert_eq!(
+        String::from_utf8(std::fs::read(app.join("package.json")).unwrap()).unwrap(),
+        String::from_utf8(original_manifest).unwrap()
+    );
+    assert!(!workspace.path().join("testhost-lock.yaml").exists());
+}
+
 #[test]
 fn error_code_reads_structured_diagnostic_code() {
     let error = miette::miette!(code = "ERR_AUBE_TEST", "test failure");
