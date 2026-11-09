@@ -818,6 +818,30 @@ pub(super) async fn update_manifest_for_add(
         if full["versions"].get(&version).is_none_or(has_bundled_types) {
             continue;
         }
+        // A catalog entry for the `@types` package is the project's own pin, so
+        // it is saved as written and the install resolves it, aliases included.
+        // An alias of the package can't be a catalog reference.
+        let aliased = types_key != types_name;
+        let catalog_range = match opts.save_catalog.as_deref() {
+            Some(target) => workspace_catalogs.get(target),
+            None if matches!(catalog_mode, CatalogMode::Manual) => None,
+            None => default_catalog,
+        }
+        .filter(|_| !aliased)
+        .and_then(|catalog| catalog.get(&types_name));
+        if let Some(range) = catalog_range {
+            let specifier = match opts.save_catalog.as_deref() {
+                Some(target) if target != "default" => format!("catalog:{target}"),
+                _ => "catalog:".to_string(),
+            };
+            crate::commands::install::control::output(
+                crate::commands::install::InstallOutputLevel::Info,
+                None,
+                format!("  + {types_key}@{range} (specifier: {specifier})"),
+            );
+            manifest.dev_dependencies.insert(types_key, specifier);
+            continue;
+        }
         // A package from its scope's own registry (`@acme:registry=`) may be
         // private, so its name is never sent to a different registry for
         // `@types`. A package from the default registry is looked up wherever
@@ -849,29 +873,14 @@ pub(super) async fn update_manifest_for_add(
         // DefinitelyTyped versions follow the library's major.minor, so stay
         // on the major just installed rather than taking `latest`. A `^N`
         // range never admits a prerelease, so the save prefix always applies.
-        // A catalog entry for the `@types` package is the project's own pin
-        // and replaces that range; an alias can't be a catalog reference.
         let Ok(major) = node_semver::Version::parse(&version).map(|v| v.major) else {
             continue;
         };
-        let aliased = types_key != types_name;
-        let catalog_range = match opts.save_catalog.as_deref() {
-            Some(target) => workspace_catalogs.get(target),
-            None if matches!(catalog_mode, CatalogMode::Manual) => None,
-            None => default_catalog,
-        }
-        .filter(|_| !aliased)
-        .and_then(|catalog| catalog.get(&types_name));
-        let range = catalog_range.map_or_else(|| format!("^{major}"), Clone::clone);
-        let wanted = catalog_range.map_or_else(
-            || format!("{name} {major}.x"),
-            |range| format!("catalog range {range}"),
-        );
         let picked = types_packument.as_ref().map(|packument| {
             aube_resolver::pick_version_for_add(
                 packument,
                 &types_name,
-                &range,
+                &format!("^{major}"),
                 minimum_release_age.as_ref(),
             )
         });
@@ -882,12 +891,11 @@ pub(super) async fn update_manifest_for_add(
                 } else {
                     format!("{default_prefix}{}", meta.version)
                 };
-                let types_spec = parse_pkg_spec(&types_name)?;
                 let specifier = if let Some(target) = opts.save_catalog.as_deref() {
                     decide_save_catalog(
                         target,
                         &workspace_catalogs,
-                        &types_spec,
+                        &parse_pkg_spec(&types_name)?,
                         aliased,
                         &manual_specifier,
                         &meta.version,
@@ -896,19 +904,7 @@ pub(super) async fn update_manifest_for_add(
                     )
                     .0
                 } else {
-                    match decide_add_rewrite(
-                        catalog_mode,
-                        default_catalog,
-                        &types_name,
-                        &types_spec.range,
-                        false,
-                        &meta.version,
-                        aliased,
-                    ) {
-                        CatalogRewrite::UseDefaultCatalog => "catalog:".to_string(),
-                        // A bare name never mismatches its catalog entry.
-                        _ => manual_specifier,
-                    }
+                    manual_specifier
                 };
                 crate::commands::install::control::output(
                     crate::commands::install::InstallOutputLevel::Info,
@@ -923,9 +919,9 @@ pub(super) async fn update_manifest_for_add(
             // deprecated, which on DefinitelyTyped marks a stub left behind
             // once the library started shipping its own types.
             Some(aube_resolver::PickResult::Found(_)) => "deprecated".to_string(),
-            Some(aube_resolver::PickResult::NoMatch) => format!("no release for {wanted}"),
+            Some(aube_resolver::PickResult::NoMatch) => format!("no release for {name} {major}.x"),
             Some(aube_resolver::PickResult::AgeGated(_)) => {
-                format!("no release for {wanted} is old enough for minimumReleaseAge")
+                format!("no release for {name} {major}.x is old enough for minimumReleaseAge")
             }
         };
         skipped(&types_name, reason);
@@ -1704,7 +1700,6 @@ mod tests {
 
         let (registry, server) = serve_registry(vec![
             registry_doc("listed", &["2.0.0"], json!({})),
-            registry_doc("@types/listed", &["1.0.0"], json!({})),
             registry_doc("unlisted", &["1.0.0"], json!({})),
             registry_doc("@types/unlisted", &["1.0.3"], json!({})),
         ])
@@ -1721,7 +1716,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             project.path().join("pnpm-workspace.yaml"),
-            "catalog:\n  '@types/listed': 1.0.0\n",
+            "catalog:\n  '@types/listed': npm:@acme/listed-types@^2\n",
         )
         .unwrap();
         let manifest_path = project.path().join("package.json");
@@ -1737,7 +1732,7 @@ mod tests {
             async move { update_manifest_for_add(dir, &packages, options, false).await }
         };
 
-        // The entry decides the release, even off the installed major.
+        // The entry is saved as written: nothing serves `@types/listed`.
         add("listed", None).await.unwrap();
         add("unlisted", Some("default")).await.unwrap();
         server.abort();
@@ -1745,7 +1740,6 @@ mod tests {
         assert_eq!(manifest.dev_dependencies["@types/listed"], "catalog:");
         assert_eq!(manifest.dev_dependencies["@types/unlisted"], "catalog:");
         let catalogs = crate::commands::load_workspace_catalogs(project.path()).unwrap();
-        assert_eq!(catalogs["default"]["@types/listed"], "1.0.0");
         assert_eq!(catalogs["default"]["@types/unlisted"], "^1.0.3");
     }
 
