@@ -217,9 +217,7 @@ function main(): void {
   // but auto-isolates to a private target dir the moment this worktree diverges a
   // depended-on crate (vendor/aube, nub-core, …) — which is when the shared dir
   // would otherwise clobber a sibling and fail with a phantom compile error on
-  // correct source. Pre-create the shared dir so the fast path is real on run 1.
-  const sharedTarget = `${homedir()}/.cache/nub/shared-target`;
-  mkdirSync(sharedTarget, { recursive: true });
+  // correct source.
   process.stderr.write("\n");
   process.stderr.write(`worktree ready: ${opts.path}\n`);
   process.stderr.write(`  cd ${opts.path}\n`);

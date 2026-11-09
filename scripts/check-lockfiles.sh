@@ -5,8 +5,8 @@
 #   scripts/check-lockfiles.sh          # verify; exit 1 if any lock is stale
 #   scripts/check-lockfiles.sh --fix    # re-resolve the stale ones, then verify
 #
-# WHY THIS IS A SCRIPT AND NOT A SNIPPET. This repo has FIVE tracked lockfiles in
-# four separate Cargo workspaces plus a path dependency, and only some of them have
+# WHY THIS IS A SCRIPT AND NOT A SNIPPET. This repo has SIX tracked lockfiles in
+# five separate Cargo workspaces plus a path dependency, and only some of them have
 # a `--locked` gate in CI — so a lock with no gate is exactly the one that rots
 # (`crates/nub-phantom` did, until 2026-09-02). The honest enumeration is
 # `git ls-files`, never the list of gates and never a hardcoded array, so this
@@ -65,7 +65,8 @@ if [ -z "$dirs" ]; then
 fi
 
 err=$(mktemp) || exit 2
-trap 'rm -f "$err"' EXIT INT TERM
+trap 'rm -f "$err"' EXIT
+trap 'exit 130' INT TERM
 
 # Cargo's own words for "the lock must change", which is the only failure that
 # means the lock is stale. Matched on the message rather than the exit code

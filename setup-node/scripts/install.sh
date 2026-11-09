@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Vendored verbatim from nubjs/nub@e1306d23ad (install.sh, also served at https://nubjs.com/install.sh).
+# Vendored verbatim from install.sh at this repository's root (also served at https://nubjs.com/install.sh).
 # The action calls it with NUB_INSTALL_DIR + NUB_NO_MODIFY_PATH set; re-vendor when nub changes it.
 set -euo pipefail
 
@@ -90,9 +90,11 @@ case "$platform" in
     *)                error "Unsupported platform: $platform" ;;
 esac
 
-# Detect musl (Alpine)
+# Detect musl (Alpine, and any other musl distro through ldd). musl's
+# `ldd --version` exits 1 even as it prints its banner, so the probe runs with
+# pipefail off: grep's verdict alone decides.
 if [[ "$target" == linux-* ]]; then
-    if [ -f /etc/alpine-release ] || (ldd --version 2>&1 | grep -qi musl); then
+    if [ -f /etc/alpine-release ] || (set +o pipefail; ldd --version 2>&1 | grep -qi musl); then
         target="${target}-musl"
     fi
 fi
@@ -114,7 +116,7 @@ if [[ "$version" == latest ]]; then
     # GITHUB_TOKEN use the anonymous path unchanged.
     api_auth=()
     [[ -n "${GITHUB_TOKEN:-}" ]] && api_auth=(-H "Authorization: token ${GITHUB_TOKEN}")
-    version=$(curl -fsSL ${api_auth[@]+"${api_auth[@]}"} "https://api.github.com/repos/nubjs/nub/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v(.*)".*/\1/')
+    version=$(curl -fsSL ${api_auth[@]+"${api_auth[@]}"} "https://api.github.com/repos/nubjs/nub/releases/latest" | grep '"tag_name"' | sed -E 's/.*"v(.*)".*/\1/') || version=""
     if [[ -z "$version" ]]; then
         error "Failed to determine latest version"
     fi
@@ -177,7 +179,7 @@ fi
 # Replace any prior nub artifacts for a clean upgrade. In the default ~/.nub —
 # which nub owns outright — drop the whole bin/ and a stale runtime/ from a
 # pre-single-binary install. A user-supplied NUB_INSTALL_DIR may hold unrelated
-# files, so there remove only the two executables we wrote. Then extract bin/.
+# files, so there remove only the executables we wrote. Then extract bin/.
 if [[ "$install_dir" == "$default_install_dir" ]]; then
     rm -rf "${install_dir:?}/bin" "${install_dir:?}/runtime"
 else
@@ -191,10 +193,10 @@ chmod +x "$exe" || error "Failed to set permissions on $exe"
 
 # `nubx` and `nubr` are the same binary as `nub`, dispatched on argv[0] (cli.rs
 # reads args_os()[0].file_stem(): "nubx" -> exec, "nubr" -> the unified runner).
-# The release archive ships only bin/nub, so create each alias as a relative
-# symlink alongside it. `-f` makes this idempotent across reinstall/upgrade and
-# harmless if a future archive ever ships its own aliases. Relative target keeps
-# it valid if ~/.nub moves.
+# The release archive carries each alias as a relative symlink beside bin/nub,
+# which tar restored above. Recreate them anyway: an archive from before they
+# shipped has none, and `-f` makes this idempotent across reinstall/upgrade.
+# Relative target keeps it valid if ~/.nub moves.
 for alias in nubx nubr; do
     ln -sf nub "$bin_dir/$alias" || error "Failed to create $alias symlink in $bin_dir"
 done
@@ -287,7 +289,7 @@ success "Installed nub ${display_version} (with nubx and nubr) to $exe"
 
 tildify() {
     if [[ $1 == "$HOME"/* ]]; then
-        echo "~${1#$HOME}"
+        echo "~${1#"$HOME"}"
     else
         echo "$1"
     fi
@@ -399,11 +401,14 @@ fish)
         refresh_command="source $(tildify "$config")"
     fi
     ;;
-*)
+esac
+
+# No profile was written: an unrecognized shell, or none of its profiles is
+# writable (a bash user with neither ~/.bashrc nor ~/.bash_profile).
+if [[ -z "$refresh_command" ]]; then
     echo "Manually add to your shell config:"
     echo -e "  ${Bold}${posix_path_line}${Color_Off}"
-    ;;
-esac
+fi
 
 echo ""
 info "To get started, run:"

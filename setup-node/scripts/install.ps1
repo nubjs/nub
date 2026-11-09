@@ -1,4 +1,4 @@
-# Vendored verbatim from nubjs/nub@e1306d23ad (install.ps1, also served at https://nubjs.com/install.ps1).
+# Vendored verbatim from install.ps1 at this repository's root (also served at https://nubjs.com/install.ps1).
 # The action calls it with NUB_INSTALL_DIR + NUB_NO_MODIFY_PATH set; re-vendor when nub changes it.
 #!/usr/bin/env pwsh
 # Nub installer for Windows (PowerShell)
@@ -82,7 +82,7 @@ try {
     # Replace any prior nub artifacts for a clean upgrade. In the default ~\.nub —
     # which nub owns outright — drop the whole bin\ and a stale runtime\ from a
     # pre-single-binary install. A user-supplied NUB_INSTALL_DIR may hold unrelated
-    # files, so there remove only the two executables we wrote. Then extract bin\.
+    # files, so there remove only the executables we wrote. Then extract bin\.
     if ($InstallDir -ieq $DefaultInstallDir) {
         if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
         if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }
@@ -106,12 +106,15 @@ if (-not (Test-Path $Exe)) {
 
 # `nubx` and `nubr` are the same binary as `nub`, dispatched on argv[0] (cli.rs
 # reads args_os()[0].file_stem(): "nubx" -> exec, "nubr" -> the unified runner).
-# The release archive ships only bin\nub.exe, so create each alias. On Windows we
-# COPY rather than symlink: symlinks require admin/Developer Mode, and a copy
-# reliably yields argv[0] "nubx.exe". Re-extract on upgrade wipes bin\, so these
-# are recreated each run.
+# The release zip carries each alias as a small stub (crates/nub-alias) that runs
+# the sibling nub.exe with the verb, so normally there is nothing to create. An
+# archive from before the stubs shipped has only bin\nub.exe; for that one, COPY
+# the binary under each name — a symlink needs admin/Developer Mode, and a copy
+# reliably yields argv[0] "nubx.exe".
 foreach ($alias in @("nubx", "nubr")) {
-    Copy-Item -Path $Exe -Destination "$BinDir\$alias.exe" -Force
+    if (-not (Test-Path "$BinDir\$alias.exe")) {
+        Copy-Item -Path $Exe -Destination "$BinDir\$alias.exe" -Force
+    }
 }
 
 # `nub pm shim` HARDLINKS %USERPROFILE%\.nub\shims\{npm,npx,…}.exe at the nub

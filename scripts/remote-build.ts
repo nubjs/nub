@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // remote-build — run a nub Rust build/gate on an ephemeral GCE spot VM instead of
-// the maintainer's Mac, and (for a darwin build) pull the signed arm64 binary back.
+// the maintainer's Mac.
 //
 // Runs under BOTH plain Node (type-stripping) and nub:
 //   node scripts/remote-build.ts --job build
@@ -157,7 +157,6 @@ export function parseArgs(argv: string[]) {
     job: "clippy",
     profile: "fast",
     fanout: 1,
-    out: "",
     source: "",
     script: "",
     machine: MACHINE_TYPE,
@@ -177,7 +176,6 @@ export function parseArgs(argv: string[]) {
     } else if (v === "--job") a.job = argv[++i];
     else if (v === "--profile") a.profile = argv[++i];
     else if (v === "--fanout") a.fanout = Number(argv[++i]);
-    else if (v === "--out") a.out = argv[++i];
     else if (v === "--source") a.source = argv[++i];
     else if (v === "--script") a.script = argv[++i];
     else if (v === "--machine") a.machine = argv[++i];
@@ -801,7 +799,6 @@ async function oneBuild(
   idx: number,
   a: ReturnType<typeof parseArgs>,
   source: string,
-  outDir: string,
   live: Set<string>,
   scriptB64 = "",
 ) {
@@ -1056,7 +1053,6 @@ echo "warm target dir: $(du -sh "$CARGO_TARGET_DIR" | cut -f1)"
 async function main() {
   const a = parseArgs(process.argv.slice(2));
   const source = a.source || repoRoot(process.cwd());
-  const outDir = a.out || join(source, "target", "remote");
   // Read before any VM exists: a typo'd --script path must fail here, not minutes later on
   // a provisioned, synced builder.
   let scriptB64 = "";
@@ -1135,7 +1131,7 @@ async function main() {
 
   const t0 = Date.now();
   const results = await Promise.all(
-    Array.from({ length: a.fanout }, (_, i) => oneBuild(i + 1, a, source, outDir, live, scriptB64)),
+    Array.from({ length: a.fanout }, (_, i) => oneBuild(i + 1, a, source, live, scriptB64)),
   );
   clearInterval(sampler);
   const wall = (Date.now() - t0) / 1000;

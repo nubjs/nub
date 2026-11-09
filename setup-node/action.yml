@@ -481,7 +481,7 @@ runs:
           fi
           case "$NODE_VERSION_FILE" in
             # devEngines.runtime.version first (nub's primary signal), then engines.node.
-            *.json) want="$(node -p "try{const p=require('./'+process.argv[1]);const r=p.devEngines&&p.devEngines.runtime;(r&&r.version)||(p.engines&&p.engines.node)||''}catch(e){''}" "$NODE_VERSION_FILE" 2>/dev/null || true)" ;;
+            *.json) want="$(node -p "try{const p=require(require('path').resolve(process.argv[1]));const r=p.devEngines&&p.devEngines.runtime;(r&&r.version)||(p.engines&&p.engines.node)||''}catch(e){''}" "$NODE_VERSION_FILE" 2>/dev/null || true)" ;;
             *)      want="$(head -n1 "$NODE_VERSION_FILE" | tr -d 'v[:space:]')" ;;
           esac
         fi

@@ -22,8 +22,8 @@
 //   SECONDARY : trailing `(#NN)` parsed from each commit SUBJECT in the range
 //               (this repo squash-merges → subjects end with `(#NN)`). Used to
 //               CROSS-CHECK generate-notes and FLAG discrepancies.
-//   REVERTS   : commits matching `Revert "…(#NN)"` / "This reverts commit" in
-//               the range EXCLUDE the reverted PR (it didn't really ship).
+//   REVERTS   : commit subjects matching `Revert "…(#NN)"` in the range
+//               EXCLUDE the reverted PR (it didn't really ship).
 //   ISSUES    : per shipped PR, `closingIssuesReferences` (GraphQL) = the exact
 //               issues that PR formally closed. (Issues closed via bare
 //               `Refs #`/manually are invisible here BY DESIGN — see the
@@ -124,8 +124,8 @@ function prsFromSubjects(newTag: string, prevTag: string): Set<number> {
   return prs;
 }
 
-// PR numbers reverted within the range — both the `Revert "…(#NN)"` subject
-// form and a "This reverts commit <sha>" body referencing a ranged commit.
+// PR numbers reverted within the range, from the `Revert "…(#NN)"` subject form.
+// A revert whose subject names no PR number is not detected.
 function revertedPRs(newTag: string, prevTag: string): Set<number> {
   const reverted = new Set<number>();
   // Subject form: Revert "<original subject ending in (#NN)>"

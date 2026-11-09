@@ -1,4 +1,4 @@
-// Stamp one version across every version surface: the 10 npm package.jsons
+// Stamp one version across every version surface: the npm package.jsons below
 // (root optionalDependencies pinned exact), both workspace Cargo.tomls, and
 // runtime/version.mjs (NUB_VERSION — the transpile-cache key, which must stay in
 // lockstep with the binary version or a stale cache would serve stale output

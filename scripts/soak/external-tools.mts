@@ -444,7 +444,14 @@ async function installAssetTool(name: string, pin: ToolPin): Promise<void> {
   const buf = await download(url, plat.integrity)
   mkdirSync(destDir, { recursive: true })
   if (plat.asset.endsWith('.tar.gz') || plat.asset.endsWith('.zip')) {
-    extractArchive(name, destDir, plat.asset, buf)
+    // A tar that dies midway can still leave `<bin>` behind, truncated, and the
+    // existsSync check above would then call it installed on every later run.
+    try {
+      extractArchive(name, destDir, plat.asset, buf)
+    } catch (err) {
+      rmSync(destDir, { recursive: true, force: true })
+      throw err
+    }
     // Windows archives ship `<bin>.exe`; resolve it before giving up, and
     // clean the partial dir so a retry re-extracts instead of wedging.
     if (!existsSync(destBin) && existsSync(`${destBin}.exe`)) {

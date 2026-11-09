@@ -98,7 +98,6 @@ remove() {
 reap() {
   run git -C "$REPO_ROOT" worktree prune -v
   echo "--- worktrees with uncommitted changes (NOT reaped — commit or rm --force yourself): ---" >&2
-  git -C "$REPO_ROOT" worktree list --porcelain | awk '/^worktree /{p=$2} /^HEAD /{h=$2} END{}'
   local wt
   while IFS= read -r wt; do
     [ "$wt" = "$REPO_ROOT" ] && continue

@@ -20,12 +20,12 @@
 //   2. Skip if the PR is already merged/closed.
 //   3. Watch the PR's CI: poll `gh pr view --json statusCheckRollup` with
 //      exponential backoff (capped) until the decision is terminal.
-//   4. SAFETY (positive gating — see mergeDecision): merge ONLY when every
-//      check concluded SUCCESS/NEUTRAL/SKIPPED, the required `CI gate`
-//      aggregator check is PRESENT and SUCCESS (it registers last — a partial
-//      all-green rollup is NOT done), AND mergeable === "MERGEABLE" (UNKNOWN is
-//      treated as not-ready and re-polled, never as green). Any FAILURE/
-//      cancelled, a CONFLICTING PR, blocks. State is re-read immediately before
+//   4. SAFETY (positive gating — see mergeDecision): merge ONLY when the
+//      required `CI gate` aggregator check is PRESENT and green (it registers
+//      last — a partial all-green rollup is NOT done) AND mergeable ===
+//      "MERGEABLE" (UNKNOWN is treated as not-ready and re-polled, never as
+//      green). A failed/cancelled required gate, or a CONFLICTING PR, blocks; a
+//      non-required check, pending or failed, does not. State is re-read immediately before
 //      the merge to close the poll→merge staleness window.
 //   5. `gh pr merge <pr> --squash --admin`.
 //   6. `git -C <shared-tree> fetch origin && git -C <shared-tree> merge --ff-only origin/main`
@@ -297,7 +297,19 @@ async function watchUntilTerminal(
   let delay = 15_000; // start at 15s
   const maxDelay = 120_000; // cap at 2min
   for (;;) {
-    const st = prState(pr);
+    // A transient gh/API failure is one more poll, not the end of the drain: thrown out
+    // of here it would reject main() and abandon every PR still queued behind this one.
+    let st: { state: string; mergeable: string; rollup: RollupItem[] };
+    try {
+      st = prState(pr);
+    } catch (err) {
+      const reason = `could not read PR state (${(err as Error).message.split("\n")[0]})`;
+      console.log(`    … ${reason}`);
+      if (Date.now() > deadline) return { ok: false, reason: `timed out after ${maxMinutes}min (last: ${reason})` };
+      await sleep(delay);
+      delay = Math.min(delay * 1.5, maxDelay);
+      continue;
+    }
     const d = mergeDecision(st);
     if (d.verdict === "merge") return { ok: true, reason: d.reason };
     if (d.verdict === "block") return { ok: false, reason: d.reason };
