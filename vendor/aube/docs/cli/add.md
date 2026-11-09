@@ -60,6 +60,9 @@ Add a dependency
 - **`--save-peer`** — Add as a peer dependency (written to `peerDependencies` in package.json).
 
   By convention you usually pair this with `--save-dev` so the peer is also installed for local development; that's what pnpm does.
+- **`--save-types`** — Also save the matching `@types/*` package to `devDependencies`.
+
+  For each registry package that ships no TypeScript types, looks up its DefinitelyTyped package (`@scope/pkg` becomes `@types/scope__pkg`) and saves its newest release on the same major version. Nothing is added for a package that declares `types`, `typings` or a `types` export condition, for an `@types/*` package, when the project already lists the `@types` package, or when the registry has no matching release.
 - **`--save-workspace-protocol`** — Force the manifest specifier into `workspace:` form for this invocation, overriding `saveWorkspaceProtocol` from the workspace yaml / `.npmrc` / env.
 
   Only meaningful when `linkWorkspacePackages` (or a workspace sibling already exists for the named package). With this flag the entry written to `package.json` is `workspace:^` (rolling) or `workspace:^<version>` (pinned), depending on the resolved `saveWorkspaceProtocol` value.

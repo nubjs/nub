@@ -13,6 +13,7 @@ pub(super) struct AddManifestOptions {
     pub(super) save_exact: bool,
     pub(super) save_optional: bool,
     pub(super) save_peer: bool,
+    pub(super) save_types: bool,
     pub(super) network_mode: aube_registry::NetworkMode,
     /// Target catalog for `--save-catalog` / `--save-catalog-name`.
     /// `None` means neither flag was passed and the catalog yaml is
@@ -37,6 +38,7 @@ impl AddManifestOptions {
             save_exact: args.save_exact,
             save_optional: args.save_optional,
             save_peer: args.save_peer,
+            save_types: args.save_types,
             network_mode: aube_registry::NetworkMode::Online,
             save_catalog: args.save_catalog_name.clone().or_else(|| {
                 if args.save_catalog {
@@ -133,6 +135,34 @@ fn place_dep_in_manifest(
     } else {
         manifest.dependencies.insert(dep_name, specifier);
     }
+}
+
+/// DefinitelyTyped's name for `name`: `@scope/pkg` → `@types/scope__pkg`.
+fn types_package_name(name: &str) -> String {
+    match name.strip_prefix('@') {
+        Some(scoped) => format!("@types/{}", scoped.replacen('/', "__", 1)),
+        None => format!("@types/{name}"),
+    }
+}
+
+/// Whether a version's registry manifest declares its own TypeScript types.
+/// A root `index.d.ts` with none of these fields is invisible here: the
+/// registry metadata doesn't list a tarball's files.
+fn has_bundled_types(version: &serde_json::Value) -> bool {
+    fn exports_have_types(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(conditions) => conditions.iter().any(|(key, target)| {
+                ((key == "types" || key.starts_with("types@")) && !target.is_null())
+                    || exports_have_types(target)
+            }),
+            serde_json::Value::Array(targets) => targets.iter().any(exports_have_types),
+            _ => false,
+        }
+    }
+    ["types", "typings"]
+        .iter()
+        .any(|field| version[field].as_str().is_some_and(|path| !path.is_empty()))
+        || exports_have_types(&version["exports"])
 }
 
 pub(super) async fn update_manifest_for_add(
@@ -395,6 +425,8 @@ pub(super) async fn update_manifest_for_add(
         let (name, packument) = handle.into_diagnostic()??;
         packuments.insert(name, packument);
     }
+    // `--save-types` candidates: (manifest key, registry name, installed version).
+    let mut types_candidates = Vec::new();
 
     // Resolve each package and update manifest.
     for (spec, orig) in parsed.iter().zip(packages.iter()) {
@@ -736,6 +768,113 @@ pub(super) async fn update_manifest_for_add(
         );
 
         place_dep_in_manifest(&mut manifest, pkg_name_for_manifest, specifier, &opts);
+        if opts.save_types && !is_jsr && !spec.name.starts_with("@types/") {
+            types_candidates.push((
+                pkg_name_for_manifest.to_string(),
+                spec.name.clone(),
+                display_version,
+            ));
+        }
+    }
+
+    // After the loop, so an `@types/*` named in this same command, or one the
+    // project already lists, is kept exactly as written.
+    let skipped = |types_name: &str, reason: String| {
+        crate::commands::install::control::output(
+            crate::commands::install::InstallOutputLevel::Info,
+            None,
+            format!("  skipped {types_name}: {reason}"),
+        );
+    };
+    // A name without a scope resolves to the default registry.
+    let default_registry = client.config_registry_for("");
+    for (key, name, version) in types_candidates {
+        // TypeScript finds an alias's types under the alias, so `renamed`
+        // for `npm:real` gets `@types/renamed` pointing at `npm:@types/real`.
+        let types_key = types_package_name(&key);
+        let types_name = types_package_name(&name);
+        if manifest.direct_dependency_range(&types_key).is_some()
+            || manifest.peer_dependencies.contains_key(&types_key)
+        {
+            continue;
+        }
+        // Abbreviated packuments drop `types`/`typings`/`exports`, so read
+        // the installed version from the full document.
+        let full = client
+            .fetch_packument_full_cached(&name, &full_cache_dir)
+            .await
+            .map_err(|e| miette!("failed to fetch {name}: {e}"))?;
+        if full["versions"].get(&version).is_none_or(has_bundled_types) {
+            continue;
+        }
+        // A package from its scope's own registry (`@acme:registry=`) may be
+        // private, so its name is never sent to a different registry for
+        // `@types`. A package from the default registry is looked up wherever
+        // the `@types` scope points.
+        let registry = client.config_registry_for(&name);
+        if registry != default_registry && registry != client.config_registry_for(&types_name) {
+            skipped(
+                &types_name,
+                format!("{name} and @types use different registries"),
+            );
+            continue;
+        }
+        let fetched = if needs_time {
+            client
+                .fetch_packument_with_time_cached(&types_name, &full_cache_dir)
+                .await
+        } else {
+            client
+                .fetch_packument_cached(&types_name, &corgi_cache_dir)
+                .await
+        };
+        // Only a 404 means "no such package"; auth and network failures
+        // stop the add before package.json is written.
+        let types_packument = match fetched {
+            Ok(packument) => Some(packument),
+            Err(aube_registry::Error::NotFound(_)) => None,
+            Err(e) => return Err(miette!("failed to fetch {types_name}: {e}")),
+        };
+        // DefinitelyTyped versions follow the library's major.minor, so stay
+        // on the major just installed rather than taking `latest`. A `^N`
+        // range never admits a prerelease, so the save prefix always applies.
+        let Ok(major) = node_semver::Version::parse(&version).map(|v| v.major) else {
+            continue;
+        };
+        let picked = types_packument.as_ref().map(|packument| {
+            aube_resolver::pick_version_for_add(
+                packument,
+                &types_name,
+                &format!("^{major}"),
+                minimum_release_age.as_ref(),
+            )
+        });
+        let reason = match picked {
+            Some(aube_resolver::PickResult::Found(meta)) if meta.deprecated.is_none() => {
+                let specifier = if types_key == types_name {
+                    format!("{default_prefix}{}", meta.version)
+                } else {
+                    format!("npm:{types_name}@{default_prefix}{}", meta.version)
+                };
+                crate::commands::install::control::output(
+                    crate::commands::install::InstallOutputLevel::Info,
+                    None,
+                    format!("  + {types_key}@{} (specifier: {specifier})", meta.version),
+                );
+                manifest.dev_dependencies.insert(types_key, specifier);
+                continue;
+            }
+            None => "not found on the registry".to_string(),
+            // The pick only lands on a deprecated release when every match is
+            // deprecated, which on DefinitelyTyped marks a stub left behind
+            // once the library started shipping its own types.
+            Some(aube_resolver::PickResult::Found(_)) => "deprecated".to_string(),
+            Some(aube_resolver::PickResult::NoMatch) => format!("no release for {name} {major}.x"),
+            Some(aube_resolver::PickResult::AgeGated(_)) => {
+                format!("no release for {name} {major}.x is old enough for minimumReleaseAge")
+            }
+        };
+        skipped(&types_name, reason);
     }
 
     // Pre-flight the catalog write target BEFORE mutating the dependent
@@ -1083,6 +1222,7 @@ mod tests {
             save_exact: false,
             save_optional,
             save_peer,
+            save_types: false,
             network_mode: aube_registry::NetworkMode::Online,
             save_catalog: None,
             workspace_protocol_override: None,
@@ -1227,6 +1367,7 @@ mod tests {
                 save_exact: false,
                 save_optional: false,
                 save_peer: false,
+                save_types: false,
                 network_mode: aube_registry::NetworkMode::Offline,
                 save_catalog: None,
                 workspace_protocol_override: None,
@@ -1278,6 +1419,7 @@ mod tests {
                         save_exact: false,
                         save_optional: false,
                         save_peer: false,
+                        save_types: false,
                         network_mode: aube_registry::NetworkMode::Offline,
                         save_catalog: None,
                         workspace_protocol_override: None,
@@ -1298,6 +1440,181 @@ mod tests {
         );
         // A stable tag keeps the configured prefix.
         assert!(add("tagged@latest").await.contains(r#""tagged": "^7.0.2""#));
+    }
+
+    #[test]
+    fn bundled_types_come_from_types_typings_or_a_types_export_condition() {
+        use serde_json::json;
+        for declared in [
+            json!({ "types": "index.d.ts" }),
+            json!({ "typings": "index.d.ts" }),
+            json!({ "exports": { ".": { "import": { "types": "./index.d.mts" } } } }),
+            json!({ "exports": [{ "types@>=5": "./ts5.d.ts" }, "./index.js"] }),
+        ] {
+            assert!(has_bundled_types(&declared), "{declared}");
+        }
+        for untyped in [
+            json!({}),
+            json!({ "types": "" }),
+            json!({ "exports": { ".": { "types": null, "default": "./index.js" } } }),
+        ] {
+            assert!(!has_bundled_types(&untyped), "{untyped}");
+        }
+        assert_eq!(types_package_name("express"), "@types/express");
+        assert_eq!(types_package_name("@babel/core"), "@types/babel__core");
+    }
+
+    /// A mock-registry document for `name`, every version carrying `fields`.
+    fn registry_doc(
+        name: &str,
+        versions: &[&str],
+        fields: serde_json::Value,
+    ) -> (String, u16, String) {
+        let docs: serde_json::Map<_, _> = versions
+            .iter()
+            .map(|version| {
+                let mut doc = fields.clone();
+                doc["name"] = name.into();
+                doc["version"] = (*version).into();
+                (version.to_string(), doc)
+            })
+            .collect();
+        let body = serde_json::json!({
+            "name": name,
+            "dist-tags": { "latest": versions.last() },
+            "versions": docs,
+        });
+        (name.to_string(), 200, body.to_string())
+    }
+
+    #[tokio::test]
+    async fn save_types_adds_types_only_for_untyped_packages_and_fails_on_a_lookup_error() {
+        use serde_json::json;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let routes = vec![
+            registry_doc("untyped", &["1.2.0"], json!({})),
+            registry_doc("@types/untyped", &["1.0.5", "2.0.0"], json!({})),
+            registry_doc("@scope/untyped", &["3.1.0"], json!({})),
+            registry_doc("@types/scope__untyped", &["3.0.1"], json!({})),
+            registry_doc("typed", &["2.0.0"], json!({ "types": "index.d.ts" })),
+            registry_doc("@types/typed", &["2.0.0"], json!({})),
+            registry_doc("no-dt", &["1.0.0"], json!({})),
+            registry_doc("kept", &["1.0.0"], json!({})),
+            registry_doc("@types/kept", &["1.0.0"], json!({})),
+            registry_doc("@private/lib", &["1.0.0"], json!({})),
+            registry_doc("@types/private__lib", &["1.0.0"], json!({})),
+            registry_doc("denied", &["1.0.0"], json!({})),
+            ("@types/denied".to_string(), 401, String::new()),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let registry = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                // `@private` is scoped to `/private/` on this same server, and
+                // `@types/*` is served only under `/types/`, where `@types` points.
+                let path = request.split_whitespace().nth(1).unwrap_or_default();
+                let path = path.trim_start_matches("/private");
+                let (status, body) = routes
+                    .iter()
+                    .find(|(name, ..)| {
+                        let prefix = if name.starts_with("@types/") {
+                            "/types"
+                        } else {
+                            ""
+                        };
+                        path == format!("{prefix}/{}", name.replace('/', "%2F"))
+                    })
+                    .map_or((404, ""), |(_, status, body)| (*status, body.as_str()));
+                let response = format!(
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".npmrc"),
+            format!(
+                "registry={registry}\n@private:registry={registry}private/\n\
+                 @types:registry={registry}types/\n\
+                 cache-dir={}\nminimumReleaseAge=0\n",
+                project.path().join("cache").display()
+            ),
+        )
+        .unwrap();
+        let manifest_path = project.path().join("package.json");
+        std::fs::write(
+            &manifest_path,
+            r#"{ "dependencies": { "@types/kept": "~0.1.0" } }"#,
+        )
+        .unwrap();
+        let save_types = || AddManifestOptions {
+            save_types: true,
+            ..opts(false, false, false)
+        };
+
+        #[derive(Default)]
+        struct RecordingReporter(std::sync::Mutex<Vec<String>>);
+        impl crate::commands::install::InstallReporter for RecordingReporter {
+            fn report(&self, event: crate::commands::install::InstallEvent) {
+                if let crate::commands::install::InstallEvent::Output { message, .. } = event {
+                    self.0.lock().unwrap().push(message);
+                }
+            }
+        }
+        let reporter = std::sync::Arc::new(RecordingReporter::default());
+        crate::commands::install::control::scope(
+            crate::commands::install::InstallControl::events(reporter.clone()),
+            update_manifest_for_add(
+                project.path(),
+                &[
+                    "untyped",
+                    "@scope/untyped",
+                    "typed",
+                    "no-dt",
+                    "kept",
+                    "@private/lib",
+                ]
+                .map(String::from),
+                save_types(),
+                false,
+            ),
+        )
+        .await
+        .unwrap();
+        let manifest = aube_manifest::PackageJson::from_path(&manifest_path).unwrap();
+        // `@types/untyped` stays on its library's major, not on `latest`, and
+        // comes from the `@types` registry although `untyped` doesn't.
+        // `@types/private__lib` is never asked of a registry `@private`
+        // doesn't use, and the add says so.
+        assert_eq!(
+            manifest.dev_dependencies,
+            BTreeMap::from([
+                ("@types/scope__untyped".to_string(), "^3.0.1".to_string()),
+                ("@types/untyped".to_string(), "^1.0.5".to_string()),
+            ]),
+        );
+        assert_eq!(manifest.dependencies["@types/kept"], "~0.1.0");
+        let output = reporter.0.lock().unwrap().clone();
+        let skip =
+            "  skipped @types/private__lib: @private/lib and @types use different registries";
+        assert!(output.iter().any(|line| line == skip), "{output:#?}");
+
+        // Only a 404 is skipped: a 401 fails the add before package.json is written.
+        let written = std::fs::read_to_string(&manifest_path).unwrap();
+        let error =
+            update_manifest_for_add(project.path(), &["denied".to_string()], save_types(), false)
+                .await
+                .unwrap_err();
+        server.abort();
+        assert!(error.to_string().contains("@types/denied"), "{error}");
+        assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), written);
     }
 
     #[tokio::test]
@@ -1345,6 +1662,7 @@ mod tests {
                 save_exact: false,
                 save_optional: false,
                 save_peer: false,
+                save_types: false,
                 network_mode: aube_registry::NetworkMode::Offline,
                 save_catalog: None,
                 workspace_protocol_override: None,
