@@ -7,7 +7,7 @@
 //! happens at presentation time, never by renaming codes in the fork):
 //!
 //! 1. **Rewrite** rendered text: `ERR_AUBE_*` → `ERR_NUB_*`, `WARN_AUBE_*` →
-//!    `WARN_NUB_*`, `aube.jdx.dev` URLs stripped (a line left holding only a
+//!    `WARN_NUB_*`, engine-doc URLs stripped (a line left holding only a
 //!    dangling label like `Details:` is dropped whole), and message-level
 //!    `aube`/`Aube` verb/binary spellings rebranded to `nub` — while
 //!    preserving real on-disk names (`aube-lock.yaml`,
@@ -54,7 +54,6 @@ pub(crate) fn exit_code(report: &miette::Report) -> i32 {
 
 /// Warning passthrough for family verbs (stderr, rewritten). Use for
 /// non-fatal engine-adjacent notices.
-#[allow(dead_code)] // first consumers land with the family fill-ins
 pub(crate) fn warn(msg: &str) {
     eprintln!("{}", rewrite(msg));
 }
@@ -508,7 +507,7 @@ mod tests {
     fn neutralizes_misleading_frozen_lockfile_name() {
         // The `nub ci` / `--frozen-lockfile` missing-lockfile hint names a
         // single lockfile to commit, but a fresh `nub install` may write
-        // `lock.yaml` (truly-fresh) rather than `pnpm-lock.yaml` — so the
+        // `nub.lock` (truly-fresh) rather than `pnpm-lock.yaml` — so the
         // specific name is misleading. The corrected hint names no specific
         // file.
         let msg = "no lockfile found and --frozen-lockfile is set\n\

@@ -753,7 +753,7 @@ pub(super) fn resolved_rows(index: &SourceIndex) -> Vec<Row> {
 }
 
 /// Print the resolved layout ahead of the engine's progress display. Silent
-/// under `--silent`; otherwise always prints at least the `layout` row, so a
+/// under `--silent`; otherwise always prints at least the `linker` row, so a
 /// default install is one line here and one line at the end.
 pub(super) fn print_resolved_layout(
     cwd: &Path,

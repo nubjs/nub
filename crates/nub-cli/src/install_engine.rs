@@ -24,10 +24,10 @@ use nub_core::workspace::detect::detect_project;
 const STAMP_FILE: &str = ".nub-engine";
 
 /// The directory a nub install keys its tree at: the workspace root when the
-/// project is a member, else the project root. Same rule
-/// `pm_engine::apply_lifecycle_augmentation` anchors Node discovery on — one
-/// workspace materializes ONE tree, so a member's own `.nvmrc` must not name a
-/// different engine than the root the install actually wrote.
+/// project is a member, else the project root. The lifecycle Node discovery
+/// (`pm_engine::lifecycle_node_anchor`) anchors on this too — one workspace
+/// materializes ONE tree, so a member's own `.nvmrc` must not name a different
+/// engine than the root the install actually wrote.
 pub(crate) fn anchor(cwd: &Path) -> Option<PathBuf> {
     detect_project(cwd).map(|p| p.workspace_root.unwrap_or(p.root))
 }

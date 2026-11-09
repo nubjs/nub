@@ -82,10 +82,6 @@
 //!   config-location spellings map to nub's configured contract
 //!   (`aube-workspace.yaml` → `pnpm-workspace.yaml`, `why`'s
 //!   `.aube/<dep_path>` example → `.store/<dep_path>`).
-//! - `outdated` / `audit` / `peers check` signal "findings exist" via
-//!   `std::process::exit(1)` *inside* the engine (pnpm-compat), after the
-//!   report is fully printed — they bypass this file's `Result<i32>` return
-//!   path but produce the correct stream content and exit codes.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -455,15 +451,12 @@ fn run_deprecations(typed: &str, args: &[String]) -> Result<i32> {
     {
         return Ok(code);
     }
-    // `deprecations` is the one info verb whose engine `run` returns its
-    // exit code (`--exit-code` ⇒ Some(1) when deprecations are found).
-    match session
-        .runtime
-        .block_on(aube::commands::deprecations::run(cli.args))
-    {
-        Ok(code) => Ok(code.unwrap_or(0)),
-        Err(report) => Ok(present::emit_report(&report)),
-    }
+    // `--exit-code` ⇒ Some(1) when deprecations are found.
+    finish_code(
+        session
+            .runtime
+            .block_on(aube::commands::deprecations::run(cli.args)),
+    )
 }
 
 fn run_peers(typed: &str, args: &[String]) -> Result<i32> {
@@ -544,9 +537,8 @@ fn run_check(typed: &str, args: &[String]) -> Result<i32> {
     let session = super::engine_session_quiet(cli.dir.as_deref())?;
     // Reads the *resolved* virtual store (node_modules/.store under nub's
     // defaults); a never-installed project reports `checked 0 packages`
-    // rather than erroring, so no pre-flight applies. Broken links exit 1
-    // via std::process::exit inside the engine (pnpm-compat), like
-    // outdated/audit.
+    // rather than erroring, so no pre-flight applies. Broken links come back
+    // as the engine's exit code 1 (pnpm-compat), like outdated/audit.
     finish_code(
         session
             .runtime
@@ -684,10 +676,10 @@ fn empty_list_json(dir: &Path) -> String {
 }
 
 /// Replica of the engine's `dirs::find_project_root`: nearest ancestor with
-/// a `package.json`, walking no further up than `$HOME` (so a scratch dir
-/// can't attach to a stray home-level project).
+/// a `package.json`, walking no further up than the engine's own home
+/// boundary (so a scratch dir can't attach to a stray home-level project).
 fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let stop = home_boundary();
+    let stop = aube_util::env::home_dir();
     for dir in start.ancestors() {
         if dir.join("package.json").is_file() {
             return Some(dir.to_path_buf());
@@ -699,35 +691,11 @@ fn find_project_root(start: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Replica of the engine's `dirs::find_workspace_root`: nearest ancestor
-/// with a workspace yaml (`pnpm-workspace.yaml` / `aube-workspace.yaml`) or
-/// a `package.json` carrying a `workspaces` field, same `$HOME` cap.
+/// The engine's `dirs::find_workspace_root` minus its process cache: nearest
+/// ancestor with a workspace yaml or a `package.json` carrying a `workspaces`
+/// field, under the same home boundary.
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
-    let stop = home_boundary();
-    for dir in start.ancestors() {
-        if aube_manifest::workspace::workspace_yaml_existing(dir).is_some() {
-            return Some(dir.to_path_buf());
-        }
-        let pkg = dir.join("package.json");
-        if pkg.is_file()
-            && aube_manifest::PackageJson::from_path(&pkg).is_ok_and(|m| m.workspaces.is_some())
-        {
-            return Some(dir.to_path_buf());
-        }
-        if stop.as_deref() == Some(dir) {
-            return None;
-        }
-    }
-    None
-}
-
-/// `$HOME` (Unix) / `USERPROFILE` (Windows) walk boundary, mirroring the
-/// engine's `home_stop_boundary`. `None` ⇒ unbounded walk, same fallback.
-fn home_boundary() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|v| !v.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
-        .map(PathBuf::from)
+    aube_manifest::workspace::find_workspace_root(start)
 }
 
 #[cfg(test)]
