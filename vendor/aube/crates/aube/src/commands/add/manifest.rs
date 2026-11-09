@@ -3,6 +3,7 @@ use super::spec::{ParsedPkgSpec, parse_pkg_spec};
 use crate::commands::catalogs::{
     CatalogRewrite, CatalogUpsert, decide_add_rewrite, range_compatible,
 };
+use aube_settings::resolved::CatalogMode;
 use miette::{Context, IntoDiagnostic, miette};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -848,23 +849,66 @@ pub(super) async fn update_manifest_for_add(
         // DefinitelyTyped versions follow the library's major.minor, so stay
         // on the major just installed rather than taking `latest`. A `^N`
         // range never admits a prerelease, so the save prefix always applies.
+        // A catalog entry for the `@types` package is the project's own pin
+        // and replaces that range; an alias can't be a catalog reference.
         let Ok(major) = node_semver::Version::parse(&version).map(|v| v.major) else {
             continue;
         };
+        let aliased = types_key != types_name;
+        let catalog_range = match opts.save_catalog.as_deref() {
+            Some(target) => workspace_catalogs.get(target),
+            None if matches!(catalog_mode, CatalogMode::Manual) => None,
+            None => default_catalog,
+        }
+        .filter(|_| !aliased)
+        .and_then(|catalog| catalog.get(&types_name));
+        let range = catalog_range.map_or_else(|| format!("^{major}"), Clone::clone);
+        let wanted = catalog_range.map_or_else(
+            || format!("{name} {major}.x"),
+            |range| format!("catalog range {range}"),
+        );
         let picked = types_packument.as_ref().map(|packument| {
             aube_resolver::pick_version_for_add(
                 packument,
                 &types_name,
-                &format!("^{major}"),
+                &range,
                 minimum_release_age.as_ref(),
             )
         });
         let reason = match picked {
             Some(aube_resolver::PickResult::Found(meta)) if meta.deprecated.is_none() => {
-                let specifier = if types_key == types_name {
-                    format!("{default_prefix}{}", meta.version)
-                } else {
+                let manual_specifier = if aliased {
                     format!("npm:{types_name}@{default_prefix}{}", meta.version)
+                } else {
+                    format!("{default_prefix}{}", meta.version)
+                };
+                let types_spec = parse_pkg_spec(&types_name)?;
+                let specifier = if let Some(target) = opts.save_catalog.as_deref() {
+                    decide_save_catalog(
+                        target,
+                        &workspace_catalogs,
+                        &types_spec,
+                        aliased,
+                        &manual_specifier,
+                        &meta.version,
+                        &mut catalog_upserts,
+                        |_| None,
+                    )
+                    .0
+                } else {
+                    match decide_add_rewrite(
+                        catalog_mode,
+                        default_catalog,
+                        &types_name,
+                        &types_spec.range,
+                        false,
+                        &meta.version,
+                        aliased,
+                    ) {
+                        CatalogRewrite::UseDefaultCatalog => "catalog:".to_string(),
+                        // A bare name never mismatches its catalog entry.
+                        _ => manual_specifier,
+                    }
                 };
                 crate::commands::install::control::output(
                     crate::commands::install::InstallOutputLevel::Info,
@@ -879,9 +923,9 @@ pub(super) async fn update_manifest_for_add(
             // deprecated, which on DefinitelyTyped marks a stub left behind
             // once the library started shipping its own types.
             Some(aube_resolver::PickResult::Found(_)) => "deprecated".to_string(),
-            Some(aube_resolver::PickResult::NoMatch) => format!("no release for {name} {major}.x"),
+            Some(aube_resolver::PickResult::NoMatch) => format!("no release for {wanted}"),
             Some(aube_resolver::PickResult::AgeGated(_)) => {
-                format!("no release for {name} {major}.x is old enough for minimumReleaseAge")
+                format!("no release for {wanted} is old enough for minimumReleaseAge")
             }
         };
         skipped(&types_name, reason);
@@ -1500,28 +1544,13 @@ mod tests {
         (name.to_string(), 200, body.to_string())
     }
 
-    #[tokio::test]
-    async fn save_types_adds_types_only_for_untyped_packages_and_fails_on_a_lookup_error() {
-        use serde_json::json;
+    /// Serves `routes` as a registry: `@types/*` only under `/types/`, and
+    /// `/private/` as a second registry for `@private`.
+    async fn serve_registry(
+        routes: Vec<(String, u16, String)>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let routes = vec![
-            registry_doc("untyped", &["1.2.0"], json!({})),
-            registry_doc("@types/untyped", &["1.0.5", "2.0.0"], json!({})),
-            registry_doc("@scope/untyped", &["3.1.0"], json!({})),
-            registry_doc("@types/scope__untyped", &["3.0.1"], json!({})),
-            registry_doc("typed", &["2.0.0"], json!({ "types": "index.d.ts" })),
-            registry_doc("@types/typed", &["2.0.0"], json!({})),
-            registry_doc("no-dt", &["1.0.0"], json!({})),
-            registry_doc("kept", &["1.0.0"], json!({})),
-            registry_doc("@types/kept", &["1.0.0"], json!({})),
-            registry_doc("@private/lib", &["1.0.0"], json!({})),
-            registry_doc("@types/private__lib", &["1.0.0"], json!({})),
-            registry_doc("denied", &["1.0.0"], json!({})),
-            registry_doc("twice", &["4.0.0", "5.0.0"], json!({})),
-            registry_doc("@types/twice", &["4.0.0", "5.0.0"], json!({})),
-            ("@types/denied".to_string(), 401, String::new()),
-        ];
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let registry = format!("http://{}/", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
@@ -1530,8 +1559,6 @@ mod tests {
                 let mut request = [0_u8; 4096];
                 let read = stream.read(&mut request).await.unwrap();
                 let request = String::from_utf8_lossy(&request[..read]);
-                // `@private` is scoped to `/private/` on this same server, and
-                // `@types/*` is served only under `/types/`, where `@types` points.
                 let path = request.split_whitespace().nth(1).unwrap_or_default();
                 let path = path.trim_start_matches("/private");
                 let (status, body) = routes
@@ -1552,6 +1579,37 @@ mod tests {
                 let _ = stream.write_all(response.as_bytes()).await;
             }
         });
+        (registry, server)
+    }
+
+    #[tokio::test]
+    async fn save_types_adds_types_only_for_untyped_packages_and_fails_on_a_lookup_error() {
+        use serde_json::json;
+
+        let routes = vec![
+            registry_doc("untyped", &["1.2.0"], json!({})),
+            registry_doc("@types/untyped", &["1.0.5", "2.0.0"], json!({})),
+            registry_doc("@scope/untyped", &["3.1.0"], json!({})),
+            registry_doc("@types/scope__untyped", &["3.0.1"], json!({})),
+            registry_doc("typed", &["2.0.0"], json!({ "types": "index.d.ts" })),
+            registry_doc("@types/typed", &["2.0.0"], json!({})),
+            registry_doc("no-dt", &["1.0.0"], json!({})),
+            registry_doc("kept", &["1.0.0"], json!({})),
+            registry_doc("@types/kept", &["1.0.0"], json!({})),
+            registry_doc("@private/lib", &["1.0.0"], json!({})),
+            registry_doc("@types/private__lib", &["1.0.0"], json!({})),
+            registry_doc("denied", &["1.0.0"], json!({})),
+            registry_doc("twice", &["4.0.0", "5.0.0"], json!({})),
+            registry_doc("@types/twice", &["4.0.0", "5.0.0"], json!({})),
+            ("@types/denied".to_string(), 401, String::new()),
+            registry_doc("stubbed", &["1.0.0"], json!({})),
+            registry_doc(
+                "@types/stubbed",
+                &["1.0.0"],
+                json!({ "deprecated": "stub types" }),
+            ),
+        ];
+        let (registry, server) = serve_registry(routes).await;
         let project = tempfile::tempdir().unwrap();
         std::fs::write(
             project.path().join(".npmrc"),
@@ -1597,6 +1655,7 @@ mod tests {
                     "@private/lib",
                     "twice@4.0.0",
                     "twice@5.0.0",
+                    "stubbed",
                 ]
                 .map(String::from),
                 save_types(),
@@ -1625,6 +1684,8 @@ mod tests {
         let skip =
             "  skipped @types/private__lib: @private/lib and @types use different registries";
         assert!(output.iter().any(|line| line == skip), "{output:#?}");
+        let skip = "  skipped @types/stubbed: deprecated";
+        assert!(output.iter().any(|line| line == skip), "{output:#?}");
 
         // Only a 404 is skipped: a 401 fails the add before package.json is written.
         let written = std::fs::read_to_string(&manifest_path).unwrap();
@@ -1635,6 +1696,57 @@ mod tests {
         server.abort();
         assert!(error.to_string().contains("@types/denied"), "{error}");
         assert_eq!(std::fs::read_to_string(&manifest_path).unwrap(), written);
+    }
+
+    #[tokio::test]
+    async fn save_types_goes_through_the_workspace_catalog() {
+        use serde_json::json;
+
+        let (registry, server) = serve_registry(vec![
+            registry_doc("listed", &["2.0.0"], json!({})),
+            registry_doc("@types/listed", &["1.0.0"], json!({})),
+            registry_doc("unlisted", &["1.0.0"], json!({})),
+            registry_doc("@types/unlisted", &["1.0.3"], json!({})),
+        ])
+        .await;
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join(".npmrc"),
+            format!(
+                "registry={registry}\n@types:registry={registry}types/\n\
+                 cache-dir={}\nminimumReleaseAge=0\ncatalogMode=strict\n",
+                project.path().join("cache").display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join("pnpm-workspace.yaml"),
+            "catalog:\n  '@types/listed': 1.0.0\n",
+        )
+        .unwrap();
+        let manifest_path = project.path().join("package.json");
+        std::fs::write(&manifest_path, "{}").unwrap();
+        let add = |name: &str, save_catalog: Option<&str>| {
+            let dir = project.path();
+            let packages = [name.to_string()];
+            let options = AddManifestOptions {
+                save_types: true,
+                save_catalog: save_catalog.map(String::from),
+                ..opts(false, false, false)
+            };
+            async move { update_manifest_for_add(dir, &packages, options, false).await }
+        };
+
+        // The entry decides the release, even off the installed major.
+        add("listed", None).await.unwrap();
+        add("unlisted", Some("default")).await.unwrap();
+        server.abort();
+        let manifest = aube_manifest::PackageJson::from_path(&manifest_path).unwrap();
+        assert_eq!(manifest.dev_dependencies["@types/listed"], "catalog:");
+        assert_eq!(manifest.dev_dependencies["@types/unlisted"], "catalog:");
+        let catalogs = crate::commands::load_workspace_catalogs(project.path()).unwrap();
+        assert_eq!(catalogs["default"]["@types/listed"], "1.0.0");
+        assert_eq!(catalogs["default"]["@types/unlisted"], "^1.0.3");
     }
 
     #[tokio::test]
