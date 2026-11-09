@@ -6,10 +6,10 @@
 //! because it reads a stylesheet from a path built at run time; `parse5` never had
 //! to, and its 64 files now ship as a chunk and a stub manifest.
 //!
-//! That matters more than the file count suggests. The launcher byte-verifies the
-//! WHOLE extracted tree on every warm start (`app_cache_tree_matches`), so an
-//! unloaded payload file is not free: 37 of pdfkit's 1194 files are ever loaded
-//! and all 1194 are checked, at roughly 20 µs each.
+//! That matters more than the file count suggests. The launcher writes the WHOLE
+//! payload and checks every file against it (`app_cache_tree_matches`) before it
+//! publishes an extraction, so an unloaded payload file is not free: 37 of
+//! pdfkit's 1194 files are ever loaded, and all 1194 are extracted and checked.
 //!
 //! So [`super::native`] classifies every package in the closure on its own and
 //! hands the clean ones here. Each specifier an ejected package names across the
@@ -169,8 +169,8 @@ pub fn chunk_path(at: &str, index: usize, esm: bool) -> String {
 }
 
 /// The manifest that makes a stub resolvable: the real version so the payload does
-/// not misreport what it carries, an `exports` map naming every specifier the
-/// closure answers, and `main` for the bare one.
+/// not misreport what it carries, and an `exports` map naming every specifier the
+/// closure answers, the bare one as `.`.
 ///
 /// The `exports` map is not decoration. Node's CJS lookup would find
 /// `./_/_define_property.js` from the extensionless specifier on its own, but ESM
@@ -506,22 +506,76 @@ impl Plugin for Entries {
 /// Textual, like the rest of nub's package scanning, and for the same reason: a
 /// published package ships bundles measured in megabytes, and the question — is
 /// the argument one quoted string? — needs no scope information. It over-reports,
-/// since a `require(` inside a comment counts, and that is the safe direction: a
-/// specifier nobody loads costs an unused chunk, where a missed one costs a
-/// binary that fails on the machine it was shipped to.
+/// since a method that happens to be named `require` counts, and that is the safe
+/// direction: a specifier nobody loads costs an unused chunk, where a missed one
+/// costs a binary that fails on the machine it was shipped to.
+///
+/// What it steps over to stay in step with the code is described on
+/// [`skip_noncode`]; template text and regular expressions are handled here,
+/// because both depend on state carried from one token to the next.
 fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
     let bytes = text.as_bytes();
     let mut i = 0;
+    // One entry per open `${`, counting the `{` opened inside it, so the `}` that
+    // ends a substitution is told apart from one that closes a block within it.
+    let mut substitutions: Vec<usize> = Vec::new();
+    // Whether a `/` here would open a regular expression rather than divide: true
+    // where an expression can start, false right after a value.
+    let mut regex_allowed = true;
     while i < bytes.len() {
         // Prose is not code, and this is not pedantry: jsdom's `interfaces.js`
         // carries the phrase "require()s" in a comment, which read as a call with
         // a computed argument and gave up jsdom's ENTIRE closure — 1843 payload
         // files that stayed exactly as they were.
         if let Some(after) = skip_noncode(bytes, i) {
+            // A comment leaves the token before it in charge of what a `/` means;
+            // a string is a value.
+            if bytes[i] != b'/' {
+                regex_allowed = false;
+            }
             i = after;
             continue;
         }
-        if !is_word_byte(bytes[i]) || (i > 0 && is_word_byte(bytes[i - 1])) {
+        let byte = bytes[i];
+        if !is_word_byte(byte) {
+            match byte {
+                b'`' => {
+                    (i, regex_allowed) = skip_template_text(bytes, i + 1, &mut substitutions);
+                    continue;
+                }
+                b'/' if regex_allowed => {
+                    i = skip_regex(bytes, i);
+                    regex_allowed = false;
+                    continue;
+                }
+                b'{' => {
+                    if let Some(depth) = substitutions.last_mut() {
+                        *depth += 1;
+                    }
+                    regex_allowed = true;
+                }
+                b'}' => match substitutions.pop() {
+                    Some(0) => {
+                        (i, regex_allowed) = skip_template_text(bytes, i + 1, &mut substitutions);
+                        continue;
+                    }
+                    Some(depth) => {
+                        substitutions.push(depth - 1);
+                        regex_allowed = false;
+                    }
+                    None => regex_allowed = false,
+                },
+                b')' | b']' => regex_allowed = false,
+                // `x++ / y`: a postfix increment ends a value, and no regular
+                // expression can follow `++` or `--`.
+                b'+' | b'-' if i > 0 && bytes[i - 1] == byte => regex_allowed = false,
+                b' ' | b'\t' | b'\n' | b'\r' => {}
+                _ => regex_allowed = true,
+            }
+            i += 1;
+            continue;
+        }
+        if i > 0 && is_word_byte(bytes[i - 1]) {
             i += 1;
             continue;
         }
@@ -530,6 +584,8 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             i += 1;
         }
         let word = &text[start..i];
+        // A keyword used as a property name (`x.in`) is a value like any other.
+        regex_allowed = REGEX_KEYWORDS.contains(&word) && (start == 0 || bytes[start - 1] != b'.');
         if !matches!(word, "require" | "import" | "from") {
             continue;
         }
@@ -545,6 +601,7 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             }
             take(specifier, word == "require", out);
             i = end;
+            regex_allowed = false;
             continue;
         }
         // `import "x"`, and the tail of `import … from "x"` / `export … from "x"`.
@@ -554,10 +611,73 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             if let Some((specifier, end)) = literal(text, after) {
                 take(specifier, false, out);
                 i = end;
+                regex_allowed = false;
             }
         }
     }
     Some(())
+}
+
+/// Words after which a `/` opens a regular expression: each one is followed by an
+/// expression, never by a value a `/` could divide.
+const REGEX_KEYWORDS: &[&str] = &[
+    "return",
+    "typeof",
+    "case",
+    "do",
+    "else",
+    "in",
+    "instanceof",
+    "new",
+    "delete",
+    "void",
+    "throw",
+    "yield",
+    "await",
+    "of",
+];
+
+/// Skip template text from `i` to its closing backtick or its next `${`, and say
+/// which: `true` when it stopped at the start of a substitution, which is code and
+/// where an expression starts. Opening a substitution pushes its brace depth.
+fn skip_template_text(bytes: &[u8], mut i: usize, substitutions: &mut Vec<usize>) -> (usize, bool) {
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'`' => return (i + 1, false),
+            b'$' if bytes.get(i + 1) == Some(&b'{') => {
+                substitutions.push(0);
+                return (i + 2, true);
+            }
+            _ => i += 1,
+        }
+    }
+    (i, false)
+}
+
+/// Skip the regular expression opening at `i`, returning the offset just past its
+/// closing `/`. A `/` inside a `[...]` class does not close it, and a newline ends
+/// the skip, since a literal cannot span lines.
+fn skip_regex(bytes: &[u8], i: usize) -> usize {
+    let mut end = i + 1;
+    let mut class = false;
+    while end < bytes.len() {
+        match bytes[end] {
+            b'\\' => end += 2,
+            b'\n' => return end,
+            b']' if class => {
+                class = false;
+                end += 1;
+            }
+            b'[' => {
+                class = true;
+                end += 1;
+            }
+            b'/' if !class => return end + 1,
+            _ => end += 1,
+        }
+    }
+    end
 }
 
 fn take(specifier: &str, required: bool, out: &mut BTreeMap<String, Uses>) {
@@ -581,13 +701,23 @@ fn take(specifier: &str, required: bool, out: &mut BTreeMap<String, Uses>) {
 /// happens to quote `require(`. Neither can hide a real call, since a call inside
 /// a string is not a call.
 ///
-/// The one thing it gets wrong is a regular expression whose character class
-/// holds an unescaped `/` — `/[//]/` reads as a line comment, so the rest of that
-/// line goes unscanned. That is the unsafe direction, and it is accepted on the
-/// evidence: it needs a computed require LATER ON THE SAME LINE naming a package
-/// the closure bundled, and no package in the corpus contains the construct at
-/// all. Template literals are deliberately not skipped — a `${…}` substitution is
-/// code, and skipping to the closing backtick would step over it.
+/// Comments and quoted strings are half of what [`scan`] steps over to stay in
+/// step with the code. Template text and regular expressions are the other half,
+/// and [`scan`] handles them itself. A template's `${…}` substitutions are code,
+/// so only the text between them is skipped, nested templates included. A `/`
+/// opens a regular expression only where an expression can start — after an
+/// operator, an opening bracket, or a keyword such as `return` — and divides after
+/// a value; the expression is skipped with its `\` escapes and `[...]` classes.
+/// Without both, one apostrophe in template text or one backtick or quote in a
+/// character class opens a "string" that is not there, every quote after it is
+/// read inside out, and in a minified bundle — one line — that hides the rest of
+/// the file, real `require` calls included.
+///
+/// Two shapes are still misread, and neither occurs in the corpus: a regular
+/// expression directly after `)` or `}` (`if (x) /re/.test(y)`) is taken for
+/// division, so its body is scanned as code, and a `/` after a non-ASCII
+/// identifier is taken for a regular expression, which skips to the next `/` on
+/// that line.
 fn skip_noncode(bytes: &[u8], i: usize) -> Option<usize> {
     match (bytes[i], bytes.get(i + 1)) {
         (b'/', Some(b'/')) => Some(
@@ -790,6 +920,97 @@ mod tests {
             ),
             Some(vec!["fontkit r".into()])
         );
+    }
+
+    /// Template text is text: an apostrophe in it opens no string, so the computed
+    /// call after it is still seen and still refuses the scan.
+    #[test]
+    fn an_apostrophe_in_template_text_does_not_hide_a_computed_require() {
+        assert_eq!(scanned("const a = `it's`; const m = require(name);"), None);
+    }
+
+    /// A substitution is code, at any nesting depth, so a call inside one counts.
+    #[test]
+    fn a_require_inside_a_template_substitution_is_found() {
+        assert_eq!(
+            scanned("const s = `it's ${require('fontkit')} done`;"),
+            Some(vec!["fontkit r".into()])
+        );
+        assert_eq!(
+            scanned("const s = `a ${`b's ${require('js-md5')}`} c`;"),
+            Some(vec!["js-md5 r".into()]),
+            "a template nested in a substitution"
+        );
+        assert_eq!(
+            scanned("const s = `${ {a: 1}.a }'`; require('linebreak');"),
+            Some(vec!["linebreak r".into()]),
+            "a block inside a substitution does not end it early"
+        );
+    }
+
+    #[test]
+    fn a_literal_require_after_template_text_holding_a_quote_is_found() {
+        assert_eq!(
+            scanned("const a = `it's`; require('fontkit');"),
+            Some(vec!["fontkit r".into()])
+        );
+    }
+
+    /// The token-character class HTTP header parsers carry: a backtick in a
+    /// regular expression opens no template.
+    #[test]
+    fn a_backtick_in_a_regex_class_does_not_hide_the_require_after_it() {
+        assert_eq!(
+            scanned("var t = /^[!#$%&'*+.0-9A-Z^_`a-z|~-]+$/; e.exports = require(\"buffer\");"),
+            Some(vec!["buffer r".into()])
+        );
+    }
+
+    #[test]
+    fn a_quote_in_a_regex_does_not_hide_the_require_after_it() {
+        assert_eq!(scanned("var q = /[\"']/g; const m = require(name);"), None);
+    }
+
+    /// Every position where an expression starts reads `/` as a regular
+    /// expression, so the quote inside each one stays inside it.
+    #[test]
+    fn a_regex_where_an_expression_starts_is_skipped_whole() {
+        for source in [
+            "function f(s) { return /'/.test(s); }",
+            "const t = typeof /'/;",
+            "f(/'/);",
+            "const r = /'/;",
+            "f(a, /'/);",
+        ] {
+            assert_eq!(
+                scanned(&format!("{source}\nconst m = require(name);")),
+                None,
+                "{source}"
+            );
+            assert_eq!(
+                scanned(&format!("{source} require('fontkit');")),
+                Some(vec!["fontkit r".into()]),
+                "{source}"
+            );
+        }
+    }
+
+    /// After a value a `/` divides. Reading it as a regular expression would skip
+    /// to the next `/` and step over the call between them.
+    #[test]
+    fn a_slash_after_a_value_is_division() {
+        for source in [
+            "const r = total / require('os').cpus().length / 2;",
+            "const r = (a + b) / require('os').cpus().length / 2;",
+            "const r = list[0] / require('os').cpus().length / 2;",
+            "const r = {} / require('os').cpus().length / 2;",
+            "const r = `${n}` / require('os').cpus().length / 2;",
+            "const r = 'n' / require('os').cpus().length / 2;",
+            "const r = n++ / require('os').cpus().length / 2;",
+            "const r = x.in / require('os').cpus().length / 2;",
+        ] {
+            assert_eq!(scanned(source), Some(vec!["os r".into()]), "{source}");
+        }
     }
 
     /// What a chunk can and cannot stand in for. The refusals are about the module

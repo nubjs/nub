@@ -559,7 +559,8 @@ fn neutralize_preload_arg(bootstrap: &str) -> Result<String> {
 /// Never loaded — the module hooks do not serve it and nothing imports it. It is
 /// in the blob because the artifact redistributes a Node binary and has to carry
 /// that binary's copyright notice, which is what the launcher shape's separate
-/// license region does. `--nub-internal licenses` prints it back out.
+/// license region does. The private `__NUB_COMPILED_LAUNCHER_MODE=licenses` channel
+/// prints it back out.
 pub(super) const LICENSE_ASSET: &str = "__nub_node_license";
 
 /// Everything the blob is built from.

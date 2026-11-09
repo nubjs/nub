@@ -644,10 +644,6 @@ mod tests {
         }
     }
 
-    // The two branches must not leak into each other's build: an external-only
-    // artifact that also re-based unclaimed specifiers would silently prefer the
-    // launch directory over its own contents, and a dynamic-only artifact has no
-    // package list to consult.
     #[test]
     fn generated_helpers_take_builtin_apis_from_the_early_bootstrap() {
         let generated = built(&["peer"], true);
@@ -677,13 +673,17 @@ mod tests {
         );
     }
 
+    // The two branches must not leak into each other's build: an external-only
+    // artifact that also re-based unclaimed specifiers would silently prefer the
+    // launch directory over its own contents, and a dynamic-only artifact has no
+    // package list to consult.
     #[test]
     fn each_branch_is_emitted_only_for_the_flag_that_asked_for_it() {
         let ext = built(&["prettier"], false);
         let external_only = file(&ext, "__nub_external.mjs");
         assert!(
             external_only.contains("was compiled with --external")
-                && !external_only.contains("ERR_NUB_DYNAMIC_IMPORT_NOT_FOUND"),
+                && !external_only.contains("--allow-dynamic-import"),
             "external-only hook must carry only the external branch: {external_only}"
         );
         let dynamic = built(&[], true);

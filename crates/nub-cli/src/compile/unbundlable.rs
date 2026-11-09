@@ -482,6 +482,11 @@ fn unreachable_dirs(root: &Path, manifest: &Value) -> Vec<String> {
         let rel = spec.trim_start_matches("./");
         if let Some((dir, _)) = rel.split_once('/') {
             named.push(dir.to_string());
+        } else if !matches!(rel, "" | "." | "..") && root.join(rel).is_dir() {
+            // `"main": "lib"` is Node's `lib/index.js`, so it names the directory
+            // and that file exactly as `"main": "lib/index.js"` would.
+            named.push(rel.to_string());
+            files.push(format!("{rel}/index.js"));
         }
         if matches!(
             Path::new(rel).extension().and_then(|e| e.to_str()),
@@ -861,10 +866,6 @@ mod tests {
         );
     }
 
-    /// A sidecar must be named after ITS OWN parent.
-    ///
-    /// Otherwise any package depending on two platform-named things — a build tool
-    /// pulling in several `@esbuild/*` binaries, say — is misread as native.
     /// The curated list catches what no manifest field records.
     ///
     /// These packages declare nothing that distinguishes them: `pino` looks
@@ -901,6 +902,10 @@ mod tests {
         }
     }
 
+    /// A sidecar must be named after ITS OWN parent.
+    ///
+    /// Otherwise any package depending on two platform-named things — a build tool
+    /// pulling in several `@esbuild/*` binaries, say — is misread as native.
     #[test]
     fn platform_sidecars_belonging_to_another_package_do_not_count() {
         let unrelated = json!({
@@ -961,6 +966,32 @@ mod tests {
             classify(&reads_a_sibling_module, &manifest),
             None,
             "the bundler already carries both; the asset half is what makes it a finding"
+        );
+    }
+
+    /// `"main": "lib"` is a directory Node loads as `lib/index.js`, so `lib/` is
+    /// reachable even when another entry names a different directory and never
+    /// mentions it. Skipping it would miss the read in the main entry itself.
+    #[test]
+    fn a_main_naming_a_directory_keeps_that_directory_scanned() {
+        let root = tree(
+            "main-dir",
+            &[
+                (
+                    "lib/index.js",
+                    "module.exports = path.join(__dirname, 'model.wasm');",
+                ),
+                ("lib/model.wasm", "\0asm"),
+                ("esm/index.mjs", "export default 1;"),
+            ],
+        );
+        let manifest = json!({ "name": "tokenizer", "main": "lib", "module": "esm/index.mjs" });
+        assert_eq!(
+            classify(&root, &manifest),
+            Some(Reason::ComputedAssetRead {
+                code: "lib/index.js".into(),
+                asset: "lib/model.wasm".into(),
+            })
         );
     }
 

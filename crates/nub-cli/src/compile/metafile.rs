@@ -130,7 +130,7 @@ fn is_false(value: &bool) -> bool {
 /// Held apart from the emitted bytes because nub rewrites and prunes its output
 /// list after the bundler returns, so the final size of a file is only known
 /// later — see [`Report::finish`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChunkMeta {
     pub inputs: BTreeMap<String, InputInOutput>,
     pub imports: Vec<Import>,
@@ -482,49 +482,21 @@ impl Report {
         let outputs = emitted
             .iter()
             .map(|(name, bytes)| {
-                let meta = chunks.remove(*name);
+                let meta = chunks.remove(*name).unwrap_or_default();
                 (
                     (*name).to_string(),
                     OutputFile {
                         bytes: *bytes,
-                        inputs: meta
-                            .as_ref()
-                            .map(|m| clone_inputs(&m.inputs))
-                            .unwrap_or_default(),
-                        imports: meta.as_ref().map(clone_imports).unwrap_or_default(),
-                        exports: meta.as_ref().map(|m| m.exports.clone()).unwrap_or_default(),
-                        entry_point: meta.and_then(|m| m.entry_point),
+                        inputs: meta.inputs,
+                        imports: meta.imports,
+                        exports: meta.exports,
+                        entry_point: meta.entry_point,
                     },
                 )
             })
             .collect();
         Metafile { inputs, outputs }
     }
-}
-
-fn clone_inputs(inputs: &BTreeMap<String, InputInOutput>) -> BTreeMap<String, InputInOutput> {
-    inputs
-        .iter()
-        .map(|(path, entry)| {
-            (
-                path.clone(),
-                InputInOutput {
-                    bytes_in_output: entry.bytes_in_output,
-                },
-            )
-        })
-        .collect()
-}
-
-fn clone_imports(meta: &ChunkMeta) -> Vec<Import> {
-    meta.imports
-        .iter()
-        .map(|edge| Import {
-            path: edge.path.clone(),
-            kind: edge.kind,
-            external: edge.external,
-        })
-        .collect()
 }
 
 /// Render a module id as a report path: `/`-separated, relative to `base` where

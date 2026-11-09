@@ -18,11 +18,11 @@
 //! existed.
 //!
 //! Assets are materialized as REAL FILES, deliberately, rather than served from a
-//! virtual filesystem (VFS dismissed 2026-07-24, `wiki/commands/compile.md`): nub
-//! extracts a real Node regardless of what it does with assets, so a VFS would buy
-//! nothing while costing the fs-API fidelity — `createReadStream`, `fs.promises`,
-//! native addons opening paths from C — that a real tree gives for free and that
-//! Bun's and Deno's VFS holes are made of.
+//! virtual filesystem (`wiki/commands/compile-architecture.md`, "Why extraction
+//! uses real files"): nub extracts a real Node regardless of what it does with
+//! assets, so a VFS would buy nothing while costing the fs-API fidelity —
+//! `createReadStream`, `fs.promises`, native addons opening paths from C — that a
+//! real tree gives for free and that Bun's and Deno's VFS holes are made of.
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};

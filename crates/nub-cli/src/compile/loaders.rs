@@ -444,24 +444,33 @@ fn file_module(name: &str) -> String {
 /// parser reaches the artifact, which is the point: the work moved to build time.
 #[derive(Debug, Default)]
 pub struct DataPlugin {
-    /// Extensions this plugin owns, after `--loader` has had its say.
-    exts: Vec<String>,
+    /// Every mapped extension → whether this plugin owns it, after `--loader` has
+    /// had its say. The other families are present so [`DataPlugin::claims`] can
+    /// resolve specificity across them, as [`FilePlugin::claims`] does.
+    by_ext: BTreeMap<String, bool>,
 }
 
 impl DataPlugin {
     pub fn new(loaders: &Loaders) -> Self {
-        Self {
-            exts: loaders.data.clone(),
-        }
+        let by_ext = loaders
+            .module_types
+            .keys()
+            .chain(&loaders.file)
+            .map(|ext| (ext.clone(), false))
+            .chain(loaders.data.iter().map(|ext| (ext.clone(), true)))
+            .collect();
+        Self { by_ext }
     }
 
-    /// Longest matching extension wins, so `.tar.yaml` is claimed by a `yaml`
-    /// mapping rather than missed. Case-sensitive on both sides, matching
-    /// [`FilePlugin::claims`] — Node's own extension matching is exact.
+    /// The most specific mapping wins across every family, so `.tar.yaml` is
+    /// claimed by a `yaml` mapping rather than missed, while `--loader
+    /// .tmpl.yaml=text` keeps `x.tmpl.yaml` out of this plugin. Case-sensitive on
+    /// both sides, matching [`FilePlugin::claims`] — Node's own extension matching
+    /// is exact.
     fn claims(&self, id: &str) -> Option<&str> {
         id.match_indices('.')
-            .find_map(|(i, _)| self.exts.iter().find(|e| *e == &id[i + 1..]))
-            .map(String::as_str)
+            .find_map(|(i, _)| self.by_ext.get_key_value(&id[i + 1..]))
+            .and_then(|(ext, owned)| owned.then_some(ext.as_str()))
     }
 }
 
@@ -650,6 +659,29 @@ mod tests {
         assert!(p.claims("/proj/blob.gz"), "the broad mapping still applies");
     }
 
+    // The data plugin runs before Rolldown consults its extension map too, so the
+    // same specificity rule has to hold there: a broad `yaml` default must not
+    // parse a file that a more specific `--loader .tmpl.yaml=text` claimed.
+    #[test]
+    fn a_more_specific_mapping_wins_over_a_data_default() {
+        let p = DataPlugin::new(&plan(&[".tmpl.yaml=text".into()]).expect("valid"));
+        assert_eq!(
+            p.claims("/proj/prompt.tmpl.yaml"),
+            None,
+            "the text mapping is more specific and must win"
+        );
+        assert_eq!(
+            p.claims("/proj/config.yaml"),
+            Some("yaml"),
+            "the data default still applies"
+        );
+        assert_eq!(
+            p.claims("/proj/archive.tar.yaml"),
+            Some("yaml"),
+            "an unmapped prefix still falls through to the data mapping"
+        );
+    }
+
     // A path component containing a dot must not be read as an extension.
     #[test]
     fn a_dot_in_a_directory_name_does_not_decide_the_loader() {
@@ -755,9 +787,6 @@ mod tests {
         assert!(a.starts_with("logo-") && a.ends_with(".png"), "{a}");
     }
 
-    // A generated name must be safe on a filesystem that folds case, or two
-    // assets nub named itself can collide — and the collision error would tell
-    // the user to rename a file they never wrote.
     #[test]
     fn asset_names_retain_digest_suffixes_past_a_shared_prefix() {
         let a = asset_name_with_hash(
@@ -814,6 +843,9 @@ mod tests {
         assert!(record_asset(&mut named, "forced-name".to_string(), b"second".to_vec()).is_err());
     }
 
+    // A generated name must be safe on a filesystem that folds case, or two
+    // assets nub named itself can collide — and the collision error would tell
+    // the user to rename a file they never wrote.
     #[test]
     fn generated_names_cannot_differ_only_in_case() {
         let upper = asset_name(Path::new("/p/a/Logo.BIN"), b"SAME");
