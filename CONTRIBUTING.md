@@ -44,17 +44,19 @@ cargo test -p nub-cli --test pm_verbs   # one file from crates/nub-cli/tests/
 cargo test -p nub-cli <name>            # tests whose name matches
 ```
 
-Three directories are separate Cargo workspaces. Run their commands from inside the directory:
+Five directories are separate Cargo workspaces, each with its own `Cargo.lock`. Run their commands from inside the directory:
 
 | Directory | Command |
 |---|---|
 | `crates/nub-native` | `cargo clippy --all-features --profile fast -- -D warnings && cargo build --profile fast` |
 | `crates/nub-launcher` | `cargo clippy --all-targets -- -D warnings && cargo build && cargo test` |
+| `crates/nub-alias` | `cargo clippy --all-targets -- -D warnings && cargo build` |
+| `crates/nub-phantom` | `cargo check --all-targets` |
 | `vendor/aube` | `cargo test -p <crate>` |
 
 `crates/nub-native` has no tests of its own. To test a change to it, run `make addon-fast` from the repo root, which copies the addon into `runtime/addons/`, then run the `nub-cli` tests that load it.
 
-Before you push, run `make verify`. It checks formatting and the lockfiles, runs Clippy on the whole workspace with all features and warnings as errors, runs the brand lint, and then runs the full `cargo test`, so expect it to take a while. `make fix` applies Clippy's automatic fixes; review its diff before you commit. `make verify` doesn't cover `crates/nub-launcher`, the platform matrix or the Docker jobs.
+Before you push, run `make verify`. It checks formatting and every lockfile, runs Clippy on the root workspace and `crates/nub-native` with all features and warnings as errors, runs the brand lint, and then runs the full `cargo test`, so expect it to take a while. `make fix` applies Clippy's automatic fixes; review its diff before you commit. `make verify` doesn't cover the other four workspaces in the table, the platform matrix or the Docker jobs.
 
 ## Docs
 
@@ -73,7 +75,7 @@ Before you push, run `make verify`. It checks formatting and the lockfiles, runs
 - Leave "Allow edits by maintainers" on when you open it from a fork. If your branch needs changes, a maintainer pushes them to it directly instead of asking you to amend it.
 - CI doesn't start when you open a pull request or push to it. Once review is done and the branch is ready to merge, a maintainer starts a run by adding the `ci` label, or `ci-full` to add the slower workflows. Adding a label needs write access, so a pull request from a fork waits for a maintainer. Get `make verify` passing first so that one run is enough.
 - Vercel and the review bots run on every pull request and can go green when CI hasn't run at all. The `CI gate` check is the one that shows CI ran, so a pull request isn't verified until it appears and passes.
-- A run covers [`ci.yml`](.github/workflows/ci.yml) (formatting, Clippy, the test suite on Linux and Windows, some jobs on macOS, the site build and docs links), [`lat-check.yml`](.github/workflows/lat-check.yml) and [`commit-hygiene.yml`](.github/workflows/commit-hygiene.yml). A change under `vendor/aube` also runs aube's own tests in [`aube-parity.yml`](.github/workflows/aube-parity.yml).
+- A run always includes [`ci.yml`](.github/workflows/ci.yml) (formatting, Clippy, the test suite on Linux and Windows, some jobs on macOS, the site build and docs links), [`lat-check.yml`](.github/workflows/lat-check.yml) and [`commit-hygiene.yml`](.github/workflows/commit-hygiene.yml). Other workflows run only when the pull request touches their paths, for example [`aube-parity.yml`](.github/workflows/aube-parity.yml) for a change under `vendor/aube`.
 
 ## The vendored package manager
 
