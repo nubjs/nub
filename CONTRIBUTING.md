@@ -4,7 +4,7 @@
 
 ## Reporting bugs and requesting features
 
-Open an issue at [github.com/nubjs/nub/issues](https://github.com/nubjs/nub/issues). For a bug, include the output of `nub --version`, your OS, and the smallest project or command that shows the problem.
+Open an issue at [github.com/nubjs/nub/issues](https://github.com/nubjs/nub/issues). For a bug, include the output of `nub --version`, your OS, and the smallest project or command that shows the problem. For a security problem, follow [SECURITY.md](SECURITY.md) instead of opening an issue.
 
 Before you ask for a new flag or API, read the [core design positions](wiki/agents.md#core-design-positions). In particular, the package manager CLI only takes flags and aliases that pnpm accepts, apart from a few commands of Nub's own such as `nub <file>`, `nub upgrade` and `nub pm <verb>`. Nub also adds no Nub-branded public API: no `globalThis.nub`, no `nub:*` imports, no `@nub/*` scope, no `"nub"` config field and no new `NUB_*` environment variable documented for users.
 
