@@ -1489,6 +1489,175 @@ fn test_parse_rebases_workspace_scoped_local_tarball() {
     );
 }
 
+/// bun writes a `file:` directory from the workspace root and a tarball as
+/// the declaring manifest spells it, under the member's scope or hoisted.
+#[test]
+fn test_parse_reads_each_local_path_from_the_base_bun_wrote_it_against() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "root",
+      "dependencies": { "root-tar": "file:../out/root-tar-1.0.0.tgz" }
+    },
+    "apps/a": {
+      "name": "a",
+      "dependencies": {
+        "out-dir": "file:../../../outside/out-dir",
+        "sibling": "file:../sibling",
+        "hoisted-tar": "file:../../vendor/hoisted-tar-1.0.0.tgz",
+        "own-tar": "file:./own-tar-1.0.0.tgz"
+      },
+      "peerDependencies": { "peer-tar": "file:./peer-tar-1.0.0.tgz" }
+    }
+  },
+  "packages": {
+    "a": ["a@workspace:apps/a"],
+    "a/out-dir": ["out-dir@file:../outside/out-dir", {}],
+    "a/sibling": ["sibling@file:apps/sibling", {}],
+    "a/own-tar": ["own-tar@./own-tar-1.0.0.tgz", {}],
+    "hoisted-tar": ["hoisted-tar@../../vendor/hoisted-tar-1.0.0.tgz", {}],
+    "peer-tar": ["peer-tar@./peer-tar-1.0.0.tgz", {}],
+    "root-tar": ["root-tar@../out/root-tar-1.0.0.tgz", {}]
+  }
+}"#;
+    std::fs::write(tmp.path(), content).unwrap();
+    let graph = parse(tmp.path()).unwrap();
+    let source = |name: &str| {
+        graph
+            .packages
+            .values()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("{name} missing"))
+            .local_source
+            .clone()
+    };
+    let dir = |p: &str| Some(LocalSource::Directory(PathBuf::from(p)));
+    let tar = |p: &str| Some(LocalSource::Tarball(PathBuf::from(p)));
+    assert_eq!(source("out-dir"), dir("../outside/out-dir"));
+    assert_eq!(source("sibling"), dir("apps/sibling"));
+    assert_eq!(source("own-tar"), tar("apps/a/own-tar-1.0.0.tgz"));
+    assert_eq!(source("hoisted-tar"), tar("vendor/hoisted-tar-1.0.0.tgz"));
+    assert_eq!(source("peer-tar"), tar("apps/a/peer-tar-1.0.0.tgz"));
+    assert_eq!(source("root-tar"), tar("../out/root-tar-1.0.0.tgz"));
+}
+
+/// Two manifests spelling one path can mean different archives. bun installs
+/// a concrete dependency's over a peer's and, within each, the root's, else
+/// the one from the member whose name sorts first.
+#[test]
+fn test_parse_picks_buns_archive_when_manifests_spell_one_path() {
+    let read = |root_fields: &str| {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let content = format!(
+            r#"{{
+  "lockfileVersion": 1,
+  "workspaces": {{
+    "": {{ "name": "root"{root_fields} }},
+    "apps/a": {{ "name": "z", "dependencies": {{ "foo": "file:./foo.tgz" }} }},
+    "apps/b": {{ "name": "a", "dependencies": {{ "foo": "file:./foo.tgz" }} }}
+  }},
+  "packages": {{ "foo": ["foo@./foo.tgz", {{}}] }}
+}}"#
+        );
+        std::fs::write(tmp.path(), content).unwrap();
+        let graph = parse(tmp.path()).unwrap();
+        let foo = graph.packages.values().find(|p| p.name == "foo").unwrap();
+        foo.local_source.clone().unwrap()
+    };
+    assert_eq!(
+        read(""),
+        LocalSource::Tarball(PathBuf::from("apps/b/foo.tgz"))
+    );
+    assert_eq!(
+        read(r#", "dependencies": { "foo": "file:./foo.tgz" }"#),
+        LocalSource::Tarball(PathBuf::from("./foo.tgz"))
+    );
+    assert_eq!(
+        read(r#", "peerDependencies": { "foo": "file:./foo.tgz" }"#),
+        LocalSource::Tarball(PathBuf::from("apps/b/foo.tgz"))
+    );
+}
+
+/// A freshly resolved local package needs bun's local form, or bun looks for
+/// it on the registry.
+#[test]
+fn test_write_renders_a_fresh_local_package_in_buns_form() {
+    let project = tempfile::TempDir::new().unwrap();
+    let root = project.path();
+    std::fs::create_dir_all(root.join("apps/a")).unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"root","workspaces":["apps/a"]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("apps/a/package.json"),
+        r#"{"name":"a","version":"1.0.0","dependencies":{
+            "out-dir":"file:../../../outside/out-dir",
+            "tar":"file:../../vendor/tar-1.0.0.tgz"},
+            "peerDependencies":{"peer-tar":"file:./peer-tar-1.0.0.tgz"}}"#,
+    )
+    .unwrap();
+    let local = |name: &str, source: LocalSource| LockedPackage {
+        name: name.to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: source.dep_path(name),
+        local_source: Some(source),
+        ..Default::default()
+    };
+    let packages = [
+        local(
+            "out-dir",
+            LocalSource::Directory(PathBuf::from("../outside/out-dir")),
+        ),
+        local(
+            "tar",
+            LocalSource::Tarball(PathBuf::from("vendor/tar-1.0.0.tgz")),
+        ),
+        local(
+            "peer-tar",
+            LocalSource::Tarball(PathBuf::from("apps/a/peer-tar-1.0.0.tgz")),
+        ),
+    ];
+    let direct = packages
+        .iter()
+        .map(|p| DirectDep {
+            name: p.name.clone(),
+            dep_path: p.dep_path.clone(),
+            dep_type: DepType::Production,
+            specifier: None,
+        })
+        .collect();
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(".".to_string(), vec![]), ("apps/a".to_string(), direct)]),
+        packages: packages
+            .into_iter()
+            .map(|p| (p.dep_path.clone(), p))
+            .collect(),
+        ..Default::default()
+    };
+    let lock_path = root.join("bun.lock");
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    write(&lock_path, &graph, &manifest).unwrap();
+
+    let written = std::fs::read_to_string(&lock_path).unwrap();
+    for entry in [
+        r#""out-dir": ["out-dir@file:../outside/out-dir", {}]"#,
+        r#""tar": ["tar@../../vendor/tar-1.0.0.tgz", {}]"#,
+        r#""peer-tar": ["peer-tar@./peer-tar-1.0.0.tgz", {}]"#,
+    ] {
+        assert!(written.contains(entry), "missing {entry} in:\n{written}");
+    }
+    let reread = parse(&lock_path).unwrap();
+    let tar = reread.packages.values().find(|p| p.name == "tar").unwrap();
+    assert_eq!(
+        tar.local_source,
+        Some(LocalSource::Tarball(PathBuf::from("vendor/tar-1.0.0.tgz")))
+    );
+}
+
 /// Top-level `overrides` / `patchedDependencies` / `trustedDependencies`
 /// and the unnamed `catalog` / named `catalogs` blocks must round-trip
 /// verbatim — bun preserves all five on re-emit, so aube dropping any

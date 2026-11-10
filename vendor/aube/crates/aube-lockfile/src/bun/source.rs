@@ -1,7 +1,8 @@
+use super::raw::RawBunWorkspace;
 use crate::{Error, GitSource, LocalSource, RemoteTarballSource};
 use aube_util::path::normalize_lexical;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path};
+use std::path::Path;
 
 /// Extract the alias name bun uses as the hoist key. bun's `packages`
 /// key is `<alias_name>` hoisted or `<parent>/<alias_name>` nested,
@@ -162,39 +163,76 @@ pub(super) fn classify_bun_ident(
     Ok((name, raw_version.to_string(), None, alias_of))
 }
 
-pub(super) fn rebase_workspace_scoped_local_source(
+/// Rebase a member's tarball onto the project root, where the graph keeps
+/// local paths. bun spells a tarball as the member that declares it does
+/// (`../../vendor/x.tgz`), under that member's scope or, once hoisted, under
+/// the bare name. A `file:` directory needs nothing: bun writes those from the
+/// workspace root (`file:../shared`, `file:apps/sibling`) whichever member
+/// declares them. Measured on bun 1.2, 1.3 and 1.4.
+pub(super) fn rebase_member_tarball(
     key: &str,
     local: LocalSource,
+    workspaces: &BTreeMap<String, RawBunWorkspace>,
     workspace_scopes: &[(&str, &str)],
 ) -> LocalSource {
-    let Some(local_path) = local.path() else {
+    let LocalSource::Tarball(path) = &local else {
         return local;
     };
-    // Bun may write workspace-name-scoped local entries with
-    // root-relative bare paths (`vendor/local-dir`) or
-    // importer-relative climbs (`../../vendor/local.tgz`). Only the
-    // latter needs rebasing to project-root form.
-    if !local_path
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-    {
-        return local;
+    let member = workspace_scopes
+        .iter()
+        .find(|(name, _)| {
+            key.strip_prefix(*name)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+        .map(|(_, ws_path)| *ws_path)
+        .or_else(|| hoisted_tarball_member(key, path, workspaces));
+    match member {
+        Some(ws_path) => LocalSource::Tarball(normalize_lexical(&Path::new(ws_path).join(path))),
+        None => local,
     }
-    let Some((_, ws_path)) = workspace_scopes.iter().find(|(name, _)| {
-        key.strip_prefix(*name)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-    }) else {
-        return local;
+}
+
+/// The member a hoisted tarball's path is relative to. Several manifests can
+/// spell the same path for different archives, and bun then installs one of
+/// them for all: a concrete dependency over a peer and, within each, the
+/// root's, else the member whose package name sorts first (measured on bun
+/// 1.2, 1.3 and 1.4; workspace path and declaration order do not matter). The
+/// root's spelling is already project-relative.
+fn hoisted_tarball_member<'a>(
+    name: &str,
+    path: &Path,
+    workspaces: &'a BTreeMap<String, RawBunWorkspace>,
+) -> Option<&'a str> {
+    let spec = format!("file:{}", path.to_string_lossy());
+    let concrete = |ws: &RawBunWorkspace| {
+        [
+            &ws.dependencies,
+            &ws.dev_dependencies,
+            &ws.optional_dependencies,
+        ]
+        .iter()
+        .any(|deps| deps.get(name) == Some(&spec))
     };
-    let rebased = normalize_lexical(&Path::new(ws_path).join(local_path));
-    match local {
-        LocalSource::Directory(_) => LocalSource::Directory(rebased),
-        LocalSource::Tarball(_) => LocalSource::Tarball(rebased),
-        LocalSource::Link(_) => LocalSource::Link(rebased),
-        LocalSource::Portal(_) => LocalSource::Portal(rebased),
-        LocalSource::Exec(_) => LocalSource::Exec(rebased),
-        LocalSource::Git(_) | LocalSource::RemoteTarball(_) => local,
-    }
+    let peer = |ws: &RawBunWorkspace| {
+        ws.extra
+            .get("peerDependencies")
+            .and_then(|peers| peers.get(name))
+            .and_then(serde_json::Value::as_str)
+            == Some(spec.as_str())
+    };
+    let pick = |declares: &dyn Fn(&RawBunWorkspace) -> bool| {
+        workspaces
+            .iter()
+            .filter(|(_, ws)| declares(ws))
+            .min_by_key(|(ws_path, ws)| {
+                let ws_name = ws.extra.get("name").and_then(serde_json::Value::as_str);
+                (!ws_path.is_empty(), ws_name)
+            })
+            .map(|(ws_path, _)| ws_path.as_str())
+    };
+    pick(&concrete)
+        .or_else(|| pick(&peer))
+        .filter(|ws_path| !ws_path.is_empty())
 }
 
 pub(super) fn split_committish(spec: &str) -> (String, Option<String>) {

@@ -1,8 +1,8 @@
 use super::jsonc::strip_jsonc;
 use super::raw::{BunEntry, RawBunLockfile};
 use super::source::{
-    bin_value_to_map, bun_key_to_alias_name, classify_bun_ident,
-    rebase_workspace_scoped_local_source, resolve_nested_bun, resolve_workspace_dep, split_ident,
+    bin_value_to_map, bun_key_to_alias_name, classify_bun_ident, rebase_member_tarball,
+    resolve_nested_bun, resolve_workspace_dep, split_ident,
 };
 use crate::{
     DepType, DirectDep, Error, LockedPackage, LockfileGraph, PeerDepMeta, version_protocol,
@@ -138,7 +138,7 @@ pub fn parse(path: &Path) -> Result<LockfileGraph, Error> {
             continue;
         }
         let local_source = local_source
-            .map(|local| rebase_workspace_scoped_local_source(key, local, &workspace_scopes));
+            .map(|local| rebase_member_tarball(key, local, &raw.workspaces, &workspace_scopes));
         key_info.insert(key.clone(), (name.clone(), version.clone()));
 
         let dep_path = format!("{name}@{version}");

@@ -1,4 +1,5 @@
 use crate::{DirectDep, Error, LocalSource, LockedPackage, LockfileGraph};
+use aube_util::path::normalize_lexical;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -462,6 +463,22 @@ pub fn write(
                 elems.push(Value::String(integrity));
             }
             Value::Array(elems)
+        } else if let Some(local @ (LocalSource::Directory(_) | LocalSource::Tarball(_))) =
+            pkg.local_source.as_ref()
+        {
+            // bun's local tuple has no registry slot, and a registry-shaped
+            // entry sends bun to the registry for a package that is not there.
+            let tail = bun_local_ident_tail(pkg, local, manifest, &workspace_manifests);
+            let mut elems = vec![
+                Value::String(format!("{ident_name}@{tail}")),
+                Value::Object(meta),
+            ];
+            if matches!(local, LocalSource::Tarball(_))
+                && let Some(integrity) = pkg.integrity.clone().filter(|s| !s.is_empty())
+            {
+                elems.push(Value::String(integrity));
+            }
+            Value::Array(elems)
         } else {
             let ident = format!("{}@{}", ident_name, pkg.version);
             let integrity = pkg.integrity.clone().unwrap_or_default();
@@ -888,6 +905,43 @@ fn inline_json(value: &serde_json::Value, _base_indent: usize) -> String {
 /// it apart from a dependency that is also a peer needs the package's
 /// declared ranges, which the pnpm and nub.lock readers never record, so
 /// without them the edge is kept and an optional one stays optional.
+/// The text after `name@` in a local package's ident. A bun-authored entry
+/// keeps it in `version`. A fresh resolve holds the real version there and a
+/// project-relative path in the source: bun writes a directory from the
+/// workspace root and a tarball as its declaring manifest spells it.
+fn bun_local_ident_tail(
+    pkg: &LockedPackage,
+    local: &LocalSource,
+    manifest: &aube_manifest::PackageJson,
+    workspace_manifests: &BTreeMap<String, aube_manifest::PackageJson>,
+) -> String {
+    if pkg.version.starts_with("file:")
+        || LocalSource::path_looks_like_tarball(Path::new(&pkg.version))
+    {
+        return pkg.version.clone();
+    }
+    if matches!(local, LocalSource::Directory(_)) {
+        return format!("file:{}", local.pnpm_path());
+    }
+    let target = local.path().map(normalize_lexical);
+    std::iter::once((".", manifest))
+        .chain(workspace_manifests.iter().map(|(p, m)| (p.as_str(), m)))
+        .find_map(|(importer, m)| {
+            let spec = [
+                &m.dependencies,
+                &m.dev_dependencies,
+                &m.optional_dependencies,
+                &m.peer_dependencies,
+            ]
+            .iter()
+            .find_map(|deps| deps.get(&pkg.name))?;
+            let rest = spec.strip_prefix("file:")?;
+            (Some(normalize_lexical(&Path::new(importer).join(rest))) == target)
+                .then(|| rest.to_string())
+        })
+        .unwrap_or_else(|| local.pnpm_path())
+}
+
 fn is_peer_only_edge(pkg: &LockedPackage, dep_name: &str) -> bool {
     pkg.declared_dependencies_known
         && pkg.peer_dependencies.contains_key(dep_name)
