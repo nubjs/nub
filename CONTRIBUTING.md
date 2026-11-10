@@ -48,9 +48,11 @@ Three directories are separate Cargo workspaces. Run their commands from inside 
 
 | Directory | Command |
 |---|---|
-| `crates/nub-native` | `cargo test` |
+| `crates/nub-native` | `cargo clippy --all-features --profile fast -- -D warnings && cargo build --profile fast` |
 | `crates/nub-launcher` | `cargo clippy --all-targets -- -D warnings && cargo build && cargo test` |
 | `vendor/aube` | `cargo test -p <crate>` |
+
+`crates/nub-native` has no tests of its own. To test a change to it, run `make addon-fast` from the repo root, which copies the addon into `runtime/addons/`, then run the `nub-cli` tests that load it.
 
 Before you push, run `make verify`. It checks formatting and the lockfiles, runs Clippy on the whole workspace with all features and warnings as errors, runs the brand lint, and then runs the full `cargo test`, so expect it to take a while. `make fix` applies Clippy's automatic fixes; review its diff before you commit. `make verify` doesn't cover `crates/nub-launcher`, the platform matrix or the Docker jobs.
 
