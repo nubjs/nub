@@ -128,6 +128,7 @@ aube generates this page from [`settings.toml`](https://github.com/aubepkg/aube/
 | [`runtimeOnFail`](#setting-runtimeonfail) | `"download" \| "error" \| "warn" \| "ignore"` | Override the `onFail` policy applied when the active Node.js doesn't satisfy the project's runtime requirement. |
 | [`savePrefix`](#setting-saveprefix) | `"^" \| "~" \| ""` | Version prefix used when installing a package. |
 | [`linkWorkspacePackages`](#setting-linkworkspacepackages) | `"false" \| "true" \| "deep"` | Resolve `aube add &lt;name&gt;` against local workspace siblings before falling back to the registry. |
+| [`saveTypes`](#setting-savetypes) | `bool` | Also save the matching `@types/*` package when adding a dependency. |
 | [`saveWorkspaceProtocol`](#setting-saveworkspaceprotocol) | `"true" \| "false" \| "rolling"` | Spec form written to `package.json` when `aube add` resolves against a workspace sibling. |
 | [`tag`](#setting-tag) | `string` | Default dist-tag used by `aube add` without a version. |
 | [`globalDir`](#setting-globaldir) | `path` | Directory where globally installed packages live. |
@@ -2630,6 +2631,20 @@ aube's resolver already prefers workspace siblings on bare semver
 ranges at install time, including transitives, so pnpm's `"deep"`
 mode is accepted as an alias for the add-time manifest behavior.
 
+### `saveTypes` {#setting-savetypes}
+
+Also save the matching `@types/*` package when adding a dependency.
+
+- Type: `bool`
+- Default: `false`
+- Environment: `npm_config_save_types`, `NPM_CONFIG_SAVE_TYPES`, `AUBE_SAVE_TYPES`
+- .npmrc keys: `save-types`, `saveTypes`
+- Workspace YAML keys: `saveTypes`
+
+Makes `add` behave as if `--save-types` were passed: a registry package that
+ships no TypeScript types also gets its DefinitelyTyped package saved to
+`devDependencies`. `--no-save-types` turns it off for one command.
+
 ### `saveWorkspaceProtocol` {#setting-saveworkspaceprotocol}
 
 Spec form written to `package.json` when `aube add` resolves against a workspace sibling.
@@ -3059,6 +3074,7 @@ How catalog references in `package.json` are handled by `aube add`.
 - Default: `"manual"`
 - Environment: `npm_config_catalog_mode`, `NPM_CONFIG_CATALOG_MODE`, `AUBE_CATALOG_MODE`
 - .npmrc keys: `catalogMode`, `catalog-mode`
+- Workspace YAML keys: `catalogMode`
 
 `manual` (the default) writes whatever range `aube add` resolved, even
 when the package is declared in the default catalog. `prefer` rewrites

@@ -207,6 +207,11 @@ fn install_family_grammar_accepts_documented_forms() {
                 "pnpm --save-optional",
             ),
             (&["install", "express", "--save-peer"], "pnpm --save-peer"),
+            (&["install", "express", "--save-types"], "pnpm --save-types"),
+            (
+                &["install", "express", "--no-save-types"],
+                "pnpm --no-save-types",
+            ),
             (
                 &["install", "express", "-p"],
                 "pnpm -p / --save-prod (add default)",
@@ -391,6 +396,8 @@ fn engine_add_grammar_accepts_documented_forms() {
             (&["add", "foo", "-O"], "pnpm -O / --save-optional"),
             (&["add", "foo", "--save-optional"], "pnpm --save-optional"),
             (&["add", "foo", "--save-peer"], "pnpm --save-peer"),
+            (&["add", "foo", "--save-types"], "pnpm --save-types"),
+            (&["add", "foo", "--no-save-types"], "pnpm --no-save-types"),
             (&["add", "foo", "--no-save"], "pnpm --no-save"),
             (&["add", "foo", "-g"], "pnpm -g / --global"),
             (&["add", "foo", "--global"], "pnpm --global"),

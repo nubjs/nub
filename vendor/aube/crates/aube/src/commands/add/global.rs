@@ -198,6 +198,9 @@ async fn run_global_inner(
         ignore_scripts: false,
         no_save: false,
         save_peer: false,
+        save_types: false,
+        // A global add never follows a project's `saveTypes`.
+        no_save_types: true,
         save_workspace_protocol: false,
         no_save_workspace_protocol: false,
         // The throwaway install dir is never a workspace root, but

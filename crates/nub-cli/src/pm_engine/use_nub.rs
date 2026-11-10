@@ -132,6 +132,7 @@ const NPMRC_KEYS: &[&str] = &[
     "resolutionMode",
     "resolvePeersFromWorkspaceRoot",
     "savePrefix",
+    "saveTypes",
     "saveWorkspaceProtocol",
     "scriptShell",
     "shamefullyHoist",

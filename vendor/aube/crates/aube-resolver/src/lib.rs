@@ -26,7 +26,7 @@ pub use error::{
     AgeGateDetails, CatalogDetails, Error, ExoticSubdepDetails, NoMatchDetails, UndatedDetails,
     WorkspacePkgNotFoundDetails, WorkspaceVersionMismatchDetails,
 };
-pub use local_source::resolve_exec_script_path;
+pub use local_source::{read_tarball_package_json, resolve_exec_script_path};
 pub use package_ext::is_deprecation_allowed;
 pub use peer_context::{
     AutoInstalledPeers, PeerContextOptions, UnmetPeer, apply_peer_contexts, detect_unmet_peers,

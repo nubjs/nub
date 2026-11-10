@@ -945,6 +945,22 @@
             ]
           },
           {
+            "name": "no-save-types",
+            "usage": "--no-save-types",
+            "help": "Inverse of `--save-types`, for a project with `saveTypes` turned on.",
+            "help_long": "Inverse of `--save-types`, for a project with `saveTypes` turned on.",
+            "help_first_line": "Inverse of `--save-types`, for a project with `saveTypes` turned on.",
+            "short": [],
+            "long": [
+              "no-save-types"
+            ],
+            "hide": false,
+            "global": false,
+            "overrides": [
+              "--save-types"
+            ]
+          },
+          {
             "name": "no-save-workspace-protocol",
             "usage": "--no-save-workspace-protocol",
             "help": "Inverse of `--save-workspace-protocol`.",
@@ -1014,6 +1030,25 @@
             "global": false,
             "conflicts": [
               "--save-optional"
+            ]
+          },
+          {
+            "name": "save-types",
+            "usage": "--save-types",
+            "help": "Also save the matching `@types/*` package to `devDependencies`.",
+            "help_long": "Also save the matching `@types/*` package to `devDependencies`.\n\nFor each registry package that ships no TypeScript types, looks up its DefinitelyTyped package (`@scope/pkg` becomes `@types/scope__pkg`) and saves its newest release on the same major version. Nothing is added for a package that declares `types`, `typings` or a `types` condition on its root export, for an `@types/*` package, when the project already lists the `@types` package, or when the registry has no matching release.",
+            "help_first_line": "Also save the matching `@types/*` package to `devDependencies`.",
+            "short": [],
+            "long": [
+              "save-types"
+            ],
+            "hide": false,
+            "global": false,
+            "conflicts": [
+              "--global"
+            ],
+            "overrides": [
+              "--no-save-types"
             ]
           },
           {

@@ -367,6 +367,7 @@ Snapshots `package.json` and the lockfile, links the named packages into `node_m
 Handy for one-off experiments and for scripts that install a tool transiently. Mirrors `pnpm add --no-save`. Conflicts with `-g`/`--global`, which has to persist the install to its global manifest.
 """#
     }
+    flag --no-save-types help="Inverse of `--save-types`, for a project with `saveTypes` turned on." overrides=--save-types
     flag --no-save-workspace-protocol help="Inverse of `--save-workspace-protocol`." overrides=--save-workspace-protocol {
         long_help #"""
 Inverse of `--save-workspace-protocol`.
@@ -399,6 +400,13 @@ Writes the entry to `catalogs.<name>` in the workspace yaml and `catalog:<name>`
 Add as a peer dependency (written to `peerDependencies` in package.json).
 
 By convention you usually pair this with `--save-dev` so the peer is also installed for local development; that's what pnpm does.
+"""#
+    }
+    flag --save-types help="Also save the matching `@types/*` package to `devDependencies`." conflicts=--global overrides=--no-save-types {
+        long_help #"""
+Also save the matching `@types/*` package to `devDependencies`.
+
+For each registry package that ships no TypeScript types, looks up its DefinitelyTyped package (`@scope/pkg` becomes `@types/scope__pkg`) and saves its newest release on the same major version. Nothing is added for a package that declares `types`, `typings` or a `types` condition on its root export, for an `@types/*` package, when the project already lists the `@types` package, or when the registry has no matching release.
 """#
     }
     flag --save-workspace-protocol help="Force the manifest specifier into `workspace:` form for this invocation, overriding `saveWorkspaceProtocol` from the workspace yaml / `.npmrc` / env." overrides=--no-save-workspace-protocol {

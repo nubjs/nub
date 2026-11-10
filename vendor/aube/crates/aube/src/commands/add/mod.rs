@@ -167,6 +167,7 @@ pub(crate) async fn add_to_project_with_overrides(
                         save_exact: options.save_exact,
                         save_optional: options.save_optional,
                         save_peer: options.save_peer,
+                        save_types: Some(false),
                         network_mode: if options.offline {
                             aube_registry::NetworkMode::Offline
                         } else {
@@ -359,6 +360,9 @@ pub struct AddArgs {
     /// manifest.
     #[usage(long, conflicts = "--global")]
     pub no_save: bool,
+    /// Inverse of `--save-types`, for a project with `saveTypes` turned on.
+    #[usage(long, overrides = "--save-types")]
+    pub no_save_types: bool,
     /// Inverse of `--save-workspace-protocol`.
     ///
     /// Forces the manifest specifier into a registry-style spec
@@ -411,6 +415,17 @@ pub struct AddArgs {
     /// does.
     #[usage(long, conflicts = "--save-optional")]
     pub save_peer: bool,
+    /// Also save the matching `@types/*` package to `devDependencies`.
+    ///
+    /// For each registry package that ships no TypeScript types, looks
+    /// up its DefinitelyTyped package (`@scope/pkg` becomes
+    /// `@types/scope__pkg`) and saves its newest release on the same
+    /// major version. Nothing is added for a package that declares
+    /// `types`, `typings` or a `types` condition on its root export, for
+    /// an `@types/*` package, when the project already lists the `@types`
+    /// package, or when the registry has no matching release.
+    #[usage(long, conflicts = "--global", overrides = "--no-save-types")]
+    pub save_types: bool,
     /// Force the manifest specifier into `workspace:` form for this
     /// invocation, overriding `saveWorkspaceProtocol` from the
     /// workspace yaml / `.npmrc` / env.
@@ -466,6 +481,8 @@ pub async fn run(
         save_optional,
         save_exact,
         save_peer,
+        save_types,
+        no_save_types,
         save_workspace_protocol,
         no_save_workspace_protocol,
         workspace,
@@ -675,6 +692,7 @@ pub async fn run(
                 save_exact,
                 save_optional,
                 save_peer,
+                save_types: manifest::types_flag(save_types, no_save_types),
                 network_mode: aube_registry::NetworkMode::Online,
                 save_catalog: save_catalog_target,
                 workspace_protocol_override: workspace_protocol_override_from_flags(

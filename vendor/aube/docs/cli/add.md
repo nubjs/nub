@@ -44,6 +44,7 @@ Add a dependency
   Snapshots `package.json` and the lockfile, links the named packages into `node_modules`, and then restores both files — so the dependency is usable for the current process but the project's committed state is untouched.
 
   Handy for one-off experiments and for scripts that install a tool transiently. Mirrors `pnpm add --no-save`. Conflicts with `-g`/`--global`, which has to persist the install to its global manifest.
+- **`--no-save-types`** — Inverse of `--save-types`, for a project with `saveTypes` turned on.
 - **`--no-save-workspace-protocol`** — Inverse of `--save-workspace-protocol`.
 
   Forces the manifest specifier into a registry-style spec (`^<version>`) for this invocation, even when `linkWorkspacePackages` matched a local sibling. The install pipeline still prefers the local workspace copy at resolve time — this flag only controls what's written to `package.json`. Mirrors `pnpm add --no-save-workspace-protocol`.
@@ -60,6 +61,9 @@ Add a dependency
 - **`--save-peer`** — Add as a peer dependency (written to `peerDependencies` in package.json).
 
   By convention you usually pair this with `--save-dev` so the peer is also installed for local development; that's what pnpm does.
+- **`--save-types`** — Also save the matching `@types/*` package to `devDependencies`.
+
+  For each registry package that ships no TypeScript types, looks up its DefinitelyTyped package (`@scope/pkg` becomes `@types/scope__pkg`) and saves its newest release on the same major version. Nothing is added for a package that declares `types`, `typings` or a `types` condition on its root export, for an `@types/*` package, when the project already lists the `@types` package, or when the registry has no matching release.
 - **`--save-workspace-protocol`** — Force the manifest specifier into `workspace:` form for this invocation, overriding `saveWorkspaceProtocol` from the workspace yaml / `.npmrc` / env.
 
   Only meaningful when `linkWorkspacePackages` (or a workspace sibling already exists for the named package). With this flag the entry written to `package.json` is `workspace:^` (rolling) or `workspace:^<version>` (pinned), depending on the resolved `saveWorkspaceProtocol` value.
