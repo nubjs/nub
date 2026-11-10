@@ -206,7 +206,7 @@ jobs:
             pnp_os='[{"os":"ubuntu-latest","node":"24"},{"os":"windows-latest","node":"24"},{"os":"macos-15","node":"24"}]'
           fi
           # Linux-only Node-version tier representatives (same on PR and trunk).
-          test_tiers='[{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"22.13"},{"os":"ubuntu-latest","node":"20.11"},{"os":"ubuntu-latest","node":"18.19"}]'
+          test_tiers='[{"os":"ubuntu-latest","node":"26"},{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"22.13"},{"os":"ubuntu-latest","node":"20.11"},{"os":"ubuntu-latest","node":"18.19"}]'
           pnp_tiers='[{"os":"ubuntu-latest","node":"22.15"},{"os":"ubuntu-latest","node":"18.19"}]'
           test=$(jq -cn --argjson a "$test_os" --argjson b "$test_tiers" '{include: ($a + $b)}')
           pnp=$(jq -cn --argjson a "$pnp_os" --argjson b "$pnp_tiers" '{include: ($a + $b)}')
@@ -1168,7 +1168,9 @@ jobs:
       #
       # Node matrix spans the support range so the integration suite (which
       # nub runs against whatever `node` is first on PATH) exercises every
-      # tier + capability boundary. 24 = current line; 22.15 = fast-path floor
+      # tier + capability boundary. 24 = current line; 26 = the newest release
+      # line (the 26.5.0 that version_tiers side-installs is the floor of a
+      # flag band, not the current release); 22.15 = fast-path floor
       # (sync registerHooks); 22.13 = compat-tier top (async module.register,
       # has require(esm)+detect-module+webstorage); 20.11 = compat mid (NO
       # require(esm) — exercises the dynamic-import oxc-parser path — and NO
@@ -1190,8 +1192,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30  # stable # zizmor: ignore[impostor-commit,ref-version-mismatch] dtolnay force-pushes its version tags, so pinned SHAs go unreachable; commit verified genuine upstream
-      # Keyed by OS only (not the node version) so the 4 ubuntu node-tier legs
-      # share ONE cache instead of writing four. save-if:main → read-only on PRs.
+      # Keyed by OS only (not the node version) so the ubuntu node-tier legs
+      # share ONE cache instead of writing one each. save-if:main → read-only on PRs.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6  # v2.9.2
         with:
           shared-key: ci-test-${{ runner.os }}
