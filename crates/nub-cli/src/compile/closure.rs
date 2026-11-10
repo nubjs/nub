@@ -582,8 +582,6 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
     // whose `}` a new statement starts. Any other `}` may close an object literal
     // or a function expression, which are values.
     let mut braces: Vec<bool> = Vec::new();
-    // Where the decimal integer just read ended: a `.` there is its decimal point.
-    let mut integer_until = usize::MAX;
     // The start of the file is the start of a line.
     let mut carry = Carry {
         new_line: true,
@@ -616,6 +614,16 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             continue;
         }
         let was = std::mem::take(&mut carry);
+        // A number is read whole, so its own `.` and the sign of its exponent
+        // stay inside it. The third `.` of `...` is not the start of one.
+        let fraction = c == '.'
+            && bytes.get(i + 1).is_some_and(u8::is_ascii_digit)
+            && !bytes[..i].ends_with(b"..");
+        if c.is_ascii_digit() || fraction {
+            i = number_end(bytes, i);
+            slash = Slash::Divides;
+            continue;
+        }
         if !is_word_char(c) {
             let byte = bytes[i];
             match byte {
@@ -690,14 +698,12 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
                     i += 2;
                     continue;
                 }
-                // `...` spreads an expression. Any other `.` reads a property or
-                // ends a number (`1. / x`), and neither is followed by a regular
-                // expression. Only the first of those names the next word: after
-                // a number, `in` is the operator (`1. in x`).
+                // `...` spreads an expression. Any other `.` here reads a
+                // property, since a number has taken its own.
                 b'.' => {
                     let spread = bytes[..i].ends_with(b"..");
                     slash = if spread { Slash::Regex } else { Slash::Divides };
-                    carry.names = !spread && i != integer_until;
+                    carry.names = !spread;
                 }
                 b'#' => carry.names = true,
                 b',' => {
@@ -753,7 +759,12 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             // Not reserved. It is the keyword only in the head of a `for`, after
             // the binding (`for (x of /re/)`); anywhere else it is an identifier,
             // and `of / 2` divides.
-            "of" if parens.last() == Some(&Paren::ForHead) && slash != Slash::Regex => Slash::Regex,
+            "of" if parens.last() == Some(&Paren::ForHead)
+                && slash != Slash::Regex
+                && !was.declares =>
+            {
+                Slash::Regex
+            }
             // Keywords in a generator, an async function or a module, and
             // variable names in a sloppy script.
             "yield" | "await" => Slash::Unknown,
@@ -769,16 +780,7 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
                 Slash::Regex
             }
             _ => {
-                let digit = bytes[start].is_ascii_digit();
-                // The digits after a decimal point are not an integer of their
-                // own: the `.` after `1.5` reads a property.
-                if digit
-                    && word.bytes().all(|b| b.is_ascii_digit() || b == b'_')
-                    && !bytes[..start].ends_with(b".")
-                {
-                    integer_until = i;
-                }
-                carry.whole = was.declares && !digit;
+                carry.whole = was.declares;
                 Slash::Divides
             }
         };
@@ -862,6 +864,51 @@ fn skip_template_text(
         }
     }
     (i, Slash::Divides)
+}
+
+/// The offset just past the number at `i`, which is at its first digit or at the
+/// `.` before it.
+///
+/// A decimal integer takes the `.` after it as its decimal point, so `1. in x`
+/// tests a property. Every other `.` after a number reads one: after a
+/// fraction or an exponent (`1.5.in`, `1e+2.in`), and after a number that takes
+/// neither, which a `0x`, `0o` or `0b` one, a BigInt and an octal `017` are.
+fn number_end(bytes: &[u8], i: usize) -> usize {
+    let digits = |mut end: usize| {
+        while bytes
+            .get(end)
+            .is_some_and(|b| b.is_ascii_digit() || *b == b'_')
+        {
+            end += 1;
+        }
+        end
+    };
+    let mut end = digits(i);
+    let integer = &bytes[i..end];
+    let radix = integer == b"0"
+        && matches!(
+            bytes.get(end),
+            Some(b'x' | b'X' | b'o' | b'O' | b'b' | b'B')
+        );
+    let octal = integer.len() > 1
+        && integer[0] == b'0'
+        && integer.iter().all(|b| (b'0'..=b'7').contains(b));
+    if radix || octal || bytes.get(end) == Some(&b'n') {
+        while bytes.get(end).is_some_and(|b| is_word_byte(*b)) {
+            end += 1;
+        }
+        return end;
+    }
+    if bytes.get(end) == Some(&b'.') {
+        end = digits(end + 1);
+    }
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let exponent = end + 1 + usize::from(matches!(bytes.get(end + 1), Some(b'+' | b'-')));
+        if bytes.get(exponent).is_some_and(u8::is_ascii_digit) {
+            end = digits(exponent);
+        }
+    }
+    end
 }
 
 /// Skip the regular expression opening at `i`, returning the offset just past its
@@ -1235,6 +1282,7 @@ mod tests {
             "for (const m of /'/.exec(s)) {}",
             "for (const { a } of /'/.exec(s)) {}",
             "for await (const m of /'/.exec(s)) {}",
+            "for (var of of /'/.exec(s)) {}",
             // A Unicode space is still a space.
             "const r =\u{a0}/'/;",
             // A `!` or a `++` that starts a line applies to what follows it.
@@ -1276,9 +1324,15 @@ mod tests {
             "this.#in",
             "x.if(a)",
             // A number that ends at its decimal point, and a property of one
-            // that already has its point.
+            // that has its point or takes none.
             "1.",
             "1.5.in",
+            "1e+2.in",
+            ".5e-2.in",
+            "0e+1.in",
+            "0x1e.in",
+            "10n.in",
+            "017.in",
             // Not reserved, and a keyword only in the head of a `for`.
             "of",
             "café",
