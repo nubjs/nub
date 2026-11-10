@@ -501,6 +501,29 @@ impl Plugin for Entries {
     }
 }
 
+/// What a `/` means after the token just read.
+#[derive(Clone, Copy, PartialEq)]
+enum Slash {
+    /// It opens a regular expression: only an expression can come next.
+    Regex,
+    /// It divides: the token ended a value.
+    Divides,
+    /// Either, and nothing in the tokens says which.
+    Unknown,
+}
+
+/// What an open `(` belongs to, which decides what follows its `)`.
+#[derive(Clone, Copy, PartialEq)]
+enum Paren {
+    /// A call, a grouping or a parameter list: its `)` ends a value.
+    Value,
+    /// The head of an `if`, `while`, `with`, `switch` or `catch`: a statement
+    /// follows its `)`.
+    Head,
+    /// The head of a `for`, which is also the one place `of` is a keyword.
+    ForHead,
+}
+
 /// Collect the literal specifiers in `text`, refusing the moment one is computed.
 ///
 /// Textual, like the rest of nub's package scanning, and for the same reason: a
@@ -515,15 +538,34 @@ impl Plugin for Entries {
 /// because both depend on state carried from one token to the next.
 fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
     let bytes = text.as_bytes();
-    let mut i = 0;
+    // A `#!` line is a comment, and the path on it is not a regular expression.
+    let mut i = if bytes.starts_with(b"#!") {
+        bytes
+            .iter()
+            .position(|b| *b == b'\n')
+            .unwrap_or(bytes.len())
+    } else {
+        0
+    };
     // One entry per open `${`, counting the `{` opened inside it, so the `}` that
     // ends a substitution is told apart from one that closes a block within it.
     let mut substitutions: Vec<usize> = Vec::new();
-    // Whether a `/` here would open a regular expression rather than divide: true
-    // where an expression can start, false right after a value. Division read as
-    // a regular expression steps over real code up to the next `/`, so it takes a
-    // token that only an expression can follow to set this.
-    let mut regex_allowed = true;
+    // What a `/` here means. Both mistakes hide code: division read as a regular
+    // expression steps over everything up to the next `/`, and a regular
+    // expression read as division has its body scanned as code, where a quote or
+    // a backtick opens a string that is not there. So where the tokens leave both
+    // readings open, the scan gives up instead of choosing.
+    let mut slash = Slash::Regex;
+    let mut parens: Vec<Paren> = Vec::new();
+    // The statement keyword just read, whose `(` opens a head.
+    let mut head = None;
+    // One entry per open `{`: whether it is known to open a statement block, after
+    // whose `}` a new statement starts. Any other `}` may close an object literal
+    // or a function expression, which are values.
+    let mut braces: Vec<bool> = Vec::new();
+    // Whether the token just read is one a `{` can only follow as a block: the `)`
+    // of a head, `else`, `do`, `try`, `finally`, or the `=>` of an arrow function.
+    let mut blocks_next = false;
     // Whether the token before this one makes a word a name whatever it spells:
     // the `.` of a property read (`x.in`, `x?.return`, `x. typeof`) or the `#` of a
     // private one.
@@ -537,62 +579,108 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             // A comment leaves the token before it in charge of what follows; a
             // string is a value.
             if bytes[i] != b'/' {
-                regex_allowed = false;
+                slash = Slash::Divides;
                 names_next = false;
+                head = None;
+                blocks_next = false;
             }
             i = after;
             continue;
         }
         let byte = bytes[i];
-        if matches!(byte, b' ' | b'\t' | b'\n' | b'\r') {
+        if matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
             i += 1;
             continue;
         }
+        if !byte.is_ascii() {
+            // Outside a string or a comment, a non-ASCII character is one of the
+            // Unicode spaces, which changes nothing, or part of an identifier.
+            let c = text.get(i..).and_then(|rest| rest.chars().next());
+            i += c.map_or(1, char::len_utf8);
+            if !c.is_some_and(|c| c.is_whitespace() || c == '\u{feff}') {
+                slash = Slash::Divides;
+                names_next = false;
+                head = None;
+                blocks_next = false;
+            }
+            continue;
+        }
         let named = std::mem::take(&mut names_next);
+        let opens = head.take();
+        let block = std::mem::take(&mut blocks_next);
         if !is_word_byte(byte) {
             match byte {
                 b'`' => {
-                    (i, regex_allowed) = skip_template_text(bytes, i + 1, &mut substitutions);
+                    (i, slash) = skip_template_text(bytes, i + 1, &mut substitutions);
                     continue;
                 }
-                b'/' if regex_allowed => {
-                    i = skip_regex(bytes, i);
-                    regex_allowed = false;
-                    continue;
+                b'/' => match slash {
+                    Slash::Regex => {
+                        i = skip_regex(bytes, i);
+                        slash = Slash::Divides;
+                        continue;
+                    }
+                    Slash::Divides => slash = Slash::Regex,
+                    Slash::Unknown => return None,
+                },
+                b'(' => {
+                    parens.push(opens.unwrap_or(Paren::Value));
+                    slash = Slash::Regex;
+                }
+                // `if (x) /re/.test(y)` starts a statement; `(a + b) / 2` divides.
+                b')' => {
+                    blocks_next = matches!(parens.pop(), Some(Paren::Head | Paren::ForHead));
+                    slash = if blocks_next {
+                        Slash::Regex
+                    } else {
+                        Slash::Divides
+                    };
+                }
+                b'>' if i > 0 && bytes[i - 1] == b'=' => {
+                    blocks_next = true;
+                    slash = Slash::Regex;
                 }
                 b'{' => {
                     if let Some(depth) = substitutions.last_mut() {
                         *depth += 1;
                     }
-                    regex_allowed = true;
+                    braces.push(block);
+                    slash = Slash::Regex;
                 }
-                b'}' => match substitutions.pop() {
-                    Some(0) => {
-                        (i, regex_allowed) = skip_template_text(bytes, i + 1, &mut substitutions);
-                        continue;
+                b'}' => {
+                    match substitutions.pop() {
+                        Some(0) => {
+                            (i, slash) = skip_template_text(bytes, i + 1, &mut substitutions);
+                            continue;
+                        }
+                        Some(depth) => substitutions.push(depth - 1),
+                        None => {}
                     }
-                    Some(depth) => {
-                        substitutions.push(depth - 1);
-                        regex_allowed = false;
-                    }
-                    None => regex_allowed = false,
-                },
-                b')' | b']' => regex_allowed = false,
-                // `x++ / y`: a postfix increment ends a value, and no regular
-                // expression can follow `++` or `--`.
-                b'+' | b'-' if i > 0 && bytes[i - 1] == byte => regex_allowed = false,
+                    slash = match braces.pop() {
+                        Some(true) => Slash::Regex,
+                        _ => Slash::Unknown,
+                    };
+                }
+                b']' => slash = Slash::Divides,
+                // `++` and `--` sit on either side of a value, so what a `/` means
+                // after one is what it meant before it.
+                b'+' | b'-' if bytes.get(i + 1) == Some(&byte) => {
+                    i += 2;
+                    continue;
+                }
                 // `...` spreads an expression. Any other `.` reads a property or
                 // ends a number (`1. / x`), and neither is followed by a regular
                 // expression.
                 b'.' => {
-                    regex_allowed = bytes[..i].ends_with(b"..");
-                    names_next = !regex_allowed;
+                    let spread = bytes[..i].ends_with(b"..");
+                    slash = if spread { Slash::Regex } else { Slash::Divides };
+                    names_next = !spread;
                 }
                 b'#' => names_next = true,
-                // Outside a string or a comment, a non-ASCII byte is part of an
-                // identifier.
-                0x80.. => regex_allowed = false,
-                _ => regex_allowed = true,
+                // A JSX closing tag. Nothing here reads JSX, and its text is not
+                // code.
+                b'<' if bytes.get(i + 1) == Some(&b'/') => return None,
+                _ => slash = Slash::Regex,
             }
             i += 1;
             continue;
@@ -606,13 +694,39 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             i += 1;
         }
         let word = &text[start..i];
-        regex_allowed = match word {
-            _ if named => false,
-            // Not reserved. It is the keyword only after the binding of a
-            // `for (x of /re/)`; where an expression starts it is an identifier,
+        slash = match word {
+            _ if named => Slash::Divides,
+            "if" | "while" | "with" | "switch" | "catch" => {
+                head = Some(Paren::Head);
+                // `catch {` takes no binding.
+                blocks_next = word == "catch";
+                Slash::Regex
+            }
+            "try" | "finally" => {
+                blocks_next = true;
+                Slash::Regex
+            }
+            "for" => {
+                head = Some(Paren::ForHead);
+                Slash::Regex
+            }
+            // `for await (`.
+            "await" if opens == Some(Paren::ForHead) => {
+                head = opens;
+                Slash::Regex
+            }
+            // Not reserved. It is the keyword only in the head of a `for`, after
+            // the binding (`for (x of /re/)`); anywhere else it is an identifier,
             // and `of / 2` divides.
-            "of" => !regex_allowed,
-            _ => REGEX_KEYWORDS.contains(&word),
+            "of" if parens.last() == Some(&Paren::ForHead) && slash != Slash::Regex => Slash::Regex,
+            // Keywords in a generator, an async function or a module, and
+            // variable names in a sloppy script.
+            "yield" | "await" => Slash::Unknown,
+            _ if REGEX_KEYWORDS.contains(&word) => {
+                blocks_next = matches!(word, "else" | "do");
+                Slash::Regex
+            }
+            _ => Slash::Divides,
         };
         if !matches!(word, "require" | "import" | "from") {
             continue;
@@ -629,7 +743,7 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             }
             take(specifier, word == "require", out);
             i = end;
-            regex_allowed = false;
+            slash = Slash::Divides;
             continue;
         }
         // `import "x"`, and the tail of `import … from "x"` / `export … from "x"`.
@@ -639,17 +753,15 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             if let Some((specifier, end)) = literal(text, after) {
                 take(specifier, false, out);
                 i = end;
-                regex_allowed = false;
+                slash = Slash::Divides;
             }
         }
     }
     Some(())
 }
 
-/// Words after which a `/` opens a regular expression: each one is followed by an
-/// expression, and each is reserved, so it is never a variable a `/` could divide.
-/// `yield` and `await` are left out for that reason: a sloppy script may name a
-/// variable either one, and nothing here says which reading applies.
+/// Reserved words after which a `/` opens a regular expression: none is a value,
+/// and none can name a variable, so there is nothing for a `/` to divide.
 const REGEX_KEYWORDS: &[&str] = &[
     "return",
     "typeof",
@@ -662,24 +774,32 @@ const REGEX_KEYWORDS: &[&str] = &[
     "delete",
     "void",
     "throw",
+    "default",
+    "break",
+    "continue",
+    "debugger",
 ];
 
 /// Skip template text from `i` to its closing backtick or its next `${`, and say
-/// which: `true` when it stopped at the start of a substitution, which is code and
-/// where an expression starts. Opening a substitution pushes its brace depth.
-fn skip_template_text(bytes: &[u8], mut i: usize, substitutions: &mut Vec<usize>) -> (usize, bool) {
+/// what a `/` means there: a closed template is a value, and a substitution is
+/// code, where an expression starts. Opening a substitution pushes its brace depth.
+fn skip_template_text(
+    bytes: &[u8],
+    mut i: usize,
+    substitutions: &mut Vec<usize>,
+) -> (usize, Slash) {
     while i < bytes.len() {
         match bytes[i] {
             b'\\' => i += 2,
-            b'`' => return (i + 1, false),
+            b'`' => return (i + 1, Slash::Divides),
             b'$' if bytes.get(i + 1) == Some(&b'{') => {
                 substitutions.push(0);
-                return (i + 2, true);
+                return (i + 2, Slash::Regex);
             }
             _ => i += 1,
         }
     }
-    (i, false)
+    (i, Slash::Divides)
 }
 
 /// Skip the regular expression opening at `i`, returning the offset just past its
@@ -733,19 +853,18 @@ fn take(specifier: &str, required: bool, out: &mut BTreeMap<String, Uses>) {
 /// and [`scan`] handles them itself. A template's `${…}` substitutions are code,
 /// so only the text between them is skipped, nested templates included. A `/`
 /// opens a regular expression only where an expression can start — after an
-/// operator, an opening bracket, or a keyword such as `return` — and divides after
-/// a value; the expression is skipped with its `\` escapes and `[...]` classes.
-/// Without both, one apostrophe in template text or one backtick or quote in a
-/// character class opens a "string" that is not there, every quote after it is
-/// read inside out, and in a minified bundle — one line — that hides the rest of
-/// the file, real `require` calls included.
+/// operator, an opening bracket, the head of an `if`, or a keyword such as
+/// `return` — and divides after a value; the expression is skipped with its `\`
+/// escapes and `[...]` classes. Without both, one apostrophe in template text or
+/// one backtick or quote in a character class opens a "string" that is not there,
+/// every quote after it is read inside out, and in a minified bundle — one line —
+/// that hides the rest of the file, real `require` calls included.
 ///
-/// Three shapes are still misread, and none occurs in the corpus. A regular
-/// expression directly after `)` or `}` (`if (x) /re/.test(y)`), or after `yield`
-/// or `await`, is taken for division, so its body is scanned as code. A statement
-/// that opens by dividing a variable named `of`, directly after a value
-/// (`}\nof / 2`), is taken for the `for … of` keyword, which skips to the next `/`
-/// on that line.
+/// Two positions leave a `/` open to both readings without a parser: after a `}`
+/// that is not known to close a statement block, since an object literal and a
+/// function expression are values, and after `yield` or `await`, which are
+/// keywords in some functions and variable names in others. [`scan`] refuses a
+/// file with a `/` in either position.
 fn skip_noncode(bytes: &[u8], i: usize) -> Option<usize> {
     match (bytes[i], bytes.get(i + 1)) {
         (b'/', Some(b'/')) => Some(
@@ -1009,8 +1128,22 @@ mod tests {
             "f(/'/);",
             "const r = /'/;",
             "f(a, /'/);",
-            "for (const m of /'/.exec(s)) {}",
             "const l = [.../'/.exec(s)];",
+            "export default /'/;",
+            // The head of a statement, as against a call or a grouping.
+            "if (a) /'/.test(s);",
+            "while (a) /'/.test(s);",
+            "for (;;) { break\n/'/.test(s); }",
+            // A `}` that can only close a statement block.
+            "if (a) { b(); }\n/'/.test(s);",
+            "try { a(); } finally { b(); }\n/'/.test(s);",
+            "const f = () => { a(); }\n/'/.test(s);",
+            // `of` in the head of a `for`, after any shape of binding.
+            "for (const m of /'/.exec(s)) {}",
+            "for (const { a } of /'/.exec(s)) {}",
+            "for await (const m of /'/.exec(s)) {}",
+            // A Unicode space is still a space.
+            "const r =\u{a0}/'/;",
         ] {
             assert_eq!(
                 scanned(&format!("{source}\nconst m = require(name);")),
@@ -1034,7 +1167,7 @@ mod tests {
             "total",
             "(a + b)",
             "list[0]",
-            "{}",
+            "f(a)",
             "`${n}`",
             "'n'",
             "n++",
@@ -1045,20 +1178,50 @@ mod tests {
             "x?.delete",
             "x. /* c */ return",
             "this.#in",
+            "x.if(a)",
             // A number that ends at its decimal point.
             "1.",
-            // Not reserved, so each can name a variable: `of` anywhere, `yield`
-            // and `await` in a sloppy script.
+            // Not reserved, and a keyword only in the head of a `for`.
             "of",
-            "yield",
-            "await",
             "café",
+            "café\u{a0}",
         ] {
             let literal = format!("const r = {value} / require('os').cpus().length / 2;");
             assert_eq!(scanned(&literal), Some(vec!["os r".into()]), "{literal}");
             let computed = format!("const r = {value} / require(name).cpus().length / 2;");
             assert_eq!(scanned(&computed), None, "{computed}");
         }
+        assert_eq!(
+            scanned("let of = 12; {}\nof / require('os').cpus().length / 2;"),
+            Some(vec!["os r".into()]),
+            "`of` opening a statement after a block"
+        );
+    }
+
+    /// After the `}` of a function or an object literal, and after `yield` or
+    /// `await`, a `/` may open a regular expression or divide, and either wrong
+    /// guess hides code: the expression's backtick would open a template over the
+    /// `require` after it, and the division's right-hand side would be skipped as
+    /// a pattern. Every specifier here is a literal, so only the `/` can be what
+    /// abandons the scan.
+    #[test]
+    fn a_slash_that_could_be_either_abandons_the_scan() {
+        for source in [
+            "async function f() { await /`/; return require('fontkit'); }",
+            "function* g() { yield /`/; return require('fontkit'); }",
+            "var await = 8; var r = await / require('fontkit') / 2;",
+            "var yield = 8; var r = yield / require('fontkit') / 2;",
+            "function f() { b(); }\n/`/.test(s); require('fontkit');",
+            "const r = {} / require('fontkit') / 2;",
+            "const a = <b>x</b>; const c = <d>{require('fontkit')}</d>;",
+        ] {
+            assert_eq!(scanned(source), None, "{source}");
+        }
+        // The control: the same tokens with no `/` after them scan to the end.
+        assert_eq!(
+            scanned("async function f() { await g(); function h() {} require('fontkit'); }"),
+            Some(vec!["fontkit r".into()])
+        );
     }
 
     /// What a chunk can and cannot stand in for. The refusals are about the module
