@@ -539,8 +539,19 @@ struct Carry {
     /// the `,` between the names they declare, and the `break` or `continue`
     /// before a label.
     declares: bool,
-    /// It is such a name.
+    /// It is `var`, `let` or `const`, and the word after it is the name it
+    /// declares whatever that word spells: `var let`, `for (var of of x)`.
+    declarator: bool,
+    /// It is a name that can be whole where it stands.
     whole: bool,
+    /// It is `require` or `import`, and a `(` after it opens a call: whether
+    /// that call requires.
+    calls: Option<bool>,
+    /// It is `import` or `from`, and a string after it is the specifier of a
+    /// declaration.
+    sources: bool,
+    /// It is a `}`.
+    closes: bool,
     /// A line end follows it.
     new_line: bool,
 }
@@ -596,9 +607,21 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             if bytes[i] == b'/' {
                 // A comment leaves the token before it in charge of what follows.
                 carry.new_line |= line_end(&bytes[i..after], 0) < after - i;
+            } else if std::mem::take(&mut carry).sources
+                && after <= bytes.len()
+                && after - i >= 2
+                && bytes[after - 1] == bytes[i]
+            {
+                // `import "x"`, and the tail of `import … from "x"` and
+                // `export … from "x"`: whatever clause sits between the two
+                // words is passed over by matching `from` on its own. The
+                // declaration ends here, so a `/` on the next line opens a
+                // regular expression. Where `from` is a variable instead, the
+                // string is a value and a `/` divides it.
+                take(&text[i + 1..after - 1], false, out)?;
+                slash = Slash::Unknown;
             } else {
                 // A string is a value.
-                carry = Carry::default();
                 slash = Slash::Divides;
             }
             i = after;
@@ -614,12 +637,16 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             continue;
         }
         let was = std::mem::take(&mut carry);
+        // `...` spreads an expression. It is one token, so a `.` after it can
+        // start a number: `....5`.
+        if bytes[i..].starts_with(b"...") {
+            i += 3;
+            slash = Slash::Regex;
+            continue;
+        }
         // A number is read whole, so its own `.` and the sign of its exponent
-        // stay inside it. The third `.` of `...` is not the start of one.
-        let fraction = c == '.'
-            && bytes.get(i + 1).is_some_and(u8::is_ascii_digit)
-            && !bytes[..i].ends_with(b"..");
-        if c.is_ascii_digit() || fraction {
+        // stay inside it.
+        if c.is_ascii_digit() || c == '.' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) {
             i = number_end(bytes, i);
             slash = Slash::Divides;
             continue;
@@ -646,6 +673,24 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
                     Slash::Unknown => return None,
                 },
                 b'(' => {
+                    // A call: its argument is the whole verdict, so anything that
+                    // is not one quoted string gives up. `'a' + b` is the case
+                    // worth naming — the string is real, and reading it as the
+                    // specifier would report a module nobody asked for while
+                    // hiding the one they did.
+                    if let Some(required) = was.calls {
+                        let (specifier, end) = literal(text, skip_spaces(bytes, i + 1))?;
+                        let close = skip_spaces(bytes, end);
+                        if bytes.get(close) != Some(&b')') {
+                            return None;
+                        }
+                        take(specifier, required, out)?;
+                        // The call is read whole, so the stack of open parens
+                        // sees neither its `(` nor its `)`.
+                        i = close + 1;
+                        slash = Slash::Divides;
+                        continue;
+                    }
                     parens.push(was.head.unwrap_or(Paren::Value));
                     slash = Slash::Regex;
                 }
@@ -678,6 +723,7 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
                         Some(depth) => substitutions.push(depth - 1),
                         None => {}
                     }
+                    carry.closes = true;
                     slash = match braces.pop() {
                         Some(true) => Slash::Regex,
                         _ => Slash::Unknown,
@@ -698,12 +744,11 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
                     i += 2;
                     continue;
                 }
-                // `...` spreads an expression. Any other `.` here reads a
-                // property, since a number has taken its own.
+                // A `.` here reads a property: a spread and a number have each
+                // taken their own.
                 b'.' => {
-                    let spread = bytes[..i].ends_with(b"..");
-                    slash = if spread { Slash::Regex } else { Slash::Divides };
-                    carry.names = !spread;
+                    carry.names = true;
+                    slash = Slash::Divides;
                 }
                 b'#' => carry.names = true,
                 b',' => {
@@ -761,16 +806,25 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
             // and `of / 2` divides.
             "of" if parens.last() == Some(&Paren::ForHead)
                 && slash != Slash::Regex
-                && !was.declares =>
+                && !was.declarator =>
             {
-                Slash::Regex
+                // The binding before the keyword ends in a value or in the `}`
+                // of a pattern. After anything else that leaves a `/` open, as
+                // `yield` and `await` do, `of` is as open as they are.
+                if slash == Slash::Divides || was.closes {
+                    Slash::Regex
+                } else {
+                    Slash::Unknown
+                }
             }
             // Keywords in a generator, an async function or a module, and
             // variable names in a sloppy script.
             "yield" | "await" => Slash::Unknown,
-            "var" | "let" | "const" => {
+            // After another of them, `let` is the name declared: `var let`.
+            "var" | "let" | "const" if !was.declarator => {
+                carry.declarator = true;
                 carry.declares = true;
-                // `let` names a variable in a script: `var let`.
+                // After a `,` it may be a name too.
                 carry.whole = was.declares;
                 Slash::Divides
             }
@@ -784,42 +838,14 @@ fn scan(text: &str, out: &mut BTreeMap<String, Uses>) -> Option<()> {
                 Slash::Divides
             }
         };
-        if !matches!(word, "require" | "import" | "from") {
-            continue;
-        }
-        let after = skip_spaces(bytes, i);
-        // A call: its argument is the whole verdict, so anything that is not one
-        // quoted string gives up. `'a' + b` is the case worth naming — the string
-        // is real, and reading it as the specifier would report a module nobody
-        // asked for while hiding the one they did.
-        if word != "from" && bytes.get(after) == Some(&b'(') {
-            let (specifier, end) = literal(text, skip_spaces(bytes, after + 1))?;
-            let close = skip_spaces(bytes, end);
-            if bytes.get(close) != Some(&b')') {
-                return None;
-            }
-            take(specifier, word == "require", out);
-            // Past the call's own `)`, which the stack of open parens never saw
-            // the `(` for.
-            i = close + 1;
-            slash = Slash::Divides;
-            carry = Carry::default();
-            continue;
-        }
-        // `import "x"`, and the tail of `import … from "x"` / `export … from "x"`.
-        // Whatever clause sits between the two words is skipped by matching `from`
-        // on its own rather than trying to parse the clause.
-        if word != "require" {
-            if let Some((specifier, end)) = literal(text, after) {
-                take(specifier, false, out);
-                i = end;
-                // The declaration ends here, so a `/` on the next line opens a
-                // regular expression. Where `from` is a variable instead, the
-                // string after it is a value and a `/` divides it.
-                slash = Slash::Unknown;
-                carry = Carry::default();
-            }
-        }
+        // What follows may make it a call or a declaration, across any space
+        // or comment: `require /* c */ ('x')`.
+        carry.calls = match word {
+            "require" => Some(true),
+            "import" => Some(false),
+            _ => None,
+        };
+        carry.sources = matches!(word, "import" | "from");
     }
     Some(())
 }
@@ -936,7 +962,8 @@ fn skip_regex(bytes: &[u8], i: usize) -> usize {
     end
 }
 
-fn take(specifier: &str, required: bool, out: &mut BTreeMap<String, Uses>) {
+/// Record a specifier, refusing one whose name cannot be read off its text.
+fn take(specifier: &str, required: bool, out: &mut BTreeMap<String, Uses>) -> Option<()> {
     // Bare specifiers only. A relative or absolute path is the package's own file
     // and travels with it, and a `node:`/`data:`/`file:` URL — plus, on the same
     // test, a Windows drive letter — names nothing in `node_modules`.
@@ -944,10 +971,16 @@ fn take(specifier: &str, required: bool, out: &mut BTreeMap<String, Uses>) {
         && !specifier.starts_with(['.', '/', '\\', '#'])
         && !specifier.contains(':')
     {
+        // Escapes are not decoded here, so the text of one is not the name
+        // Node resolves.
+        if specifier.contains('\\') {
+            return None;
+        }
         let uses = out.entry(specifier.to_string()).or_default();
         uses.required |= required;
         uses.imported |= !required;
     }
+    Some(())
 }
 
 /// Skip a comment or a quoted string, returning the offset just past it.
@@ -1143,13 +1176,17 @@ mod tests {
                 const paths = Array.from(new Set([1]));
                 const cfg = { from: "not-a-module" };
                 const later = await import('png-js');
+                const spaced = require /* inline */ ('js-md5');
+                import /* side effect */ "brotli";
                 "#
             )
             .expect("every specifier here is a literal"),
             [
                 "@noble/hashes/sha2 r",
+                "brotli i",
                 "fontkit r",
                 "fs r",
+                "js-md5 r",
                 // Named both ways in one file, which is what makes a package need
                 // a chunk in each format rather than one that is interoped.
                 "linebreak ri",
@@ -1168,6 +1205,10 @@ mod tests {
             "const m = require(`@scope/${plat}`);",
             "const m = await import(spec);",
             "const m = require('a' + b);",
+            // A comment between the word and its `(` leaves it a call.
+            "const m = await import /* lazy */ (spec);",
+            // An escape is not decoded, so the name is not the one in the text.
+            "const m = require('js-\\x6dd5');",
         ] {
             assert_eq!(
                 scanned(&format!("require('fontkit');\n{computed}")),
@@ -1282,7 +1323,9 @@ mod tests {
             "for (const m of /'/.exec(s)) {}",
             "for (const { a } of /'/.exec(s)) {}",
             "for await (const m of /'/.exec(s)) {}",
+            // The word after `var` is the name declared, whatever it spells.
             "for (var of of /'/.exec(s)) {}",
+            "for (var let of /'/.exec(s)) {}",
             // A Unicode space is still a space.
             "const r =\u{a0}/'/;",
             // A `!` or a `++` that starts a line applies to what follows it.
@@ -1348,6 +1391,15 @@ mod tests {
             let computed = format!("const r = {value} / require(name).cpus().length / 2;");
             assert_eq!(scanned(&computed), None, "{computed}");
         }
+        // A spread is one token, and the number after it another.
+        assert_eq!(
+            scanned("const o = {....5.in / require('os').cpus().length / 2};"),
+            Some(vec!["os r".into()])
+        );
+        assert_eq!(
+            scanned("const o = {....5.in / require(name).cpus().length / 2};"),
+            None
+        );
         assert_eq!(
             scanned("var a, b = a / 2; while (b --> 0) f(a, b / require('os').cpus().length);"),
             Some(vec!["os r".into()]),
@@ -1428,6 +1480,9 @@ mod tests {
         for source in [
             "async function f() { await /`/; return require('fontkit'); }",
             "function* g() { yield /`/; return require('fontkit'); }",
+            // `of` after one of them is the keyword only where they are names.
+            "async function f() { for (const x of await of / require('fontkit') / 2) {} }",
+            "for (await of ++of / require('fontkit') / 2) {}",
             "var await = 8; var r = await / require('fontkit') / 2;",
             "var yield = 8; var r = yield / require('fontkit') / 2;",
             "function f() { b(); }\n/`/.test(s); require('fontkit');",
