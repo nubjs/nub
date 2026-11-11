@@ -85,7 +85,14 @@ use std::time::Duration;
 
 /// Hard upper bound on how long the scanner may run. 30s mirrors
 /// what npm and Bun use for similar install-time hooks.
+#[cfg(not(test))]
 const SCANNER_TIMEOUT: Duration = Duration::from_secs(30);
+/// The tests spawn a real `node` per case alongside the rest of the
+/// parallel suite, and no test exercises the timeout itself. A
+/// degraded Windows CI runner once took over 30s to finish one
+/// trivial scanner, which failed the run on wall-clock alone.
+#[cfg(test)]
+const SCANNER_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Bridge JS payloads, embedded at compile time so the install
 /// pipeline has no on-disk runtime dependency on these files
