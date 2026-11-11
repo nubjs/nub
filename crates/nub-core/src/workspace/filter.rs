@@ -248,19 +248,12 @@ fn collect_package_dirs(
 
 /// Whether `pattern` could match `rel` or a directory below it: each segment of
 /// `rel` matches the pattern's segment at the same position, until a `**`, which
-/// matches everything beneath. Only ever over-includes — a brace group holding a
-/// `/` (`{a/b,c}`) cannot be split into segments, so such a pattern is never
-/// pruned — so the members found are the same as walking everything; the final
-/// include/exclude match still decides.
+/// matches everything beneath. Only ever over-includes — a pattern that cannot be
+/// split into segments is never pruned — so the members found are the same as
+/// walking everything; the final include/exclude match still decides.
 fn could_hold_member(rel: &Path, pattern: &str) -> bool {
-    let mut brace_depth = 0usize;
-    for c in pattern.chars() {
-        match c {
-            '{' => brace_depth += 1,
-            '}' => brace_depth = brace_depth.saturating_sub(1),
-            '/' if brace_depth > 0 => return true,
-            _ => {}
-        }
+    if !splits_into_segments(pattern) {
+        return true;
     }
     let mut pattern_segments = pattern.split('/');
     for segment in rel.components() {
@@ -271,6 +264,42 @@ fn could_hold_member(rel: &Path, pattern: &str) -> bool {
             Some(p) if !glob_match::glob_match(p, &segment) => return false,
             Some(_) => {}
         }
+    }
+    true
+}
+
+/// False when a `/` sits inside a brace group (`{libs/core,apps}`) or a
+/// character class (`[^/]`), where splitting the pattern on `/` would cut the
+/// group in half. A class runs to the next `]` that is not its first member.
+fn splits_into_segments(pattern: &str) -> bool {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut brace_depth = 0usize;
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' => {
+                let mut end = i + 1;
+                if matches!(chars.get(end), Some('!' | '^')) {
+                    end += 1;
+                }
+                if chars.get(end) == Some(&']') {
+                    end += 1;
+                }
+                while end < chars.len() && chars[end] != ']' {
+                    if chars[end] == '/' {
+                        return false;
+                    }
+                    end += 1;
+                }
+                i = end;
+            }
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '/' if brace_depth > 0 => return false,
+            _ => {}
+        }
+        i += 1;
     }
     true
 }
@@ -569,9 +598,20 @@ mod tests {
                 "`{outside}` matches no pattern and must not be listed: {listed:?}"
             );
         }
-        assert!(
-            could_hold_member(Path::new("unlisted/z"), "{unlisted/z,other}"),
-            "a brace group holding `/` cannot be split per segment, so it prunes nothing"
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_slash_inside_a_class_or_brace_group_still_finds_its_members() {
+        // Splitting these on `/` would cut the group in half and prune the member.
+        let root = scaffold_workspace(
+            "unsplittable",
+            &["packages/[^/]*", "{libs/core,tools}"],
+            &["packages/a", "libs/core"],
+        );
+        assert_eq!(
+            discovered_names(&root),
+            HashSet::from(["a", "core"].map(String::from)),
         );
         let _ = fs::remove_dir_all(&root);
     }
