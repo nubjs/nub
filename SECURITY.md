@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email [nub@colinhacks.com](mailto:nub@colinhacks.com). Don't open a public issue or pull request for a security problem.
+Report it privately through [GitHub's vulnerability reporting form](https://github.com/nubjs/nub/security/advisories/new). Don't open a public issue or pull request for a security problem.
 
 Include:
 
