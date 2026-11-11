@@ -1,7 +1,5 @@
 # Contributing to Nub
 
-`wiki/agents.md` is written mainly for maintainers and coding agents. Before you contribute, read its [core design positions](wiki/agents.md#core-design-positions), [the brand boundary](wiki/agents.md#the-brand-boundary--public-surfaces-only-internals-are-exempt) and [the rule for commit messages](wiki/agents.md#the-repo-is-public--never-commit-internal-discussion).
-
 ## Reporting bugs and requesting features
 
 Open an issue at [github.com/nubjs/nub/issues](https://github.com/nubjs/nub/issues). For a bug, include the output of `nub --version`, your OS, and the smallest project or command that shows the problem. For a security problem, follow [SECURITY.md](SECURITY.md) instead of opening an issue.
@@ -24,7 +22,7 @@ git config core.hooksPath .githooks
 nub install --frozen-lockfile --node-linker hoisted
 ```
 
-The hooks in `.githooks/` strip agent co-author trailers from commit messages. Before a push they also check the `wiki/` graph and, when `site/` changed, build the site.
+The hooks in `.githooks/` remove agent co-author trailers from commit messages and run checks before each push, including the full site build when `site/` changed.
 
 ## Building
 
@@ -72,10 +70,8 @@ Before you push, run `make verify`. It checks formatting and every lockfile, run
 ## Pull requests
 
 - Open the pull request against `main`. If it fixes an issue, put `Fixes #N` in the description so the issue closes on merge. Use `Refs #N` if it's only related.
-- Leave "Allow edits by maintainers" on when you open it from a fork. If your branch needs changes, a maintainer pushes them to it directly instead of asking you to amend it.
-- CI doesn't start when you open a pull request or push to it. Once review is done and the branch is ready to merge, a maintainer starts a run by adding the `ci` label, or `ci-full` to add the slower workflows. Adding a label needs write access, so a pull request from a fork waits for a maintainer. Get `make verify` passing first so that one run is enough.
-- Vercel and the review bots run on every pull request and can go green when CI hasn't run at all. The `CI gate` check is the one that shows CI ran, so a pull request isn't verified until it appears and passes.
-- A run always includes [`ci.yml`](.github/workflows/ci.yml) (formatting, Clippy, the test suite on Linux and Windows, some jobs on macOS, the site build and docs links), [`lat-check.yml`](.github/workflows/lat-check.yml) and [`commit-hygiene.yml`](.github/workflows/commit-hygiene.yml). Other workflows run only when the pull request touches their paths, for example [`aube-parity.yml`](.github/workflows/aube-parity.yml) for a change under `vendor/aube`.
+- Leave "Allow edits by maintainers" on when you open it from a fork, so a maintainer can push fixes to your branch.
+- CI doesn't run when you open a pull request or push to it. After review, a maintainer starts a run by adding the `ci` label. Get `make verify` passing first so that one run is enough. Until that run's `CI gate` check passes, the green checks from Vercel and the review bots don't mean the code was tested.
 
 ## The vendored package manager
 

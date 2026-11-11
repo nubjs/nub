@@ -11,7 +11,7 @@ Include:
 - The smallest project or command that reproduces the problem
 - What an attacker could do with it
 
-If you can, check that the problem still happens on the latest release. [Upgrading](https://nubjs.com/docs#upgrading) shows how for each install channel.
+Fixes ship in a new release, and older releases aren't patched, so check that the problem still happens on the latest one. [Upgrading](https://nubjs.com/docs#upgrading) shows how for each install channel.
 
 ## What this policy covers
 
@@ -20,5 +20,3 @@ If you can, check that the problem still happens on the latest release. [Upgradi
 - The install scripts `install.sh` and `install.ps1` that nubjs.com serves
 - The GitHub Actions in `setup-node/`, `install/` and `npm-ci/`
 - The `ghcr.io/nubjs/nub` Docker image, built from `docker/`
-
-`vendor/aube/SECURITY.md` is written for the aube project and doesn't apply here.
