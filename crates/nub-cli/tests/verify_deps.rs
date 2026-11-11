@@ -80,7 +80,8 @@ fn run(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
         // Removed before `envs` is applied, so tests that deliberately set
         // either marker still can.
         .env_remove(CHECKED_MARKER)
-        .env_remove("npm_lifecycle_event");
+        .env_remove("npm_lifecycle_event")
+        .env_remove("NUB_PHANTOM_CHECK");
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -384,4 +385,41 @@ fn an_inherited_checked_marker_skips_the_gate() {
         "an inherited __NUB_DEPS_CHECKED must skip the check: {}",
         out.stderr
     );
+}
+
+/// A stray `package.json` and `node_modules` in the home folder make `~` the
+/// project of every directory under it that has no manifest of its own. The
+/// phantom scan must not walk it: on macOS that walk reached
+/// `~/Library/Containers`, where `open()` waited on a privacy approval forever,
+/// and every run under `~` hung before Node started.
+#[cfg(unix)] // `dirs_next::home_dir()` reads `HOME` only on Unix.
+#[test]
+fn a_project_rooted_at_home_is_not_phantom_scanned() {
+    let d = tmp("home-root");
+    write(
+        &d.join("package.json"),
+        r#"{"name":"t","private":true,"scripts":{"go":"echo RAN"}}"#,
+    );
+    write(&d.join("scripts").join("tool.js"), "require('ghost');");
+    install_pkg(&d, "ghost", "1.0.0");
+
+    let out = run(&d, &["run", "go"], &[]);
+    assert!(
+        out.stderr.contains("imports `ghost`"),
+        "the same tree as an ordinary project must warn, or the assertion below proves nothing: {}",
+        out.stderr
+    );
+
+    let out = run(&d, &["run", "go"], &[("HOME", d.to_str().unwrap())]);
+    assert!(
+        !out.stderr.contains("WARN_PHANTOM_DEP"),
+        "a project rooted at HOME must not be scanned: {}",
+        out.stderr
+    );
+    assert!(
+        out.stdout.contains("RAN"),
+        "script must still run: {}",
+        out.stdout
+    );
+    assert_eq!(out.code, 0);
 }

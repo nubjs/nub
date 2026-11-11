@@ -144,6 +144,7 @@ fn expand_member_patterns(workspace_root: &Path, patterns: &[String]) -> Vec<Wor
         PathBuf::new(),
         0,
         max_depth,
+        &include,
         &mut candidates,
     );
 
@@ -180,20 +181,37 @@ fn expand_member_patterns(workspace_root: &Path, patterns: &[String]) -> Vec<Wor
     members
 }
 
+/// Every directory [`collect_package_dirs`] lists, so a test can assert which
+/// parts of its own (unique temp) tree the walk never touched. Test-only.
+#[cfg(test)]
+static LISTED_DIRS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
 /// Walk the workspace tree, pushing the workspace-relative path of every directory
 /// that contains a `package.json`. Never descends into `node_modules`, `.git`, or
 /// any dot-directory; the workspace root itself (`rel == ""`) is never a candidate.
+///
+/// Only directories some `include` pattern could still match are entered (see
+/// [`could_hold_member`]): `packages/*` reads `packages/` and nothing else. Without
+/// that, the walk listed every directory down to the pattern's depth, a Rust
+/// `target/` included, and a workspace rooted at the home folder reached into
+/// `~/Library`.
 fn collect_package_dirs(
     workspace_root: &Path,
     rel: PathBuf,
     depth: usize,
     max_depth: usize,
+    include: &[String],
     out: &mut Vec<PathBuf>,
 ) {
     if depth > max_depth {
         return;
     }
     let abs = workspace_root.join(&rel);
+    #[cfg(test)]
+    LISTED_DIRS
+        .lock()
+        .expect("LISTED_DIRS lock poisoned")
+        .push(abs.clone());
     let Ok(entries) = fs::read_dir(&abs) else {
         return;
     };
@@ -211,11 +229,79 @@ fn collect_package_dirs(
             continue;
         }
         let child_rel = rel.join(name.as_ref());
+        if !include.iter().any(|p| could_hold_member(&child_rel, p)) {
+            continue;
+        }
         if entry.path().join("package.json").is_file() {
             out.push(child_rel.clone());
         }
-        collect_package_dirs(workspace_root, child_rel, depth + 1, max_depth, out);
+        collect_package_dirs(
+            workspace_root,
+            child_rel,
+            depth + 1,
+            max_depth,
+            include,
+            out,
+        );
     }
+}
+
+/// Whether `pattern` could match `rel` or a directory below it: each segment of
+/// `rel` matches the pattern's segment at the same position, until a `**`, which
+/// matches everything beneath. Only ever over-includes — a pattern that cannot be
+/// split into segments is never pruned — so the members found are the same as
+/// walking everything; the final include/exclude match still decides.
+fn could_hold_member(rel: &Path, pattern: &str) -> bool {
+    if !splits_into_segments(pattern) {
+        return true;
+    }
+    let mut pattern_segments = pattern.split('/');
+    for segment in rel.components() {
+        let segment = segment.as_os_str().to_string_lossy();
+        match pattern_segments.next() {
+            None => return false,
+            Some(p) if p.contains("**") => return true,
+            Some(p) if !glob_match::glob_match(p, &segment) => return false,
+            Some(_) => {}
+        }
+    }
+    true
+}
+
+/// False when a `/` sits inside a brace group (`{libs/core,apps}`) or a
+/// character class (`[^/]`), where splitting the pattern on `/` would cut the
+/// group in half. A class runs to the next `]` that is not its first member.
+fn splits_into_segments(pattern: &str) -> bool {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut brace_depth = 0usize;
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' => {
+                let mut end = i + 1;
+                if matches!(chars.get(end), Some('!' | '^')) {
+                    end += 1;
+                }
+                if chars.get(end) == Some(&']') {
+                    end += 1;
+                }
+                while end < chars.len() && chars[end] != ']' {
+                    if chars[end] == '/' {
+                        return false;
+                    }
+                    end += 1;
+                }
+                i = end;
+            }
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '/' if brace_depth > 0 => return false,
+            _ => {}
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Whether pnpm is the project's incumbent PM at `workspace_root` — the gate that
@@ -477,6 +563,61 @@ mod tests {
             "object-form `workspaces.packages` must drive member discovery"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discovery_lists_only_directories_a_pattern_can_reach() {
+        let root = scaffold_workspace(
+            "pruned",
+            &["packages/*", "{apps,tools}/*", "libs/**"],
+            &[
+                "packages/a",
+                "apps/web",
+                "tools/cli",
+                "libs/x/y",
+                "unlisted/z",
+            ],
+        );
+        for tree in ["target/debug/deps", "Library/Containers/app/Data"] {
+            fs::create_dir_all(root.join(tree)).unwrap();
+        }
+        assert_eq!(
+            discovered_names(&root),
+            HashSet::from(["a", "web", "cli", "y"].map(String::from)),
+        );
+        let listed: Vec<PathBuf> = LISTED_DIRS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|dir| dir.starts_with(&root))
+            .cloned()
+            .collect();
+        for outside in ["target", "Library", "unlisted"] {
+            assert!(
+                !listed.iter().any(|dir| dir.starts_with(root.join(outside))),
+                "`{outside}` matches no pattern and must not be listed: {listed:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_slash_inside_a_class_or_brace_group_still_finds_its_members() {
+        // Splitting these on `/` would cut the group in half and prune the member.
+        // One workspace each: an unprunable pattern beside the other would let its
+        // member through even with the other's detection broken.
+        for (tag, pattern, member, name) in [
+            ("class", "packages/[^/]*", "packages/a", "a"),
+            ("brace", "{libs/core,tools}", "libs/core", "core"),
+        ] {
+            let root = scaffold_workspace(&format!("unsplittable-{tag}"), &[pattern], &[member]);
+            assert_eq!(
+                discovered_names(&root),
+                HashSet::from([name.to_string()]),
+                "`{pattern}` must still find `{member}`"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
