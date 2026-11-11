@@ -604,16 +604,20 @@ mod tests {
     #[test]
     fn a_slash_inside_a_class_or_brace_group_still_finds_its_members() {
         // Splitting these on `/` would cut the group in half and prune the member.
-        let root = scaffold_workspace(
-            "unsplittable",
-            &["packages/[^/]*", "{libs/core,tools}"],
-            &["packages/a", "libs/core"],
-        );
-        assert_eq!(
-            discovered_names(&root),
-            HashSet::from(["a", "core"].map(String::from)),
-        );
-        let _ = fs::remove_dir_all(&root);
+        // One workspace each: an unprunable pattern beside the other would let its
+        // member through even with the other's detection broken.
+        for (tag, pattern, member, name) in [
+            ("class", "packages/[^/]*", "packages/a", "a"),
+            ("brace", "{libs/core,tools}", "libs/core", "core"),
+        ] {
+            let root = scaffold_workspace(&format!("unsplittable-{tag}"), &[pattern], &[member]);
+            assert_eq!(
+                discovered_names(&root),
+                HashSet::from([name.to_string()]),
+                "`{pattern}` must still find `{member}`"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 
     #[test]
