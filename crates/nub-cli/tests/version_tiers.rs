@@ -38,7 +38,8 @@ fn fixtures_dir() -> PathBuf {
 /// (set by CI to point at the `actions/setup-node`-installed binary) and
 /// then falls back to the standard nvm layout under `$NVM_DIR` /
 /// `$HOME/.nvm`. Returns `None` when the version isn't installed — the
-/// caller skips the test in that case.
+/// caller skips the test in that case, except under `TEST_NODE_BIN_REQUIRED`,
+/// where a missing version panics.
 ///
 /// The env var deliberately does NOT use the `NUB_*` prefix (brand-boundary
 /// rule applies even to test-only knobs). It is set by CI, read by this
@@ -65,6 +66,14 @@ fn find_node_bin_dir(want: (u32, u32, u32)) -> Option<PathBuf> {
     if verify_node_version(&candidate, want) {
         Some(candidate)
     } else {
+        // CI's side-install step sets this once it has installed every version this
+        // file asks for. A version it lacks then fails there instead of skipping
+        // green, which is how four tests went unexercised on CI.
+        assert!(
+            std::env::var_os("TEST_NODE_BIN_REQUIRED").is_none(),
+            "Node {maj}.{min}.{pat} is not installed but TEST_NODE_BIN_REQUIRED is set: \
+             add it to the side-install step in .github/workflows/ci.yml"
+        );
         None
     }
 }

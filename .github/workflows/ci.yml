@@ -1216,7 +1216,12 @@ jobs:
       # integration test: compat 22.13, unsupported 18.18, detect-module in-band
       # 20.11 (flag still required there), 26.5 (carries the node:ffi/vfs/
       # stream-iter enabler modules), and 22.23 (the async tier with Node's permissive
-      # load validator, for foreign_register_cjs). actions/setup-node only manages one
+      # load validator, for foreign_register_cjs). 22.15 (fast-tier floor), 22.16
+      # (sync loader methods still missing), 24.4 (fast tier with no native
+      # import-text flag) and 26.2 (sync loader methods fixed) are here because
+      # version_tiers asks for each by exact version and skips, silently and
+      # green, when it is absent: without them four tests asserted little or
+      # nothing on CI. actions/setup-node only manages one
       # PATH-active Node per job; these go into private dirs and are exposed to
       # the test via TEST_NODE_BIN_<MAJOR>_<MINOR>_<PATCH> — the env-var prefix
       # deliberately avoids `NUB_*` (brand-boundary rule applies even to test-only
@@ -1241,17 +1246,31 @@ jobs:
           dir_20_11=$(install_node 20.11.0)
           dir_26_5=$(install_node 26.5.0)
           dir_22_23=$(install_node 22.23.3)
+          dir_22_15=$(install_node 22.15.0)
+          dir_22_16=$(install_node 22.16.0)
+          dir_24_4=$(install_node 24.4.0)
+          dir_26_2=$(install_node 26.2.0)
           "$dir_22_13/node" --version
           "$dir_18_18/node" --version
           "$dir_20_11/node" --version
           "$dir_26_5/node" --version
           "$dir_22_23/node" --version
+          "$dir_22_15/node" --version
+          "$dir_22_16/node" --version
+          "$dir_24_4/node" --version
+          "$dir_26_2/node" --version
           {
             echo "TEST_NODE_BIN_22_13_0=$dir_22_13"
             echo "TEST_NODE_BIN_18_18_0=$dir_18_18"
             echo "TEST_NODE_BIN_20_11_0=$dir_20_11"
             echo "TEST_NODE_BIN_26_5_0=$dir_26_5"
             echo "TEST_NODE_BIN_22_23_3=$dir_22_23"
+            echo "TEST_NODE_BIN_22_15_0=$dir_22_15"
+            echo "TEST_NODE_BIN_22_16_0=$dir_22_16"
+            echo "TEST_NODE_BIN_24_4_0=$dir_24_4"
+            echo "TEST_NODE_BIN_26_2_0=$dir_26_2"
+            # version_tiers fails, rather than skips, on a version missing from this list.
+            echo "TEST_NODE_BIN_REQUIRED=1"
           } >> "$GITHUB_ENV"
       - name: pinned package managers + socket firewall
         shell: bash
