@@ -268,6 +268,8 @@ unsafe fn call_and_release(env: sys::napi_env, reference: sys::napi_ref) {
     unsafe {
         let mut scope = ptr::null_mut();
         if sys::napi_open_handle_scope(env, &mut scope) != sys::Status::napi_ok {
+            // Nothing can be called without a scope, and the reference still has to go.
+            sys::napi_delete_reference(env, reference);
             return;
         }
         let mut function = ptr::null_mut();
