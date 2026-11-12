@@ -192,11 +192,7 @@ fn has_value_esm(body: &[Statement<'_>], has_module_syntax: bool, has_import_met
 
     // Top-level await: `has_module_syntax` is set with no static import/export/meta
     // (import.meta already returned above). This is the JS TLA branch.
-    if has_module_syntax && !saw_import_export {
-        return true;
-    }
-
-    false
+    has_module_syntax && !saw_import_export
 }
 
 fn specifier_is_type(spec: &ImportDeclarationSpecifier<'_>) -> bool {

@@ -782,6 +782,9 @@ pub fn normalize_invocation_environment() -> Result<()> {
 )]
 pub struct Cli {
     /// Print version.
+    // `-v` and `-V`: the derive takes one `short` per spelling, which clippy's
+    // `duplicated_attributes` reads as a repeat.
+    #[allow(clippy::duplicated_attributes)]
     #[usage(short = 'v', short = 'V', long)]
     pub version: bool,
 
