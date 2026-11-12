@@ -59,7 +59,7 @@ create() {
   local wt="${WORKTREE_BASE}/${name}"
   [ -e "$wt" ] && die "worktree path already exists: $wt"
   branch_exists "$name" && die "local branch '$name' already exists; remove it or pick another name"
-  git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/${base}" >/dev/null 2>&1 \
+  git -C "$REPO_ROOT" rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 \
     || die "base ref '${base}' not found locally"
   mkdir -p "$WORKTREE_BASE"
   run git -C "$REPO_ROOT" worktree add --no-track -b "$name" "$wt" "$base"

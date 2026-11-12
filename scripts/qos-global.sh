@@ -58,6 +58,13 @@ ensure_key() {
   _k=$1
   _line="$_k = \"$2\""
   grep -qF "$_line" "$cfg" 2>/dev/null && return 0
+  # A [build] table cannot be added beside `build.<key> = …` or `build = { … }`:
+  # TOML rejects it as a redefinition, and that breaks every cargo invocation.
+  if [ -f "$cfg" ] && grep -Eq '^[[:space:]]*build[[:space:]]*[.=]' "$cfg"; then
+    echo "qos-global: $cfg sets build keys outside a [build] table; not touching it" >&2
+    echo "qos-global: add by hand: build.$_line" >&2
+    exit 1
+  fi
   if [ -f "$cfg" ] && grep -q '^\[build\]' "$cfg"; then
     awk -v line="$_line" \
       '{ print; if (!done && $0 == "[build]") { print line; done = 1 } }' \
