@@ -147,6 +147,11 @@ jobs:
       # A regression check has to run the artifact under review.
       - name: Reinstall re-links existing PM shims
         shell: pwsh
+        env:
+          # install.ps1 authenticates its releases/latest call with this, as the
+          # install step above does. Without it the call is anonymous and shares
+          # the runner IP's rate limit.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
           $shims = "$env:USERPROFILE\.nub\shims"
