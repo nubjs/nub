@@ -64,7 +64,18 @@ shimTest("URLPattern and Float16 adapters delegate to their supplied packages", 
     getFloat16(...args) { calls.push(args); return 1.5; },
     setFloat16(...args) { calls.push(args); },
   } });
-  assert.equal(URLPattern, Pattern); assert.equal(Float16Array, F16); assert.equal(Math.f16round, round);
+  assert.equal(URLPattern, Pattern); assert.equal(Float16Array, F16); assert.equal(Math.f16round(3), 1.5);
+  // Defined as the engine defines them: non-enumerable, the functions as methods
+  // with the optional littleEndian left out of length.
+  const shapes = [[globalThis, "URLPattern"], [globalThis, "Float16Array"], [Math, "f16round", 1],
+    [DataView.prototype, "getFloat16", 1], [DataView.prototype, "setFloat16", 2]];
+  for (const [object, key, length] of shapes) {
+    const { value, enumerable } = Object.getOwnPropertyDescriptor(object, key);
+    assert.equal(enumerable, false, key);
+    if (length === undefined) continue;
+    assert.equal(value.length, length, key); assert.equal(value.name, key);
+    assert.equal(Object.hasOwn(value, "prototype"), false, key);
+  }
   const view = new DataView(new ArrayBuffer(8));
   assert.equal(view.getFloat16(2, true), 1.5);
   view.setFloat16(4, -1.5, false);
@@ -73,15 +84,65 @@ shimTest("URLPattern and Float16 adapters delegate to their supplied packages", 
   assert.equal(view.getFloat16, get); assert.equal(Float16Array, F16);
 `);
 
-shimTest("RegExp.escape protects concatenation, punctuation, whitespace and astral text", `
+shimTest("URLPattern assigned by its package's own entry is made non-enumerable", `
+  remove(globalThis, "URLPattern");
+  class Pattern {}
+  globalThis.URLPattern = Pattern;
+  install({ urlpattern: { URLPattern: Pattern } });
+  assert.equal(URLPattern, Pattern);
+  assert.equal(Object.getOwnPropertyDescriptor(globalThis, "URLPattern").enumerable, false);
+`);
+
+shimTest("polyfilled methods are methods: no prototype, not constructors, not enumerable", `
+  const TypedArray = Object.getPrototypeOf(Int8Array);
+  const targets = [
+    [Iterator, "from", "concat"],
+    [Map.prototype, "getOrInsert", "getOrInsertComputed"],
+    [WeakMap.prototype, "getOrInsert", "getOrInsertComputed"],
+    [URL, "parse"],
+    [String.prototype, "isWellFormed", "toWellFormed"],
+    [Object, "groupBy"],
+    [Map, "groupBy"],
+    [Array.prototype, "toSorted", "toReversed", "toSpliced"],
+    [TypedArray.prototype, "toSorted", "toReversed"],
+    [ArrayBuffer.prototype, "transfer", "transferToFixedLength"],
+    [Atomics, "pause"],
+    [Uint8Array, "fromBase64", "fromHex"],
+    [Uint8Array.prototype, "toBase64", "setFromBase64", "toHex", "setFromHex"],
+  ];
+  for (const [object, ...keys] of targets) remove(object, ...keys);
+  remove(ArrayBuffer.prototype, "detached");
+  install();
+  const source = (fn) => Function.prototype.toString.call(fn);
+  for (const [object, ...keys] of targets) {
+    for (const key of keys) {
+      const { value, enumerable } = Object.getOwnPropertyDescriptor(object, key);
+      // The polyfill is what is measured, not a native the removal missed.
+      assert.doesNotMatch(source(value), /\\[native code\\]/, key);
+      assert.equal(enumerable, false, key);
+      assert.equal(value.name, key);
+      assert.equal(Object.hasOwn(value, "prototype"), false, key);
+      assert.throws(() => Reflect.construct(Object, [], value), TypeError, key);
+    }
+  }
+  const detached = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "detached").get;
+  assert.doesNotMatch(source(detached), /\\[native code\\]/);
+  assert.equal(detached.name, "get detached");
+  assert.equal(Object.hasOwn(detached, "prototype"), false);
+`);
+
+shimTest("RegExp.escape protects concatenation, punctuation, whitespace, lone surrogates and astral text", `
   remove(RegExp, "escape"); install();
   assert.equal(RegExp.escape("a-b.c\\n"), "\\\\x61\\\\x2db\\\\.c\\\\n");
   assert.equal(RegExp.escape(" \\u2028"), "\\\\x20\\\\u2028");
   assert.equal(RegExp.escape("😀"), "😀");
+  assert.equal(RegExp.escape("\\udc00x\\ud83d"), "\\\\udc00x\\\\ud83d");
   for (const text of ["foo(bar)", "[x]", "1+1", "a\\\\b", "😀"]) {
     assert.equal(new RegExp(\`^(?:\${RegExp.escape(text)})$\`, "u").test(text), true);
   }
   assert.throws(() => RegExp.escape({ toString: () => "x" }), TypeError);
+  const { value, enumerable } = Object.getOwnPropertyDescriptor(RegExp, "escape");
+  assert.deepEqual([enumerable, value.name, value.length], [false, "escape", 1]);
 `);
 
 shimTest("Error.isError rejects tag spoofs and recognizes local subclasses", `
@@ -89,6 +150,8 @@ shimTest("Error.isError rejects tag spoofs and recognizes local subclasses", `
   class Custom extends Error {}
   assert.equal(Error.isError(new Custom()), true);
   for (const value of [null, undefined, 1, "Error", {}, { [Symbol.toStringTag]: "Error" }]) assert.equal(Error.isError(value), false);
+  const { value, enumerable } = Object.getOwnPropertyDescriptor(Error, "isError");
+  assert.deepEqual([enumerable, value.name, value.length], [false, "isError", 1]);
 `);
 
 shimTest("Set operations use set-like inputs, membership and size-aware ordering", `
@@ -104,6 +167,19 @@ shimTest("Set operations use set-like inputs, membership and size-aware ordering
   assert.equal(left.isDisjointFrom(right), false);
   assert.throws(() => left.union({ size: NaN, has() {}, keys() {} }), TypeError);
   assert.throws(() => Set.prototype.union.call({}, right), TypeError);
+`);
+
+shimTest("Set operations step a set-like's keys() result directly and close it on early exit", `
+  remove(Set.prototype, "union", "intersection", "difference", "symmetricDifference", "isSubsetOf", "isSupersetOf", "isDisjointFrom"); install();
+  const log = [];
+  const like = (values) => ({ size: values.length, has: (v) => values.includes(v), keys() {
+    let i = 0;
+    return { next() { return i < values.length ? { done: false, value: values[i++] } : { done: true }; }, return() { log.push("return"); return {}; } };
+  } });
+  assert.deepEqual([...new Set([1, 2]).union(like([2, 3]))], [1, 2, 3]);
+  assert.equal(new Set([1, 2, 3]).isSupersetOf(like([1, 9, 2])), false);
+  assert.deepEqual(log, ["return"]);
+  assert.throws(() => new Set([1, 2]).union({ size: 1, has() {}, keys: () => "ab" }), TypeError);
 `);
 
 shimTest("Array.fromAsync awaits iterable, array-like and mapped values", `
@@ -150,6 +226,19 @@ shimTest("Promise.withResolvers and keyed combinators preserve constructors, key
   assert.deepEqual({ ...await Promise.allSettledKeyed({ ok: 1, bad: Promise.reject(error) }) }, { ok: { status: "fulfilled", value: 1 }, bad: { status: "rejected", reason: error } });
   await assert.rejects(Promise.allKeyed(null), TypeError);
   assert.equal(Object.keys(await Promise.allKeyed({})).length, 0);
+`);
+
+shimTest("Promise.withResolvers and keyed combinators are non-constructors like builtin methods", `
+  remove(Promise, "withResolvers", "allKeyed", "allSettledKeyed"); install();
+  for (const [key, length] of [["withResolvers", 0], ["allKeyed", 1], ["allSettledKeyed", 1]]) {
+    const fn = Promise[key];
+    assert.equal(Object.hasOwn(fn, "prototype"), false, key);
+    assert.deepEqual(Reflect.ownKeys(fn), ["length", "name"], key);
+    assert.throws(() => Reflect.construct(Object, [], fn), TypeError, key);
+    assert.throws(() => new fn(), TypeError, key);
+    assert.equal(fn.name, key); assert.equal(fn.length, length, key);
+    assert.deepEqual(Object.getOwnPropertyDescriptor(Promise, key), { value: fn, writable: true, enumerable: false, configurable: true }, key);
+  }
 `);
 
 shimTest("JSON options freeze recursively, isolate prototypes and preserve revivers", `
@@ -265,6 +354,18 @@ shimTest("Iterator constructor, core helpers, concat, chunks/windows and disposa
   assert.deepEqual(Iterator.from([1, 2, 3]).chunks(2).toArray(), [[1, 2], [3]]);
   assert.deepEqual(Iterator.from([1, 2, 3]).windows(2).toArray(), [[1, 2], [2, 3]]);
   let closed = 0; ip[Symbol.dispose].call({ return() { closed++; } }); assert.equal(closed, 1);
+`);
+
+shimTest("Iterator.concat rejects primitives, captures each method up front and steps sources with a bare next()", `
+  remove(Iterator, "concat"); install();
+  assert.throws(() => Iterator.concat("ab"), TypeError);
+  const nextArgs = [];
+  const source = { [Symbol.iterator]() { let i = 0; return { next(...args) { nextArgs.push(args.length); return { done: i > 1, value: i++ }; } }; } };
+  const it = Iterator.concat(source);
+  source[Symbol.iterator] = () => assert.fail("method read after the call");
+  assert.equal(Object.prototype.toString.call(it), "[object Iterator Helper]");
+  assert.equal(it.next("x").value, 0); assert.equal(it.next("y").value, 1);
+  assert.deepEqual(nextArgs, [0, 0]);
 `);
 
 shimTest("Symbol.metadata has the standard immutable, hidden descriptor", `

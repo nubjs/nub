@@ -2,9 +2,8 @@
 //! in-process.
 //!
 //! Split out of `compile::run` because the bundler-flag surface is COMMON to
-//! `nub compile` and the planned `nub build` (design record:
-//! wiki/commands/compile.md, "Shared compiler block") — compile is build plus a
-//! launcher wrap. Everything here is therefore expressed against
+//! `nub compile` and the planned `nub build` — compile is build plus a launcher
+//! wrap. Everything here is therefore expressed against
 //! [`BundleOptions`] and a target *description*, never against the compile
 //! pipeline's own state, so `nub build` can drive it unchanged.
 //!
@@ -724,9 +723,9 @@ fn bundle_inner(
         nothing_installed(entry_abs),
     )?;
     let dynamic_import_sites = if !opts.allow_dynamic_import.is_empty() {
-        // Both `import()` shapes are excused by the flag and both are served by
-        // the same runtime hook, so both are counted — omitting the variable-held
-        // one would ship an artifact whose hook the build decided it did not need.
+        // Every `import()` shape is excused by the flag and served by the same
+        // runtime hook, so all are counted — omitting the variable-held one would
+        // ship an artifact whose hook the build decided it did not need.
         let deferred: Vec<&DynamicSite> = sites
             .iter()
             .filter(|s| s.kind != SiteKind::Indirect)
@@ -1125,14 +1124,6 @@ pub struct ModuleMirror {
 }
 
 impl ModuleMirror {
-    /// The `/`-separated step from the chunk's directory to `module`'s own, or
-    /// `None` to leave `__dirname` at the chunk's directory.
-    ///
-    /// `None` covers everything the mirror does not describe: a module outside the
-    /// anchor, and a bundled dependency, which is laid out nowhere. A module that
-    /// sits in the entry's own directory yields `Some("")`, which the caller reads
-    /// as "no offset" — the pre-existing behavior, and the overwhelmingly common
-    /// case, so it costs no generated code.
     /// Record `dir` and every ancestor as a directory the payload creates. `dir` is
     /// anchor-relative and `/`-separated; `""` is the app root.
     pub fn materialize(&mut self, dir: &str) {
@@ -1147,6 +1138,14 @@ impl ModuleMirror {
         }
     }
 
+    /// The `/`-separated step from the chunk's directory to `module`'s own, or
+    /// `None` to leave `__dirname` at the chunk's directory.
+    ///
+    /// `None` covers everything the mirror does not describe: a module outside the
+    /// anchor, and a bundled dependency, which is laid out nowhere. A module that
+    /// sits in the entry's own directory yields `Some("")`, which the caller reads
+    /// as "no offset" — the pre-existing behavior, and the overwhelmingly common
+    /// case, so it costs no generated code.
     fn offset_to(&self, module: &Path) -> Option<String> {
         // The default (no mirror) must reject everything, and `strip_prefix` will
         // not do it: an EMPTY prefix succeeds and hands back the whole path, so an
@@ -1270,9 +1269,9 @@ impl Plugin for CjsPathGlobals {
     }
 }
 
-/// Every correction a module needs before Rolldown scans it, as `(byte offset,
-/// text)` pairs. Both are pure insertions and neither reads the other's output, so
-/// they are independent and order-free.
+/// Every correction a module needs before Rolldown scans it. Neither producer reads
+/// the other's output, so they are independent; [`apply_source_inserts`] decides
+/// the order the edits land in.
 fn commonjs_source_inserts(path: &str, source: &str, mirror: &ModuleMirror) -> Vec<SourceEdit> {
     let mut inserts: Vec<SourceEdit> = concise_arrow_require_inserts(path, source)
         .into_iter()
@@ -2401,20 +2400,6 @@ fn strip_regions(source: &str, prefix: &str, drop: &[&str]) -> String {
     out
 }
 
-/// Can this module reach a builtin by a name the substring scan cannot read?
-///
-/// Compiled CommonJS deliberately PRESERVES a non-static `require(expr)` rather
-/// than failing the build (see [`Requires::classify_require`], which declines to
-/// flag them because every real instance measured was a guarded optional loader).
-/// That is correct for the bundler and fatal for a literal scan:
-/// `require(["child", "process"].join("_")).fork(...)` reaches the builtin naming
-/// neither marker, and stripping the fork identity patch there would let `fork()`
-/// silently re-run the artifact instead of real Node.
-///
-/// So a module that can compute a specifier counts as using EVERYTHING. The same
-/// applies to the indirect accessors, which take a specifier this scan never sees.
-/// A template literal counts as computed even when its body is constant — the
-/// distinction is not worth reading, and the cheap answer is the safe one.
 /// Is the text after a `require(` / `import(` a WHOLE static specifier?
 ///
 /// Opening with a quote proves nothing: `require("child" + "_process")` starts
@@ -2444,7 +2429,7 @@ fn argument_is_one_static_string(after_paren: &str) -> bool {
             None => return false,
             // An ESCAPE makes the literal's VALUE differ from its SPELLING, and the
             // marker check that follows reads the spelling. A specifier written with
-            // `_` in place of the underscore is perfectly static and resolves
+            // `\x5f` in place of the underscore is perfectly static and resolves
             // the builtin at run time, while containing no contiguous marker — so
             // accepting it would strip the fork patch for a payload that really
             // forks. Decoding would be the precise answer; declining to read an
@@ -2461,6 +2446,21 @@ fn argument_is_one_static_string(after_paren: &str) -> bool {
     )
 }
 
+/// Can this module reach a builtin by a name the substring scan cannot read?
+///
+/// Compiled CommonJS deliberately PRESERVES a non-static `require(expr)` rather
+/// than failing the build (see `classify_require` in [`scan_unresolvable_with_rewrites`],
+/// which declines to flag them because every real instance measured was a guarded
+/// optional loader).
+/// That is correct for the bundler and fatal for a literal scan:
+/// `require(["child", "process"].join("_")).fork(...)` reaches the builtin naming
+/// neither marker, and stripping the fork identity patch there would let `fork()`
+/// silently re-run the artifact instead of real Node.
+///
+/// So a module that can compute a specifier counts as using EVERYTHING. The same
+/// applies to the indirect accessors, which take a specifier this scan never sees.
+/// A template literal counts as computed even when its body is constant — the
+/// distinction is not worth reading, and the cheap answer is the safe one.
 fn has_computed_module_access(code: &str) -> bool {
     for accessor in ["createRequire", "getBuiltinModule", "process.binding"] {
         if code.contains(accessor) {
@@ -4274,10 +4274,7 @@ fn spelled_worker_url_argument<'a>(expr: &'a NewExpression<'a>) -> Option<&'a Ne
     if !matches!(&expr.callee, Expression::Identifier(callee) if callee.name == "Worker") {
         return None;
     }
-    match expr.arguments.first()?.as_expression()? {
-        Expression::NewExpression(url) => Some(url),
-        _ => None,
-    }
+    new_url_argument(expr)
 }
 
 /// The syntactic URL shape shared by native/global workers and the explicit
@@ -4301,11 +4298,7 @@ fn is_cjs_worker_constructor(
     let Expression::Identifier(callee) = &expr.callee else {
         return false;
     };
-    callee
-        .reference_id
-        .get()
-        .and_then(|id| semantic.scoping().get_reference(id).symbol_id())
-        .is_some_and(|symbol| bindings.contains(&symbol))
+    resolved_symbol(callee, semantic).is_some_and(|symbol| bindings.contains(&symbol))
 }
 
 /// How strongly a `new` expression's callee can be tied to Node's `Worker`.
@@ -4602,15 +4595,11 @@ fn is_compiler_builtin(
     node_builtins: &BTreeMap<oxc_semantic::SymbolId, &'static str>,
 ) -> bool {
     (identifier.name == name && is_unbound_global(identifier, semantic))
-        || identifier
-            .reference_id
-            .get()
-            .and_then(|id| semantic.scoping().get_reference(id).symbol_id())
-            .is_some_and(|symbol| {
-                node_builtins
-                    .get(&symbol)
-                    .is_some_and(|imported| *imported == name)
-            })
+        || resolved_symbol(identifier, semantic).is_some_and(|symbol| {
+            node_builtins
+                .get(&symbol)
+                .is_some_and(|imported| *imported == name)
+        })
 }
 
 /// Name the executable worker forms that have no module root to wrap.  This is
@@ -4779,9 +4768,8 @@ fn static_specifier(expr: &Expression<'_>) -> Option<String> {
 /// is the conditional one.
 ///
 /// Rolldown otherwise honors `preserve` by emitting raw JSX — syntax no JavaScript
-/// otherwise honors by emitting raw JSX — syntax no JavaScript engine parses, so
-/// the artifact dies on first run. "Preserve" means "a later tool transforms
-/// this"; when nub compiles, there IS no later tool, and `nub run` already
+/// engine parses, so the artifact dies on first run. "Preserve" means "a later tool
+/// transforms this"; when nub compiles, there IS no later tool, and `nub run` already
 /// refuses to preserve (runtime/transform-core.mjs maps everything but `"react"`
 /// to the automatic runtime), so honoring it here would also drift compile from
 /// run.
@@ -5190,36 +5178,6 @@ fn defines(opts: &BundleOptions) -> Result<FxIndexMap<String, String>> {
     Ok(map)
 }
 
-/// A `--define` value like `https://example.com`, which is a valid JS expression and
-/// therefore invisible to every other stage of the build.
-///
-/// It parses as the bare identifier `https` followed by a `//` line comment, so oxc
-/// accepts it, the define key validates, the bundle emits `console.log(https)`, and the
-/// only symptom is a `ReferenceError` in the shipped executable — after distribution,
-/// potentially long after. A correctly quoted value (`API="https://x"`) starts with a
-/// quote and never reaches this test, so matching `<scheme>://` costs nothing legitimate:
-/// there is no reason to write an expression followed immediately by a comment.
-///
-/// The scheme grammar is the UNION of two things, because either is enough to make the
-/// value truncate silently. JavaScript identifier characters cover `https`, `_foo` and
-/// `$x`. RFC 3986's `+`, `-` and `.` cover the schemes that are not identifiers at all
-/// and truncate into a different shape: `git+ssh://host` parses as the sum `git + ssh`,
-/// `ms-appx://host` as the difference `ms - appx`, and `obj.http://x` as a member
-/// access — each one accepted by oxc, each one a `ReferenceError` in the shipped binary.
-/// Measured against all three before this was widened.
-///
-/// Leading whitespace is skipped for the same reason oxc skips it: it is trivia, so
-/// ` https://example.com` is the identical trap with a space in front, and testing the
-/// raw first byte walked straight past it.
-/// The three pieces an unquoted-URL diagnostic needs, which stop being the same string
-/// as soon as the scheme is punctuated.
-///
-/// `url` is the value without leading trivia, so the suggested replacement does not
-/// bake a stray space into the string. `expr` is what JavaScript actually keeps, since
-/// `//` opens a comment and everything after it is discarded. `failing` is the first
-/// identifier in that expression, which is the name the `ReferenceError` will really
-/// carry — `git+ssh://h` keeps `git+ssh` and dies on `git`, so quoting the whole scheme
-/// into the message would print an error the user never sees.
 /// What JavaScript would actually keep from a `--define` value, when that is less
 /// than what the user wrote.
 pub(crate) struct SwallowedDefine {
@@ -5292,6 +5250,20 @@ fn leading_identifier(kept: &str) -> Option<String> {
 ///
 /// Anything the parser rejects outright is left alone: oxc reports that itself, and
 /// its message is about the syntax rather than a guess at intent.
+///
+/// A correctly quoted value (`API="https://x"`) starts with a quote and never matches
+/// the scheme test, so matching `<scheme>://` costs nothing legitimate: there is no
+/// reason to write an expression followed immediately by a comment.
+///
+/// The scheme grammar is the UNION of two things, because either is enough to make the
+/// value truncate silently. JavaScript identifier characters cover `https`, `_foo` and
+/// `$x`. RFC 3986's `+`, `-` and `.` cover the schemes that are not identifiers at all
+/// and truncate into a different shape: `git+ssh://host` parses as the sum `git + ssh`,
+/// `ms-appx://host` as the difference `ms - appx`, and `obj.http://x` as a member
+/// access — each one accepted by oxc, each one a `ReferenceError` in the shipped binary.
+///
+/// Leading whitespace is skipped for the same reason oxc skips it: it is trivia, so
+/// ` https://example.com` is the identical trap with a space in front.
 pub(crate) fn swallowed_define(value: &str) -> Option<SwallowedDefine> {
     let allocator = oxc_allocator::Allocator::default();
     let expr = oxc_parser::Parser::new(&allocator, value, oxc_span::SourceType::default())
@@ -6111,18 +6083,6 @@ fn render_diagnostics(err: &rolldown_error::BatchedBuildDiagnostic) -> String {
         .join("\n")
 }
 
-/// Fail the build on any import the bundler could not resolve — the
-/// `import(expr)` / `require(…)` sites the scan found, plus Rolldown's own
-/// UNRESOLVED_IMPORT warnings for named specifiers that resolved to nothing.
-///
-/// `allow_dynamic` excuses the `import()` sites ONLY — both the computed and the
-/// variable-held shape, since the runtime hook serves them identically — and only
-/// those whose IMPORTER a pattern selects, so a site the globs do not name is
-/// refused exactly as it would be with no flag at all. An
-/// indirect `require` is a different defect with a different fix (the resolver
-/// picked a UMD build), and an UNRESOLVED_IMPORT is a static specifier that
-/// resolved to nothing — neither is served by a runtime resolve hook, so neither
-/// is opted out of.
 /// Whether nothing is installed at all: no `node_modules` above the entry.
 ///
 /// Separate from the Plug'n'Play check, which also finds no `node_modules` but
@@ -6167,19 +6127,24 @@ fn dynamic_import_allowed(patterns: &[String], cwd: &Path, module: &str) -> bool
     let Ok(rel) = Path::new(module).strip_prefix(cwd) else {
         return false;
     };
-    let rel = to_slash_path(rel);
+    let rel = slash_path(rel);
     patterns
         .iter()
         .any(|pattern| glob_match::glob_match(pattern, &rel))
 }
 
-fn to_slash_path(path: &Path) -> String {
-    path.components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
+/// Fail the build on any import the bundler could not resolve — the
+/// `import(expr)` / `require(…)` sites the scan found, plus Rolldown's own
+/// UNRESOLVED_IMPORT warnings for named specifiers that resolved to nothing.
+///
+/// `allow_dynamic` excuses the `import()` sites ONLY — the computed, the
+/// variable-held and the attributed shape, since the runtime hook serves them
+/// identically — and only those whose IMPORTER a pattern selects, so a site the
+/// globs do not name is refused exactly as it would be with no flag at all. An
+/// indirect `require` is a different defect with a different fix (the resolver
+/// picked a UMD build), and an UNRESOLVED_IMPORT is a static specifier that
+/// resolved to nothing — neither is served by a runtime resolve hook, so neither
+/// is opted out of.
 fn reject_unresolved(
     sites: &[DynamicSite],
     warnings: &[BuildDiagnostic],
@@ -6489,8 +6454,7 @@ fn report_unbundled_packages(packages: &[String]) {
 /// directory, which for a self-contained binary usually has no `node_modules` at
 /// all. That lands as `Cannot find package …` on the deploy machine with nothing
 /// at build time to attribute it to. Refusing is not available — the flag exists
-/// precisely to allow this, and the maintainer confirmed it is needed in the wild
-/// — so the build says which sites it deferred, and what each resolves to when
+/// precisely to allow this, and real projects need it — so the build says which sites it deferred, and what each resolves to when
 /// that is knowable, which is the difference between an author seeing their
 /// platform package go unbundled and finding out on the deploy machine.
 fn warn_deferred_imports(sites: &[&DynamicSite]) {

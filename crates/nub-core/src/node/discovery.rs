@@ -38,8 +38,9 @@ pub enum DiscoveryError {
     #[error(
         "pinned Node version {pin} not found\n\
          \x20\x20Active shell Node: {shell_version} (does not satisfy pin)\n\
-         \x20\x20Provision it with: nub node install {pin}\n\
-         \x20\x20(nub auto-provisions the pinned Node when you run a file; `nub run` / `nubx` use what's already installed.)"
+         \x20\x20Provision it with: {}\n\
+         \x20\x20(nub auto-provisions the pinned Node when you run a file; `nub run` / `nubx` use what's already installed.)",
+        pinned_install_command(.pin)
     )]
     PinnedNotFound { pin: String, shell_version: String },
 
@@ -170,6 +171,26 @@ fn format_node_executable_failure(
     format!(
         "ERR_NUB_NODE_EXECUTABLE_FAILED: `{command}` (nodeExecutable in {file}) {failure}{detail}"
     )
+}
+
+/// The `nub node install` command the `PinnedNotFound` remedy prints. A concrete
+/// version, major or major.minor is named, since `nub node install <spec>`
+/// resolves exactly those; anything else — a range, which that form rejects and
+/// the shell would misread (`>=20 <23`), or an alias — gets the bare command,
+/// which resolves the project's own pin. Public so the CLI's status-path rewrite
+/// of this error prints the same command.
+pub fn pinned_install_command(pin: &str) -> String {
+    let named = matches!(
+        pin.parse::<VersionPin>(),
+        Ok(VersionPin::Exact(_) | VersionPin::Major(_) | VersionPin::MajorMinor(..))
+    ) && pin
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'));
+    if named {
+        format!("nub node install {pin}")
+    } else {
+        "nub node install".to_string()
+    }
 }
 
 /// Format the `Unsupported` error text. Centralized so the canonical
@@ -584,7 +605,7 @@ fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
                     // silently dropping the pin. The serde_json path
                     // (packageManager/devEngines) handles BOMs already.
                     let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
-                    let trimmed = content.trim();
+                    let trimmed = pin_file_text(content);
                     if !trimmed.is_empty() {
                         if let Ok(pin) = trimmed.parse::<VersionPin>() {
                             tracing::debug!(path = %pin_path.display(), pin = trimmed, "found pin file");
@@ -614,6 +635,20 @@ fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
     }
 
     None
+}
+
+/// The pin text of a `.nvmrc` or `.node-version`, read as nvm reads a `.nvmrc`:
+/// `#` starts a comment and blank lines do not count. More than one line left is
+/// not a pin, so the content comes back whole and fails to parse.
+fn pin_file_text(content: &str) -> &str {
+    let mut lines = content
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty());
+    match (lines.next(), lines.next()) {
+        (Some(line), None) => line,
+        _ => content.trim(),
+    }
 }
 
 /// Read the Node pin from an asdf/mise `.tool-versions` in `dir` (precedence #4).
@@ -1890,12 +1925,7 @@ fn write_version_cache(node_path: &Path, version: Option<&NodeVersion>) {
         .and_then(|c| serde_json::from_str(&c).ok())
         .unwrap_or_else(|| serde_json::json!({}));
 
-    let mtime = fs::metadata(node_path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let mtime = node_mtime_secs(node_path).unwrap_or(0);
 
     let key = node_path.to_string_lossy().to_string();
     data[key] = match version {
@@ -2880,6 +2910,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pin_file_may_carry_comments() {
+        let dir = resolution_tmpdir("pin-comments");
+        std::fs::write(dir.join(".nvmrc"), "# pinned for CI\n\n20.11.0 # LTS\n").unwrap();
+        let (raw, pin, source) = walk_up_for_pin(&dir).expect("a commented pin file");
+        assert_eq!((raw.as_str(), source.as_str()), ("20.11.0", ".nvmrc"));
+        assert_eq!(pin, "20.11.0".parse().unwrap());
+
+        // Two versions are not a pin, with or without comments.
+        let two = pin_file_text("20 # one\n22 # two\n");
+        assert!(two.parse::<VersionPin>().is_err(), "{two:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn reads_engines_node_from_the_governing_manifest() {
         let dir = resolution_tmpdir("eng");
         std::fs::write(dir.join("package.json"), r#"{"engines":{"node":">=20"}}"#).unwrap();
@@ -3559,6 +3603,41 @@ mod tests {
             msg.contains("ERR_NUB_NODE_PROVISION_FAILED"),
             "carries the branded error code: {msg}"
         );
+    }
+
+    #[test]
+    fn pinned_not_found_prints_an_install_command_that_works_for_the_pin() {
+        let remedy = |pin: &str| {
+            DiscoveryError::PinnedNotFound {
+                pin: pin.to_string(),
+                shell_version: "v26.11.1".to_string(),
+            }
+            .to_string()
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("Provision it with: "))
+            .map(str::to_string)
+            .expect("the message carries a remedy line")
+        };
+        // `nub node install <spec>` resolves a concrete version, major or
+        // major.minor, so those are named.
+        assert_eq!(remedy("22.13.0"), "nub node install 22.13.0");
+        assert_eq!(remedy("22"), "nub node install 22");
+        // It rejects a range, and the shell would read `>=20 <23` as redirections;
+        // the bare form resolves the project's pin, whatever its kind.
+        assert_eq!(remedy(">=20 <23"), "nub node install");
+        assert_eq!(remedy("20.11.0 || 22"), "nub node install");
+        assert_eq!(remedy("lts/iron"), "nub node install");
+        // The rest of the message still names the pin and the shell Node.
+        let msg = DiscoveryError::PinnedNotFound {
+            pin: ">=20 <23".to_string(),
+            shell_version: "v26.11.1".to_string(),
+        }
+        .to_string();
+        assert!(
+            msg.starts_with("pinned Node version >=20 <23 not found\n"),
+            "{msg}"
+        );
+        assert!(msg.contains("Active shell Node: v26.11.1"), "{msg}");
     }
 
     #[test]

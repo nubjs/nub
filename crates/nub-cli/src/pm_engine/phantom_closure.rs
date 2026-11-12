@@ -332,7 +332,7 @@ pub(super) struct FlaggedImporter {
 }
 
 /// Pure planner: resolved graph + flat seed + dynamic phantom flags → graph-aware
-/// materialization plan. See the module docs for the two rungs. `flags` is each
+/// materialization plan. See the module docs for the closure rule. `flags` is each
 /// surviving-candidate importer, supplied by [`dynamic_phantom_flags`] in
 /// production and injected directly in tests.
 fn plan_from_flags(
@@ -510,8 +510,8 @@ fn plan_from_flags(
 
 /// The dynamic analogue of the retired hand-curated phantom-class map: for each
 /// resolved package whose per-content sidecar (written by the extract-time
-/// PRODUCER, [`crate::dynamic_phantom`]) reports an unguarded phantom, its
-/// `(dep_path, name, undeclared-target-names)`.
+/// PRODUCER, [`crate::dynamic_phantom`]) reports an unguarded phantom or a
+/// `.d.ts` type-coupled peer, a [`FlaggedImporter`].
 ///
 /// Reads the SAME store handle + sidecar dir the producer wrote, via the shared
 /// [`crate::dynamic_phantom`] path helpers (which follow a `store-dir`
@@ -616,14 +616,13 @@ fn types_package_name(pkg: &str) -> String {
 /// satisfied → SKIP; @hookform/resolvers / swiper / @firebase/database are real
 /// breakers → SEED.)
 ///
-/// SCOPE CAVEAT (default-off flag): `is_top_level` here sees only the importer
-/// DIRECT deps (`graph.importers`) — exactly the DEFAULT hoist config's top level.
-/// The expand seam has no access to the linker's `public-hoist` / `shamefully-
-/// hoist` config, so under a NON-default hoist config a target hoisted there (but
-/// not a direct importer dep) is invisible to this check and could permit a skip
-/// the linker-side gate would have ejected. Acceptable under the experimental flag
-/// (the validated corpus is default-hoist); threading the hoist config into the
-/// seam is the productionization fix.
+/// SCOPE CAVEAT: `is_top_level` here sees only the importer DIRECT deps
+/// (`graph.importers`) — exactly the DEFAULT hoist config's top level. The
+/// expand seam has no access to the linker's `public-hoist` / `shamefully-hoist`
+/// config, so under a NON-default hoist config a target hoisted there (but not a
+/// direct importer dep) is invisible to this check and could permit a skip the
+/// linker-side gate would have ejected. Accepted because the validated corpus is
+/// default-hoist; threading the hoist config into the seam would close it.
 fn should_seed(
     targets: &[String],
     reachable: &HashSet<String>,

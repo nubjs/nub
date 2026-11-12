@@ -7,10 +7,11 @@
 //! (aube-lockfile parse → `write_lockfile_as`), preserving resolution state
 //! rather than delete-and-regenerating.
 //!
-//! The yarn asterisk: the engine's yarn.lock *write* fidelity is unproven
-//! (the same write-tier gate as `install_family`), so a `use yarn` that
-//! would require a conversion is refused outright — a pin-only half-switch
-//! would leave the declaration and the artifacts disagreeing.
+//! The yarn asterisk: `use yarn` converts only to *classic* (v1) yarn.lock,
+//! the writer proven against real yarn. A Berry yarn.lock in place, or a
+//! graph using the `workspace:` protocol yarn v1 cannot express, is refused
+//! before any write — a pin-only half-switch would leave the declaration and
+//! the artifacts disagreeing.
 
 use std::path::{Path, PathBuf};
 
@@ -87,14 +88,13 @@ pub(crate) enum AlignPlan {
     Rename { from: PathBuf, remove: Vec<PathBuf> },
 }
 
-/// Decide the alignment for `root` → `target` (one of npm/pnpm/yarn/bun).
+/// Decide the alignment for `root` → `target` (one of npm/pnpm/yarn/bun/nub).
 /// Errors are the spec's refusals, raised before any write:
 ///
 /// - multiple foreign-format lockfiles with the target's absent — nub can't
 ///   infer which one carries the real resolution state;
-/// - `use yarn` needing a conversion — the yarn write gate;
-/// - a classic-yarn target over a Berry yarn.lock — same filename, but the
-///   formats are incompatible, so it is a conversion, and therefore gated;
+/// - a classic-yarn target over a Berry yarn.lock — same filename, but
+///   keeping it under a classic pin would silently downgrade the format;
 /// - a binary `bun.lockb` as the only conversion source — the engine can't
 ///   read it (text `bun.lock` is the supported format).
 pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
@@ -232,9 +232,9 @@ pub(crate) fn refuse_unconvertible(root: &Path, target: &str, plan: &AlignPlan) 
     else {
         return Ok(());
     };
-    // Only pnpm/bun lockfiles carry `workspace:` specifiers; skip the parse
-    // for npm sources (npm has no workspace protocol) — but parsing any of
-    // them is cheap and the importer scan is the authoritative check.
+    // Only pnpm/bun lockfiles carry `workspace:` specifiers, but every source
+    // kind is parsed: it is cheap, and the importer scan is the authoritative
+    // check.
     let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json"))
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("reading package.json for the yarn conversion preflight")?;

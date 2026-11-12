@@ -1,5 +1,6 @@
 //! Bake the user-facing docs tree (`site/content/docs/**/*.mdx`) into the binary
-//! so `nub agent docs` can serve the current docs offline.
+//! so `nub agent docs` can serve the current docs offline. A page marked
+//! `unpublished: true` is left out, as the site leaves it out.
 //!
 //! We generate a `&[(slug, title, markdown)]` table at build time instead of
 //! pulling in an embed crate: it keeps the dependency surface flat, lets us
@@ -156,6 +157,9 @@ fn collect(root: &Path, dir: &Path, pages: &mut BTreeMap<String, (String, String
             let slug = slug_for(&rel);
             let raw = fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            if is_unpublished(&raw) {
+                continue;
+            }
             let (title, body) = parse(&raw, &slug);
             pages.insert(slug, (title, body));
         }
@@ -205,6 +209,24 @@ fn parse(raw: &str, slug: &str) -> (String, String) {
         }
     }
     (slug.to_string(), normalized)
+}
+
+/// Whether the page's frontmatter carries `unpublished: true`. The site's
+/// `published()` gate (`site/src/lib/source.ts`) drops such a page from every
+/// production surface while its feature is unreleased or held back; a release
+/// binary is one of those surfaces, so the bake honors the same key.
+fn is_unpublished(raw: &str) -> bool {
+    let normalized = raw.replace("\r\n", "\n");
+    normalized
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.find("\n---").map(|end| &rest[..end]))
+        .is_some_and(|front| {
+            front.lines().any(|l| {
+                l.trim()
+                    .strip_prefix("unpublished:")
+                    .is_some_and(|v| v.trim().eq_ignore_ascii_case("true"))
+            })
+        })
 }
 
 /// Emit a Rust raw string literal that can hold arbitrary markdown verbatim,

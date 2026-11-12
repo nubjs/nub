@@ -42,7 +42,7 @@ pub struct TsconfigResult {
 
 /// Parse + resolve the project's tsconfig: `explicit` when the project names one, else
 /// the nearest found walking up from `dir`. Memoized per pair in `nub_tsconfig`.
-#[napi]
+#[napi(catch_unwind)]
 pub fn load_tsconfig(dir: String, explicit: Option<String>) -> TsconfigResult {
     let r = nub_tsconfig::load_tsconfig(&dir, explicit.as_deref());
     TsconfigResult {

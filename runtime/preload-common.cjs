@@ -363,8 +363,9 @@ function userAsyncLoaderActive(foreignLoaderFlagPresent) {
 }
 
 // The Node band where the async `module.register` loader's `resolveSync`/`loadSync`
-// are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`: 22.15.0 ..= 24.11.0
-// (fixed in 24.11.1, nodejs/node#59666). Mirrors the Rust `node_hook_compose_broken`
+// are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`: 22.15.0 up to
+// 24.12.0, plus 25.0 and 25.1 (fixed in 24.12.0 and 25.2.0, nodejs/node#59666; 24.11.1,
+// 25.0.0 and 25.1.0 measured with tsx). Mirrors the Rust `node_hook_compose_broken`
 // (spawn.rs) for every RELEASE version; a pre-release like `22.15.0-rc.1` reads as in-band
 // here (the numeric parse ignores the `-rc` tag) where the Rust semver sorts it just below
 // the 22.15.0 floor — a harmless over-selection (the async tier is always correct and the
@@ -374,10 +375,9 @@ function nodeHookComposeBroken() {
   const p = String(process.versions.node).split(".");
   const maj = parseInt(p[0], 10) || 0;
   const min = parseInt(p[1], 10) || 0;
-  const pat = parseInt(p[2], 10) || 0;
+  if (maj === 25) return min < 2;
   const geFloor = maj > 22 || (maj === 22 && min >= 15);
-  const leCeil = maj < 24 || (maj === 24 && (min < 11 || (min === 11 && pat === 0)));
-  return geFloor && leCeil;
+  return geFloor && (maj < 24 || (maj === 24 && min < 12));
 }
 
 // Does a foreign async ESM loader flag (`--import` / `--loader` / `--experimental-loader`)
@@ -737,7 +737,8 @@ function annotateError(err, hint) {
     const oldMsg = err.message;
     err.message = oldMsg + hint;
     if (oldStack !== null) {
-      err.stack = oldStack.includes(oldMsg) ? oldStack.replace(oldMsg, err.message) : oldStack + hint;
+      // A function replacement: the message carries paths, and a `$` in one is text.
+      err.stack = oldStack.includes(oldMsg) ? oldStack.replace(oldMsg, () => err.message) : oldStack + hint;
     }
   } catch {
     /* read-only error: leave verbatim */
@@ -1682,14 +1683,20 @@ function armChildProcessCompileCacheWrap() {
   __cpWrapArmed = true;
   if (typeof module_._load !== "function") return;
   const origLoad = nameInternalFrame(module_._load, "_load");
-  module_._load = function (request, parent, isMain) {
+  // Assigned through the property so the wrapper stays anonymous: its frame keeps
+  // printing as `Module._load`.
+  const interceptor = (module_._load = function (request, parent, isMain) {
     const exports = ReflectApply(origLoad, this, [request, parent, isMain]);
     if (request === "child_process" || request === "node:child_process") {
-      module_._load = origLoad; // restore: one-shot, no steady-state overhead
+      // One-shot, but only while this is still the installed `_load`. A hook the
+      // program wrapped around it since (mock-require, a test double) delegates
+      // through it, and putting the original back would silently drop that hook.
+      // Left in place, it passes through: the wrap below runs once.
+      if (module_._load === interceptor) module_._load = origLoad;
       try { wrapChildProcessCompileCache(exports); } catch {}
     }
     return exports;
-  };
+  });
 }
 
 // Monkey-patch child_process so node-targeted children the USER spawns with an

@@ -348,8 +348,6 @@ fi
 # NUB_* vars are routing input for this wrapper, not part of the command's
 # environment. In particular, tests must not expose them to spawned user code.
 unset NUB_SHARED_TARGET NUB_BUILD_JOBS NUB_BUILD_FG NUB_BUILD_TARGET_OUT
-# $qos and $wrapper_off word-split deliberately (each empty, or one assignment).
-# shellcheck disable=SC2086
 # nub-cli's build script bakes site/content/docs into the binary and records an
 # ABSOLUTE rerun-if-changed path, so in a shared bucket a sharer reuses whichever
 # tree baked last — a branch that moves docs pages tests a sibling's tree. A
@@ -363,4 +361,6 @@ __NUB_DOCS_KEY=$(cd "$root" && find site/content/docs -type f -print0 2>/dev/nul
   | xargs -0 "$digest" 2>/dev/null | "$digest" 2>/dev/null | cut -c1-12 || true)
 export __NUB_DOCS_KEY
 
+# $qos and $wrapper_off word-split deliberately (each empty, or one assignment).
+# shellcheck disable=SC2086
 exec env CARGO_TARGET_DIR="$target" $wrapper_off $qos cargo "$@"

@@ -26,7 +26,7 @@ pub(crate) fn load_bunfig_npmrc_entries(project_root: &Path) -> BunfigNpmrcEntri
     entries
 }
 
-fn global_bunfig_path() -> Option<PathBuf> {
+pub(super) fn global_bunfig_path() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -126,11 +126,10 @@ fn entries_from_bunfig(root: &Value) -> Vec<(String, String)> {
     if let Some(seconds) = install
         .get("minimumReleaseAge")
         .and_then(Value::as_integer)
-        .filter(|n| *n >= 0)
+        .and_then(|n| u64::try_from(n).ok())
     {
         // Ceiling division: a 30s gate maps to 1 minute, not 0 (and 0s → 0).
-        // (signed `i64::div_ceil` is still unstable, so spell it out.)
-        let minutes = (seconds + 59) / 60;
+        let minutes = seconds.div_ceil(60);
         out.push(("minimumReleaseAge".to_string(), minutes.to_string()));
     }
     if let Some(excludes) = install
@@ -403,6 +402,20 @@ mod tests {
         // An explicit 0 stays 0 (gate disabled, matching bun).
         let zero = parsed("[install]\nminimumReleaseAge = 0\n");
         assert!(zero.contains(&("minimumReleaseAge".to_string(), "0".to_string())));
+    }
+
+    /// The largest value TOML can hold still converts: rounding up must not
+    /// overflow into a panic or a negative minute count.
+    #[test]
+    fn minimum_release_age_rounds_up_without_overflow_at_the_integer_limit() {
+        let entries = parsed(&format!("[install]\nminimumReleaseAge = {}\n", i64::MAX));
+        assert!(
+            entries.contains(&(
+                "minimumReleaseAge".to_string(),
+                "153722867280912931".to_string()
+            )),
+            "expected i64::MAX seconds to round up to 153722867280912931 minutes, got {entries:?}"
+        );
     }
 
     #[test]

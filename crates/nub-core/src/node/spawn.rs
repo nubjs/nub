@@ -139,9 +139,8 @@ pub fn spawn_with_eagain_retry(cmd: &mut Command) -> std::io::Result<std::proces
         match cmd.spawn() {
             Ok(child) => return Ok(child),
             Err(e) => {
-                let transient = matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::OutOfMemory)
-                    || e.raw_os_error() == Some(libc_eagain())
-                    || e.raw_os_error() == Some(libc_enomem());
+                // std decodes EAGAIN as `WouldBlock` and ENOMEM as `OutOfMemory`.
+                let transient = matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::OutOfMemory);
                 if !transient || attempt >= MAX_RETRIES {
                     return Err(e);
                 }
@@ -156,33 +155,16 @@ pub fn spawn_with_eagain_retry(cmd: &mut Command) -> std::io::Result<std::proces
     }
 }
 
-#[cfg(unix)]
-fn libc_eagain() -> i32 {
-    libc::EAGAIN
-}
-#[cfg(unix)]
-fn libc_enomem() -> i32 {
-    libc::ENOMEM
-}
-#[cfg(not(unix))]
-fn libc_eagain() -> i32 {
-    -1
-}
-#[cfg(not(unix))]
-fn libc_enomem() -> i32 {
-    -1
-}
-
 /// Terminating-signal forwarding to the current child, registered once per
 /// process. Nub catches SIGINT (Ctrl-C), SIGTERM (docker stop / systemd / CI
 /// cancel) and SIGHUP (terminal hangup) and re-sends the SAME signal to the Node
 /// child, so the child runs its own handler and exits with the matching code —
 /// instead of being reparented to PID 1 and running forever, which is what
-/// happened when only SIGINT was handled. A single background thread reads the
-/// current child's pid from a global atomic that each spawn updates, so
-/// sequential / re-entrant spawns forward to the right child, and a stray signal
-/// after a child exits (pid cleared to 0) is a no-op rather than a kill of a
-/// reused pid.
+/// happened when only SIGINT was handled. A single background thread signals
+/// every target in a global set that each spawn adds to and removes from on exit,
+/// so sequential / concurrent spawns forward to the right children, and a stray
+/// signal after the last child exits (empty set) is a no-op rather than a kill of
+/// a reused pid.
 ///
 /// The diagnostic signals SIGUSR1, SIGUSR2 and SIGQUIT are forwarded too, for a
 /// different reason than the terminating ones. Node assigns them meaning at the
@@ -376,8 +358,8 @@ pub fn untrack_child(pid: u32) {
 /// straight to it — so we also suppress nub's now-redundant SIGINT forward (see
 /// [`ctrl_c::set_suppress_sigint_forward`]) to keep #26's exactly-once.
 ///
-/// Only meaningful when stdin is a real TTY and stdio is inherited — callers gate
-/// on `foreground_handoff_applicable`. Returns `None` (no-op) off a TTY, off Unix,
+/// Only meaningful when stdin is a real TTY and stdio is inherited, which is how
+/// every caller spawns; the TTY half is checked here. Returns `None` (no-op) off a TTY, off Unix,
 /// or if the handoff syscalls fail, in which case behavior is exactly the prior
 /// own-group-without-tcsetpgrp path (correct for non-interactive children).
 #[cfg(unix)]
@@ -526,9 +508,7 @@ const PDEATH_DISARM: u8 = b'D';
 /// On the normal path the guard writes [`PDEATH_DISARM`] before closing, and
 /// the watcher exits without signaling anyone. The guard then reaps the
 /// watcher, so nub processes that spawn many sequential children (workspace
-/// `-r` runs) don't accumulate zombies. (`nub watch` is NOT covered: its
-/// spawn path predates `group_on_spawn` entirely, so it has neither pdeathsig
-/// nor this reaper — a pre-existing gap on both platforms.)
+/// `-r` runs) don't accumulate zombies.
 ///
 /// Returns `None` off macOS (Linux is already covered kernel-side; a second
 /// mechanism would be redundant) and on any setup failure — the backstop
@@ -924,27 +904,50 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         super::discovery::mark_node_launch(&mut cmd, config.node.path.as_std_path());
     }
 
-    // Permission model detection and auto-grant.
-    let has_permission = config.user_args.iter().any(|a| is_permission_flag(a));
-    let has_allow_addons = config.user_args.iter().any(|a| a == "--allow-addons");
+    // Every scan for the user's Node flags reads only Node's own options: an argument
+    // after the entry (`nub app.js --permission`) is the program's. Two readers keep
+    // the full argv on purpose: `force_async_tier_env` looks for a `tsx` ENTRY, and
+    // `gc::eligible` inspects where the entry sits.
+    let node_args = super::argv::leading_options(config.user_args);
+    // Read the inherited NODE_OPTIONS once and reuse it for the permission scan,
+    // the re-entrancy check and the flag-injection block below — the env value is
+    // constant across a single spawn.
+    let node_options = env::var("NODE_OPTIONS").ok();
+    // The permission model is on when Node ends up with its switch on. Node reads
+    // NODE_OPTIONS before the command line and the last of a flag and its `--no-`
+    // form decides, so the flags are scanned in that order. An `--allow-*` flag
+    // alone does not turn the model on: Node fails that itself with
+    // ERR_MISSING_OPTION, which names the switch.
+    let permission_flags: Vec<String> = node_options
+        .as_deref()
+        .map(split_node_options)
+        .unwrap_or_default()
+        .into_iter()
+        .chain(node_args.iter().cloned())
+        .collect();
+    let permission = permission_switch(&permission_flags, &config.node.version);
+    let has_permission = permission.is_some();
+    let has_allow_addons = boolean_option(&permission_flags, "--allow-addons");
 
-    if has_permission && !has_allow_addons && !config.compat_mode {
+    if let Some(switch) = permission
+        && !has_allow_addons
+        && !config.compat_mode
+    {
+        if permission_model_lacks_allow_addons(&config.node.version) {
+            anyhow::bail!(
+                "nub: {switch} blocks Nub's native addon on Node {}\n\
+                 \x20\x20Nub's transpiler uses a native addon (oxc-transform), and Node's\n\
+                 \x20\x20--allow-addons flag exists only from 20.12 and 21.6.\n\
+                 \x20\x20Use --node to run without Nub's augmentation, or a newer Node.",
+                config.node.version
+            );
+        }
         anyhow::bail!(
-            "nub: --permission requires --allow-addons\n\
+            "nub: {switch} requires --allow-addons\n\
              \x20\x20Nub's transpiler uses a native addon (oxc-transform).\n\
              \x20\x20Add --allow-addons to your Node permission flags,\n\
              \x20\x20or use --node to run without Nub's augmentation."
         );
-    }
-
-    if has_permission && !config.compat_mode {
-        // Auto-grant read access to Nub's install directory.
-        let install_dir = config
-            .nub_binary
-            .parent()
-            .and_then(|p| p.parent())
-            .unwrap_or(config.nub_binary);
-        cmd.arg(format!("--allow-fs-read={}", install_dir.display()));
     }
 
     // Removes the compile-cache sentinel (R8) on drop, after the child exits.
@@ -957,6 +960,31 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // substring, which would false-positive on a user's own `--import` of an
     // unrelated file named preload.mjs and silently disable augmentation (A26).
     let preload = find_preload(config.nub_binary);
+
+    if has_permission && !config.compat_mode {
+        // Auto-grant read access to Nub's install directory, and to the runtime
+        // directory the preload and addon load from. The runtime is not under the
+        // install directory: a shipped build extracts it to the cache, and a dev build
+        // reads the in-repo `runtime/`. Derived from the same `preload` the
+        // `--require`/`--import` token is built from, so the two cannot disagree.
+        let install_dir = config
+            .nub_binary
+            .parent()
+            .and_then(|p| p.parent())
+            .unwrap_or(config.nub_binary);
+        let runtime_dir = preload.as_deref().and_then(|p| Path::new(p).parent());
+        // Node 20 and 22 abort on a read grant for a directory they already hold
+        // one for, so a directory the user granted is not granted again.
+        let mut granted = user_read_grants(&permission_flags, config.cwd);
+        for dir in [Some(install_dir), runtime_dir].into_iter().flatten() {
+            let key = read_grant_key(&dir.to_string_lossy(), config.cwd);
+            if !granted.contains(&key) {
+                cmd.arg(format!("--allow-fs-read={}", dir.display()));
+                granted.push(key);
+            }
+        }
+    }
+
     // The injected form is tier-specific: `--require <path>` (fast tier, CJS
     // preload.cjs) or `--import <url>` (compat tier, ESM preload.mjs). Re-entrancy
     // is detected by finding that exact `--flag=value` token in the child's
@@ -969,10 +997,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         .as_deref()
         .map(|p| preload_injection(p, &config.node.version));
     let reentrancy_key = injection.as_ref().map(|i| i.node_options_token());
-    // Read the inherited NODE_OPTIONS once and reuse it for both the re-entrancy
-    // check and the flag-injection block below — the env value is constant across
-    // a single spawn.
-    let node_options = env::var("NODE_OPTIONS").ok();
     let is_reentrant = is_reentrant_in(node_options.as_deref(), reentrancy_key.as_deref());
 
     // A compat re-entry may arrive through an augmented parent's PATH shim.
@@ -1016,7 +1040,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         );
         flags::compute_inject_flags(
             config.node.version.clone(),
-            config.user_args,
+            node_args,
             node_options.as_deref(),
             config.show_warnings,
             accepted.as_ref(),
@@ -1126,7 +1150,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         if flags::test_coverage_exclude_supported(&config.node.version) {
             for glob in coverage_exclude_globs(
                 &config.node.version,
-                config.user_args,
+                node_args,
                 node_options.as_deref(),
                 preload.as_deref(),
             ) {
@@ -1167,7 +1191,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // NODE_DISABLE_COMPILE_CACHE=1 so descendants boot cache-off).
         let node_v8_coverage = env::var("NODE_V8_COVERAGE").ok();
         let coverage = coverage_active_for_cache(
-            config.user_args,
+            node_args,
             node_options.as_deref(),
             node_v8_coverage.as_deref(),
         );
@@ -1294,7 +1318,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             .map(str::to_string);
         let mut node_opts_parts: Vec<String> = flags::node_options_safe_inject_flags(
             &config.node.version,
-            config.user_args,
+            node_args,
             node_options.as_deref(),
         )
         .into_iter()
@@ -1475,7 +1499,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // nub never re-enables over a user negation).
         if flags::should_inject_experimental_webstorage(
             &config.node.version,
-            config.user_args,
+            node_args,
             node_options.as_deref(),
         ) {
             cmd.arg("--experimental-webstorage");
@@ -1497,7 +1521,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         // (brand-boundary-permitted plumbing).
         if flags::should_neutralize_experimental_webstorage_localstorage(
             &config.node.version,
-            config.user_args,
+            node_args,
             node_options.as_deref(),
         ) {
             cmd.env(flags::NEUTRALIZE_LOCALSTORAGE_ENV, "1");
@@ -1534,7 +1558,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         let argv_only = flags::argv_inject_flags(
             Some(config.node.path.as_std_path()),
             &config.node.version,
-            config.user_args,
+            node_args,
         );
         // Tell the preload which flags to hide from `process.execArgv`; see
         // `flags::ARGV_ONLY_FLAGS_ENV` for why leaving them visible breaks real builds.
@@ -1549,7 +1573,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         let runtime_v8 = flags::runtime_inject_flags(
             Some(config.node.path.as_std_path()),
             &config.node.version,
-            config.user_args,
+            node_args,
         );
         if !runtime_v8.is_empty() {
             cmd.env(
@@ -1639,7 +1663,7 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         .with_context(|| format!("failed to spawn {}", config.node.path))?;
 
     // Forward terminating/diagnostic signals to the child's process GROUP.
-    // Registered once; the current target lives in a global atomic (see `ctrl_c`).
+    // Registered once; the live targets are held in a global set (see `ctrl_c`).
     // The child is its own group leader (see `group_on_spawn` above), so the
     // negative target signals the child and its descendants exactly once.
     // (No-op off Unix.)
@@ -2211,8 +2235,9 @@ fn shim_dir_utf8(path: PathBuf) -> Result<Utf8PathBuf> {
 /// Compute the augmentation environment variables (NODE_OPTIONS + PATH)
 /// that script runners need to set on child shells so that `node` invocations
 /// inside scripts get nub's transpilation, polyfills, and flag injection — the
-/// same augmentation `nub <file>` applies via direct args. (Web Storage is
-/// opt-in and never injected here; see `spawn_node`.)
+/// same augmentation `nub <file>` applies via direct args. (Web Storage's flag
+/// rides only the argv of each `node` that re-enters through the shim, never this
+/// inherited environment; see `spawn_node`.)
 ///
 /// Returns `None` if already re-entrant (parent nub already set up augmentation)
 /// or if compat mode is active.
@@ -2456,15 +2481,6 @@ impl AugmentationEnv {
         }
     }
 
-    /// The PATH-shim's `node` entry (a symlink/hardlink → nub), suitable as the
-    /// `$NODE` value that npm/pnpm set so userland `$NODE child.js` (and
-    /// `spawn(process.env.NODE, …)`) invoke "the same Node this script runs under."
-    /// Pointing `$NODE` here — rather than the raw binary — makes an absolute-path
-    /// `$NODE` re-enter nub and stay augmented, identical to a bare `node` (which
-    /// reaches the shim via PATH). The shim is a faithful node front-end
-    /// (`$NODE --version` prints Node's version; `process.execPath` still reports the
-    /// real binary), so introspection is preserved. `None` when no shim was set up
-    /// (then callers fall back to the real binary for plain npm/pnpm parity).
     /// Apply the localStorage-neutralize signal to a child command's environment
     /// when this augmentation calls for it (sets the internal
     /// `__NUB_NEUTRALIZE_LOCALSTORAGE` env var the preload reads, then deletes). A
@@ -2478,6 +2494,15 @@ impl AugmentationEnv {
         }
     }
 
+    /// The PATH-shim's `node` entry (a symlink/hardlink → nub), suitable as the
+    /// `$NODE` value that npm/pnpm set so userland `$NODE child.js` (and
+    /// `spawn(process.env.NODE, …)`) invoke "the same Node this script runs under."
+    /// Pointing `$NODE` here — rather than the raw binary — makes an absolute-path
+    /// `$NODE` re-enter nub and stay augmented, identical to a bare `node` (which
+    /// reaches the shim via PATH). The shim is a faithful node front-end
+    /// (`$NODE --version` prints Node's version; `process.execPath` still reports the
+    /// real binary), so introspection is preserved. `None` when no shim was set up
+    /// (then callers fall back to the real binary for plain npm/pnpm parity).
     pub fn node_shim_exe(&self) -> Option<OsString> {
         self.shim_dir.as_deref().map(|dir| {
             #[cfg(windows)]
@@ -2489,35 +2514,113 @@ impl AugmentationEnv {
     }
 }
 
-/// Node's permission-model flags — the *exact, closed* set that, when present,
-/// engages Node's `--permission` sandbox (and therefore needs `--allow-addons`
-/// for nub's native oxc-transform addon to dlopen). This MUST be an exact
-/// allowlist, not a `starts_with("--allow-")` prefix match: V8 exposes flags that
-/// share the `--allow-` prefix but are NOT permission flags — most notably
-/// `--allow-natives-syntax` (enables `%`-prefixed V8 natives like
-/// `%OptimizeFunctionOnNextCall`). The old prefix match misclassified it as a
-/// permission flag and aborted `nub --allow-natives-syntax x.js` with
-/// "--permission requires --allow-addons", where stock node runs it (exit 0).
-/// `--allow-ffi` is a real Node permission flag on the versions that carry it
-/// (it is gone on node 25, where node itself rejects it as a bad option) and is
-/// deliberately kept here so it classifies correctly wherever it exists. Match
-/// the token up to any `=`, since the value-taking flags appear as
-/// `--allow-fs-read=/path`, `--allow-net=host`, etc.
-fn is_permission_flag(arg: &str) -> bool {
-    const PERMISSION_FLAGS: &[&str] = &[
-        "--permission",
-        "--allow-addons",
-        "--allow-child-process",
-        "--allow-ffi",
-        "--allow-fs-read",
-        "--allow-fs-write",
-        "--allow-inspector",
-        "--allow-net",
-        "--allow-wasi",
-        "--allow-worker",
-    ];
-    let token = arg.split('=').next().unwrap_or(arg);
-    PERMISSION_FLAGS.contains(&token)
+/// The permission-model switch Node ends up with on after reading `flags` in
+/// order. The last of a switch and its `--no-` form decides. Each spelling
+/// counts only where Node has it, so that anywhere else Node reports its own
+/// bad option: `--experimental-permission` exists on 20.0 through 23.x, and
+/// `--permission` from 22.13 on the 22 line and from 23.5. Where Node has both
+/// they are one option, so either `--no-` form turns the other off.
+///
+/// Only a switch counts. Matching on the `--allow-` prefix once refused
+/// `nub --allow-natives-syntax x.js`, a V8 flag that plain Node runs.
+fn permission_switch(flags: &[String], node: &NodeVersion) -> Option<&'static str> {
+    let stable = *node >= NodeVersion::new(22, 13, 0)
+        && !(NodeVersion::new(23, 0, 0)..NodeVersion::new(23, 5, 0)).contains(node);
+    let experimental = (NodeVersion::new(20, 0, 0)..NodeVersion::new(24, 0, 0)).contains(node);
+    let mut on = None;
+    for flag in flags {
+        match boolean_option_name(flag).as_str() {
+            "--permission" if stable => on = Some("--permission"),
+            "--experimental-permission" if experimental => {
+                on = Some("--experimental-permission");
+            }
+            "--no-permission" if stable => on = None,
+            "--no-experimental-permission" if experimental => on = None,
+            _ => {}
+        }
+    }
+    on
+}
+
+/// Whether the boolean Node option `name` is on after Node reads `flags` in
+/// order: the last `name` or its `--no-` form decides.
+fn boolean_option(flags: &[String], name: &str) -> bool {
+    let negated = format!("--no-{}", name.trim_start_matches("--"));
+    flags
+        .iter()
+        .rev()
+        .find_map(|flag| {
+            let flag = boolean_option_name(flag);
+            if flag == name {
+                Some(true)
+            } else {
+                (flag == negated).then_some(false)
+            }
+        })
+        .unwrap_or(false)
+}
+
+/// The directories the user's `--allow-fs-read` flags name, as
+/// [`read_grant_key`]s. The value follows `=` or is the next argument. `*` alone
+/// grants everything and names no directory.
+fn user_read_grants(flags: &[String], cwd: &Path) -> Vec<PathBuf> {
+    let mut grants = Vec::new();
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        let (name, value) = match flag.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (flag.as_str(), None),
+        };
+        if name.replace('_', "-") != "--allow-fs-read" {
+            continue;
+        }
+        let value = match value {
+            Some(value) => value,
+            None => match flags.next() {
+                Some(next) => next.as_str(),
+                None => break,
+            },
+        };
+        if value != "*" {
+            grants.push(read_grant_key(value, cwd));
+        }
+    }
+    grants
+}
+
+/// The directory a read grant names, as Node compares grants: resolved against
+/// the working directory, with `.` and `..` folded and a trailing `*` dropped.
+fn read_grant_key(grant: &str, cwd: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut key = PathBuf::new();
+    for part in cwd.join(grant).components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                key.pop();
+            }
+            part => key.push(part),
+        }
+    }
+    if key.file_name() == Some(OsStr::new("*")) {
+        key.pop();
+    }
+    key
+}
+
+/// The name Node reads a boolean option under. It takes `_` for `-` anywhere in
+/// the name, and ignores a `=value`: `--allow_addons=false` turns `--allow-addons`
+/// on.
+fn boolean_option_name(flag: &str) -> String {
+    flag.split('=').next().unwrap_or(flag).replace('_', "-")
+}
+
+/// Whether this Node has the permission model without `--allow-addons`, which
+/// arrived in 20.12 and 21.6. The model blocks every native addon there, so
+/// there is no flag to suggest.
+fn permission_model_lacks_allow_addons(node: &NodeVersion) -> bool {
+    (NodeVersion::new(20, 0, 0)..NodeVersion::new(20, 12, 0)).contains(node)
+        || (NodeVersion::new(21, 0, 0)..NodeVersion::new(21, 6, 0)).contains(node)
 }
 
 /// Carries the running binary's version (`env!("CARGO_PKG_VERSION")`) to the
@@ -3099,15 +3202,17 @@ pub unsafe fn restore_fresh_invocation_environment() {
 /// `loadSync` are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`.
 /// nub's sync `module.registerHooks` fast tier forces resolution synchronous, so
 /// composing it with a foreign async loader (tsx/ts-node) reaches that throwing
-/// stub and crashes the run. Node implemented these methods in 24.11.1
-/// (block-on-loader-worker), so the broken window is 22.15.0 ..= 24.11.0
-/// inclusive; 24.11.1+/25.2+/26 are fine. Refs nodejs/node#59666. (A later 22.x
-/// that backported the fix would be over-covered here — harmless, since the
-/// async tier composes correctly on every version.)
+/// stub and crashes the run. Node implemented these methods
+/// (block-on-loader-worker) in 24.12.0 and 25.2.0, so the broken window is
+/// 22.15.0 up to 24.12.0, plus 25.0 and 25.1; 24.11.1 is inside it, measured
+/// with tsx. Refs nodejs/node#59666. (A later 22.x that backported the fix is
+/// over-covered here — harmless, since the async tier composes correctly on
+/// every version.)
 // @lat: [[research/registerhooks-coverage-matrix#registerHooks coverage & sync/async-composition matrix (empirical)#Consequences]]
 fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
     use super::version::NodeVersion;
-    *v >= NodeVersion::new(22, 15, 0) && *v <= NodeVersion::new(24, 11, 0)
+    (NodeVersion::new(22, 15, 0)..NodeVersion::new(24, 12, 0)).contains(v)
+        || (NodeVersion::new(25, 0, 0)..NodeVersion::new(25, 2, 0)).contains(v)
 }
 
 /// Whether the child nub is about to launch hosts a FOREIGN async ESM loader — a
@@ -3157,7 +3262,8 @@ fn coverage_active(user_args: &[String], node_options: Option<&str>) -> bool {
         .any(|a| a == "--experimental-test-coverage");
     let in_opts = node_options
         .map(|o| {
-            o.split_whitespace()
+            split_node_options(o)
+                .iter()
                 .any(|t| t == "--experimental-test-coverage")
         })
         .unwrap_or(false);
@@ -3589,15 +3695,6 @@ fn is_nub_runtime_dir(dir: &str) -> bool {
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
-/// Split a NODE_OPTIONS-shaped string into individual flag tokens — the inverse of
-/// [`node_options_token`], mirroring Node's own `ParseNodeOptionsEnvVar`
-/// (.repos/node/src/node_options.cc): split on whitespace EXCEPT inside a
-/// double-quoted run, where a backslash escapes the next character.
-///
-/// Needed because callers that accept a raw NODE_OPTIONS string from OUTSIDE
-/// nub.jsonc (npm's `node-options` npmrc field) must hand `compute_augmentation_env`
-/// one element PER FLAG: it re-quotes every element individually, so pushing
-/// `--a --b` as a single element would emit the one broken token `"--a --b"`.
 /// Preload entries carried by an INHERITED `NODE_OPTIONS`, split out so nub can fold
 /// them into its own chainers instead of letting them ride as extra tokens.
 ///
@@ -3741,7 +3838,14 @@ fn reentrant_node_options(existing: Option<&str>, runtime_options: &[String]) ->
 }
 
 /// `NODE_OPTIONS` read the way Node's `ParseNodeOptionsEnvVar` reads it: only a space
-/// separates tokens, so a tab or newline stays inside one.
+/// separates tokens, so a tab or newline stays inside one. The inverse of
+/// [`node_options_token`]: inside a double-quoted run a backslash escapes the next
+/// character.
+///
+/// Needed because callers that accept a raw NODE_OPTIONS string from OUTSIDE
+/// nub.jsonc (npm's `node-options` npmrc field) must hand `compute_augmentation_env`
+/// one element PER FLAG: it re-quotes every element individually, so pushing
+/// `--a --b` as a single element would emit the one broken token `"--a --b"`.
 pub fn split_node_options(value: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut in_string = false;
@@ -4680,24 +4784,27 @@ mod tests {
     }
 
     #[test]
-    fn hook_compose_broken_band_is_22_15_through_24_11_0_inclusive() {
-        // Broken (async-loader resolveSync stub throws): the whole 22.15.0–24.11.0 window.
+    fn hook_compose_broken_band_is_22_15_up_to_24_12_and_25_0_up_to_25_2() {
+        // Broken (async-loader resolveSync stub throws). 24.11.1, 25.0.0 and 25.1.0
+        // were measured with tsx: the fix shipped in 24.12.0 and 25.2.0.
         for v in [
             NodeVersion::new(22, 15, 0),
             NodeVersion::new(22, 16, 0),
             NodeVersion::new(23, 11, 0),
             NodeVersion::new(24, 11, 0),
+            NodeVersion::new(24, 11, 1),
+            NodeVersion::new(25, 0, 0),
+            NodeVersion::new(25, 1, 0),
         ] {
             assert!(
                 node_hook_compose_broken(&v),
                 "{v:?} must be in the broken band"
             );
         }
-        // Fixed at 24.11.1 (Node implemented resolveSync/loadSync), and below the
-        // fast-tier floor there is no sync registerHooks to force the crash.
+        // Fixed from 24.12.0 and 25.2.0 (Node implemented resolveSync/loadSync), and
+        // below the fast-tier floor there is no sync registerHooks to force the crash.
         for v in [
             NodeVersion::new(22, 14, 99),
-            NodeVersion::new(24, 11, 1),
             NodeVersion::new(24, 12, 0),
             NodeVersion::new(25, 2, 0),
             NodeVersion::new(26, 2, 0),
@@ -6353,23 +6460,194 @@ mod tests {
     }
 
     #[test]
-    fn permission_flag_classifier_is_exact_not_a_prefix_match() {
-        // Real permission flags engage Node's sandbox (and need --allow-addons).
-        assert!(is_permission_flag("--permission"));
-        assert!(is_permission_flag("--allow-addons"));
-        // Value-taking permission flags appear as `--flag=value`; match up to `=`.
-        assert!(is_permission_flag("--allow-fs-read=/tmp"));
-        assert!(is_permission_flag("--allow-net=localhost"));
-        // --allow-ffi is a real permission flag on the Node versions that have it.
-        assert!(is_permission_flag("--allow-ffi"));
+    fn a_permission_switch_counts_only_where_node_has_it() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let switch = |flags: &[&str], version: (u32, u32, u32)| {
+            let (major, minor, patch) = version;
+            permission_switch(&args(flags), &NodeVersion::new(major, minor, patch))
+        };
+        let experimental = Some("--experimental-permission");
+        let stable = Some("--permission");
 
-        // The bug R5 fixes: a V8 flag that shares the --allow- prefix but is NOT a
-        // permission flag. Stock node runs `--allow-natives-syntax x.js`; the old
-        // prefix match aborted it as "--permission requires --allow-addons".
-        assert!(!is_permission_flag("--allow-natives-syntax"));
-        // Plain user args and other --allow-*-looking-but-unknown tokens don't trip it.
-        assert!(!is_permission_flag("--enable-source-maps"));
-        assert!(!is_permission_flag("script.js"));
+        // 20.0 through 23.x have the experimental spelling; 18.x predates it and
+        // 24.0 removed it, and there Node rejects it itself.
+        for (version, expected) in [
+            ((18, 20, 0), None),
+            ((20, 0, 0), experimental),
+            ((22, 12, 0), experimental),
+            ((23, 11, 0), experimental),
+            ((24, 0, 0), None),
+        ] {
+            assert_eq!(
+                switch(&["--experimental-permission"], version),
+                expected,
+                "{version:?}"
+            );
+        }
+        // The stable spelling arrived in 22.13 and 23.5.
+        for (version, expected) in [
+            ((18, 20, 0), None),
+            ((20, 19, 0), None),
+            ((22, 12, 0), None),
+            ((22, 13, 0), stable),
+            ((23, 4, 0), None),
+            ((23, 5, 0), stable),
+            ((26, 0, 0), stable),
+        ] {
+            assert_eq!(switch(&["--permission"], version), expected, "{version:?}");
+        }
+        // An `--allow-*` flag is no switch, and neither is a V8 flag that shares
+        // the prefix.
+        assert_eq!(
+            switch(&["--allow-fs-read=/tmp", "--allow-addons"], (26, 0, 0)),
+            None
+        );
+        assert_eq!(switch(&["--allow-natives-syntax"], (26, 0, 0)), None);
+        // A value on the switch does not hide it.
+        assert_eq!(switch(&["--permission=true"], (26, 0, 0)), stable);
+    }
+
+    /// Each row is what plain Node does with the flags in that order, which is the
+    /// order it reads them: NODE_OPTIONS, then the command line.
+    #[test]
+    fn the_last_of_a_permission_flag_and_its_negation_decides() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let switch = |flags: &[&str], version: (u32, u32, u32)| {
+            let (major, minor, patch) = version;
+            permission_switch(&args(flags), &NodeVersion::new(major, minor, patch))
+        };
+        let experimental = Some("--experimental-permission");
+        let stable = Some("--permission");
+
+        for (flags, version, expected) in [
+            (&["--permission", "--no-permission"][..], (26, 0, 0), None),
+            (&["--no-permission", "--permission"][..], (26, 0, 0), stable),
+            (
+                &["--experimental-permission", "--no-experimental-permission"][..],
+                (20, 19, 0),
+                None,
+            ),
+            (
+                &["--no-experimental-permission", "--experimental-permission"][..],
+                (22, 12, 0),
+                experimental,
+            ),
+            // Where Node has both spellings they are one option.
+            (
+                &["--permission", "--no-experimental-permission"][..],
+                (22, 13, 0),
+                None,
+            ),
+            (
+                &["--experimental-permission", "--no-permission"][..],
+                (23, 11, 0),
+                None,
+            ),
+            // A negation this Node lacks is its bad option, not a switch turned off.
+            (
+                &["--experimental-permission", "--no-permission"][..],
+                (20, 19, 0),
+                experimental,
+            ),
+            (
+                &["--permission", "--no-experimental-permission"][..],
+                (24, 0, 0),
+                stable,
+            ),
+        ] {
+            assert_eq!(switch(flags, version), expected, "{flags:?} on {version:?}");
+        }
+
+        let addons = |flags: &[&str]| boolean_option(&args(flags), "--allow-addons");
+        assert!(addons(&["--allow-addons"]));
+        assert!(addons(&["--no-allow-addons", "--allow-addons"]));
+        assert!(!addons(&["--allow-addons", "--no-allow-addons"]));
+        assert!(!addons(&["--allow-fs-read=/tmp"]));
+
+        // Node takes `_` for `-` in a name and ignores a value on a boolean.
+        assert_eq!(
+            switch(
+                &[
+                    "--permission",
+                    "--no-permission",
+                    "--experimental_permission"
+                ],
+                (22, 13, 0)
+            ),
+            experimental
+        );
+        assert_eq!(
+            switch(&["--permission", "--no_permission"], (26, 0, 0)),
+            None
+        );
+        assert_eq!(switch(&["--permission=false"], (26, 0, 0)), stable);
+        assert_eq!(
+            switch(&["--permission", "--no-permission=1"], (26, 0, 0)),
+            None
+        );
+        assert!(addons(&[
+            "--allow-addons",
+            "--no-allow-addons",
+            "--allow-addons=true"
+        ]));
+        assert!(addons(&["--no-allow-addons", "--allow_addons"]));
+        assert!(addons(&["--allow-addons=false"]));
+        assert!(!addons(&["--allow-addons", "--no_allow_addons"]));
+        assert!(!addons(&["--allow-addons", "--no-allow_addons=1"]));
+    }
+
+    /// Each spelling is one Node 22.13 takes for the same grant as `/work/app`:
+    /// with a second grant of that directory it aborts.
+    #[test]
+    fn a_read_grant_is_keyed_as_node_compares_it() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let cwd = Path::new("/work");
+        let app = Path::new("/work/app");
+        for flags in [
+            &["--allow-fs-read=/work/app"][..],
+            &["--allow-fs-read=/work/app/"][..],
+            &["--allow-fs-read=/work/app/*"][..],
+            &["--allow-fs-read=app"][..],
+            &["--allow-fs-read=/work//app/sub/.."][..],
+            &["--allow-fs-read", "/work/app"][..],
+            &["--allow_fs_read=/work/app"][..],
+        ] {
+            assert_eq!(user_read_grants(&args(flags), cwd), [app], "{flags:?}");
+        }
+        // A parent or a child is a different grant, and other flags and `*` name none.
+        assert_eq!(
+            user_read_grants(
+                &args(&[
+                    "--permission",
+                    "--allow-fs-read=/work",
+                    "--allow-fs-write=/work/app",
+                    "--allow-fs-read=*",
+                    "--allow-fs-read=/work/app/sub",
+                ]),
+                cwd
+            ),
+            [Path::new("/work"), Path::new("/work/app/sub")]
+        );
+    }
+
+    #[test]
+    fn allow_addons_is_missing_only_on_early_20_and_21() {
+        for (version, lacks) in [
+            ((18, 20, 0), false),
+            ((20, 0, 0), true),
+            ((20, 11, 1), true),
+            ((20, 12, 0), false),
+            ((21, 5, 0), true),
+            ((21, 6, 0), false),
+            ((22, 0, 0), false),
+        ] {
+            let (major, minor, patch) = version;
+            assert_eq!(
+                permission_model_lacks_allow_addons(&NodeVersion::new(major, minor, patch)),
+                lacks,
+                "Node {major}.{minor}.{patch}"
+            );
+        }
     }
 
     #[test]
@@ -6487,6 +6765,12 @@ mod tests {
         assert!(coverage_active_for_cache(
             &plain_argv,
             Some("--experimental-test-coverage"),
+            None
+        ));
+        // Node unquotes a NODE_OPTIONS token, so a quoted flag engages coverage too.
+        assert!(coverage_active_for_cache(
+            &plain_argv,
+            Some(r#"--no-warnings "--experimental-test-coverage""#),
             None
         ));
         // (3) Coverage via NODE_V8_COVERAGE env (no flag anywhere) — the channel

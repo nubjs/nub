@@ -10,7 +10,8 @@ use std::time::SystemTime;
 pub struct Project {
     /// The project root (nearest package.json).
     pub root: PathBuf,
-    /// The workspace root, if different from root.
+    /// The workspace root, when one was found. Equal to `root` when the project
+    /// root is itself the workspace root.
     pub workspace_root: Option<PathBuf>,
     /// Parsed package.json at root.
     pub manifest: serde_json::Value,

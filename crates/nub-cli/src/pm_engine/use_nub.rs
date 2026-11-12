@@ -616,7 +616,9 @@ pub(crate) fn write_nub_identity_fields(
 ///
 /// `workspaces` lands as a plain array when only membership exists, and as
 /// the object form (`{packages?, catalog?, catalogs?}`) when catalogs are
-/// present — packages-less object for single-package catalog repos.
+/// present — packages-less object for single-package catalog repos. An
+/// existing object form is updated in place, so keys the yaml does not supply
+/// (a `catalog` it lacks, yarn's `nohoist`) are kept.
 pub(crate) fn apply_manifest_edits(
     obj: &mut Map<String, Value>,
     m: &YamlMigration,
@@ -654,20 +656,32 @@ pub(crate) fn apply_manifest_edits(
                 _ => None,
             })
         });
-        let value = if has_catalogs {
-            let mut ws = Map::new();
-            if let Some(p) = packages {
-                ws.insert("packages".into(), p);
+        // An existing object form is the base, so the keys the yaml does not
+        // carry survive: a bun-style `catalog` the yaml lacks, yarn's
+        // `nohoist`. Only the keys the yaml supplies are replaced.
+        let mut ws = match existing {
+            Some(Value::Object(o)) => o,
+            _ => Map::new(),
+        };
+        if let Some(p) = packages {
+            ws.insert("packages".into(), p);
+        }
+        for (key, new) in [("catalog", &m.catalog), ("catalogs", &m.catalogs)] {
+            let Some(new) = new else { continue };
+            if ws.get(key).is_some_and(|prev| prev != new) {
+                notes.push(format!(
+                    "workspaces.{key}: pnpm-workspace.yaml value replaced a differing \
+                     package.json#workspaces.{key} value (the yaml was authoritative under pnpm)"
+                ));
             }
-            if let Some(c) = &m.catalog {
-                ws.insert("catalog".into(), c.clone());
-            }
-            if let Some(c) = &m.catalogs {
-                ws.insert("catalogs".into(), c.clone());
-            }
-            Value::Object(ws)
+            ws.insert(key.into(), new.clone());
+        }
+        // Membership alone keeps the plain array form.
+        let value = if ws.keys().all(|key| key == "packages") {
+            ws.remove("packages")
+                .unwrap_or_else(|| Value::Array(vec![]))
         } else {
-            packages.unwrap_or_else(|| Value::Array(vec![]))
+            Value::Object(ws)
         };
         obj.insert("workspaces".into(), value);
     }
@@ -726,8 +740,18 @@ pub(crate) fn append_npmrc(
     root: &Path,
     lines: &[(String, String)],
 ) -> Result<(Vec<String>, Vec<String>)> {
+    if lines.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let path = root.join(".npmrc");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    // Only a missing file reads as empty. Any other read failure (a UTF-16
+    // `.npmrc` from a Windows shell redirect is the common one) must stop the
+    // switch: treating it as empty would write the migrated lines over it.
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
     let existing_keys = npmrc_existing_keys(&existing);
     let mut appended = Vec::new();
     let mut skipped = Vec::new();
@@ -741,7 +765,7 @@ pub(crate) fn append_npmrc(
         appended.push(format!("{key}={value}"));
     }
     if !body.is_empty() {
-        let mut content = existing.clone();
+        let mut content = existing;
         if !content.is_empty() && !content.ends_with('\n') {
             content.push('\n');
         }
@@ -911,12 +935,16 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
     // written only for the named-version opt-in (see `apply_manifest_edits`).
     let running_version = env!("CARGO_PKG_VERSION");
     let range_version = exact_pin.unwrap_or(running_version);
+    // `.npmrc` first: the append skips keys already present, so a rerun after
+    // any later failure repeats it harmlessly, while the manifest edit removes
+    // the `pnpm` namespace this migration was planned from. Writing the
+    // manifest first would let an `.npmrc` failure strand that namespace's
+    // settings with no source left to migrate them from.
+    let (appended, skipped) = append_npmrc(root, &migration.npmrc)?;
     let mut manifest_notes = Vec::new();
     nub_core::pm::resolve::edit_root_manifest(root, |obj| {
         manifest_notes = apply_manifest_edits(obj, &migration, exact_pin, range_version);
     })?;
-
-    let (appended, skipped) = append_npmrc(root, &migration.npmrc)?;
 
     println!("using nub@{running_version}");
     if let Some(v) = exact_pin {
@@ -1209,13 +1237,26 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
     }
 
     let yaml_path = root.join("pnpm-workspace.yaml");
-    let body = serde_yaml::to_string(&serde_json::Value::Object(yaml.clone()))
+    let body = serde_yaml::to_string(&serde_json::Value::Object(yaml))
         .context("serializing pnpm-workspace.yaml")?;
     std::fs::write(&yaml_path, body).with_context(|| format!("writing {}", yaml_path.display()))?;
 
     nub_core::pm::resolve::edit_root_manifest(root, |obj| {
+        // Only what moved leaves `workspaces`. A key the yaml did not take, such
+        // as yarn's `nohoist`, stays where it was.
+        let rest_is_empty = match obj.get_mut("workspaces") {
+            Some(Value::Object(rest)) => {
+                for key in ["packages", "catalog", "catalogs"] {
+                    rest.remove(key);
+                }
+                rest.is_empty()
+            }
+            _ => true,
+        };
+        if rest_is_empty {
+            obj.remove("workspaces");
+        }
         for key in [
-            "workspaces",
             "overrides",
             "patchedDependencies",
             aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
@@ -1484,6 +1525,58 @@ mod tests {
         );
     }
 
+    /// An object-form `package.json#workspaces` keeps every key the yaml does
+    /// not supply. The yaml here carries membership only, so the manifest's
+    /// own `catalog` and yarn's `nohoist` must both survive the switch rather
+    /// than collapse into the plain array form.
+    #[test]
+    fn manifest_edits_keep_workspaces_keys_the_yaml_does_not_supply() {
+        let m = plan_migration(&src(json!({ "packages": ["apps/*", "libs/*"] }))).unwrap();
+        let mut obj = src(json!({
+            "name": "mono",
+            "workspaces": {
+                "packages": ["apps/*"],
+                "catalog": { "react": "^18.0.0" },
+                "nohoist": ["**/react-native"]
+            }
+        }));
+        apply_manifest_edits(&mut obj, &m, None, "0.1.0");
+        assert_eq!(
+            obj.get("workspaces"),
+            Some(&json!({
+                "packages": ["apps/*", "libs/*"],
+                "catalog": { "react": "^18.0.0" },
+                "nohoist": ["**/react-native"]
+            })),
+            "yaml membership replaces `packages`; everything else is kept"
+        );
+
+        // A yaml catalog replaces the manifest's, says so, and still keeps
+        // the key the yaml does not own.
+        let m = plan_migration(&src(json!({ "catalog": { "react": "^19.0.0" } }))).unwrap();
+        let mut obj = src(json!({
+            "name": "mono",
+            "workspaces": {
+                "packages": ["apps/*"],
+                "catalog": { "react": "^18.0.0" },
+                "nohoist": ["**/react-native"]
+            }
+        }));
+        let notes = apply_manifest_edits(&mut obj, &m, None, "0.1.0");
+        assert_eq!(
+            obj.get("workspaces"),
+            Some(&json!({
+                "packages": ["apps/*"],
+                "catalog": { "react": "^19.0.0" },
+                "nohoist": ["**/react-native"]
+            }))
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("workspaces.catalog")),
+            "the replaced catalog must be named: {notes:?}"
+        );
+    }
+
     #[test]
     fn npmrc_append_skips_existing_keys_in_either_spelling() {
         let dir = tempfile::tempdir().unwrap();
@@ -1506,6 +1599,23 @@ mod tests {
         assert!(
             body.contains("nodeLinker=isolated\nstore-dir=/tmp/store\n"),
             "{body}"
+        );
+    }
+
+    /// An `.npmrc` that exists but cannot be read as UTF-8 (a Windows shell
+    /// redirect writes UTF-16) must stop the append; reading it as empty would
+    /// replace the user's file with the migrated lines.
+    #[test]
+    fn npmrc_append_refuses_an_unreadable_npmrc_rather_than_replacing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let utf16 = b"\xff\xfer\x00e\x00g\x00=\x00x\x00\n\x00";
+        std::fs::write(dir.path().join(".npmrc"), utf16).unwrap();
+        let result = append_npmrc(dir.path(), &[("node-linker".into(), "hoisted".into())]);
+        assert!(result.is_err(), "an unreadable .npmrc must be an error");
+        assert_eq!(
+            std::fs::read(dir.path().join(".npmrc")).unwrap(),
+            utf16,
+            "the existing .npmrc must be left byte-for-byte untouched"
         );
     }
 
@@ -1551,6 +1661,32 @@ mod tests {
         }
 
         // Idempotent rerun: nothing left to move.
+        assert!(regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn regenerate_keeps_the_workspaces_keys_it_does_not_move() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "app",
+                "workspaces": { "packages": ["packages/*"], "nohoist": ["**/react-native"] }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
+
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.get("workspaces"),
+            Some(&json!({ "nohoist": ["**/react-native"] }))
+        );
         assert!(regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
     }
 

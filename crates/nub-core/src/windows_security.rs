@@ -613,9 +613,6 @@ mod tests {
         )
     }
 
-    /// Pins the ancestor/leaf asymmetry. Reading an inherit-only ACE as if it
-    /// granted access on its own object rejected every chain at `C:\`; ignoring it
-    /// at the LEAF too would let the cache contents inherit a foreign grant.
     /// `WinWorldSid`, i.e. Everyone. Not in the trusted set, and the only
     /// well-known SID that makes the refusal branch reachable without a second
     /// account or elevation.
@@ -658,6 +655,9 @@ mod tests {
         );
     }
 
+    /// Pins the ancestor/leaf asymmetry. Reading an inherit-only ACE as if it
+    /// granted access on its own object rejected every chain at `C:\`; ignoring it
+    /// at the LEAF too would let the cache contents inherit a foreign grant.
     #[test]
     fn an_inherit_only_grant_is_an_ancestor_template_but_a_leaf_hazard() {
         let dir = std::env::temp_dir().join(format!("nub-ws-io-{}", std::process::id()));

@@ -6,7 +6,7 @@
  *
  *   aube-bump.ts plan                 # base, delta size, delta sanity
  *   aube-bump.ts venue [--reset]      # build/rebuild the ephemeral merge worktree
- *   aube-bump.ts gate                 # check -> clippy -> test, exit code = verdict
+ *   aube-bump.ts gate                 # check -> clippy, exit code = verdict (tests run separately)
  *   aube-bump.ts land                 # rsync venue -> vendor/aube + UPSTREAM marker
  *
  * The conflict resolution itself stays with an agent (one per partition);

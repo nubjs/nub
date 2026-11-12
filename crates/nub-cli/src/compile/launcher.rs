@@ -16,7 +16,8 @@
 //! alternative was shipping all eight in every package; that adds ~4 MB of dead
 //! weight to every install for a capability only a release pipeline uses, and it
 //! would force the eight parallel build jobs to rendezvous before any package
-//! could be assembled. The design record is `wiki/commands/compile.md`.
+//! could be assembled. The lookup is stage 4 of the build pipeline in
+//! `wiki/commands/compile-architecture.md`.
 //!
 //! The transport is `nub upgrade`'s — same base URL, same curl, same `.sha256`
 //! sidecar convention — because these are assets of the same release and one
@@ -41,7 +42,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use nub_core::compile::TargetPlatform;
 use nub_core::node::discovery;
 
-use super::inject;
+use super::{FileGuard, inject};
 use crate::cli::{curl_download, fetch_expected_sha256, sha256_hex};
 
 /// Internal development override, and the only path that works with no network.
@@ -408,13 +409,6 @@ fn unavailable(target: &TargetPlatform, sources: &Sources, why: &str) -> anyhow:
         asset_name(target),
         url = asset_url(&sources.base_url, target),
     )
-}
-
-struct FileGuard(PathBuf);
-impl Drop for FileGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
 }
 
 #[cfg(test)]

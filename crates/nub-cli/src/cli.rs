@@ -137,11 +137,6 @@ fn npm_config_reporter_is_silent() -> bool {
         .unwrap_or(false)
 }
 
-/// Emit one ndjson event on stdout (`--reporter=ndjson`). The base shape is the
-/// `{ level, name, script, time, msg }` that `@pnpm/cli.default-reporter`
-/// consumes, plus an `event` discriminator (`start`/`log`/`end`/`summary`) and an
-/// optional `exitCode`. `println!` locks stdout per call, so a whole JSON line is
-/// atomic even when concurrent workers emit interleaved.
 fn ndjson_now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -149,6 +144,11 @@ fn ndjson_now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// Emit one ndjson event on stdout (`--reporter=ndjson`). The base shape is the
+/// `{ level, name, script, time, msg }` that `@pnpm/cli.default-reporter`
+/// consumes, plus an `event` discriminator (`start`/`log`/`end`/`summary`) and an
+/// optional `exitCode`. `println!` locks stdout per call, so a whole JSON line is
+/// atomic even when concurrent workers emit interleaved.
 fn emit_ndjson(
     event: &str,
     level: &str,
@@ -782,6 +782,9 @@ pub fn normalize_invocation_environment() -> Result<()> {
 )]
 pub struct Cli {
     /// Print version.
+    // `-v` and `-V`: the derive takes one `short` per spelling, which clippy's
+    // `duplicated_attributes` reads as a repeat.
+    #[allow(clippy::duplicated_attributes)]
     #[usage(short = 'v', short = 'V', long)]
     pub version: bool,
 
@@ -1137,10 +1140,6 @@ pub enum Command {
         args: Vec<String>,
     },
 
-    // nub's own project init, not the engine's npm-style manifest write —
-    // deliberately excluded from ENGINE_VERBS; design record in
-    // internal/commands/init.md. (The doc comment below is user-facing `--help`
-    // text: no internal references.)
     /// Compile a file to a standalone executable.
     ///
     /// Bundles the entry (Rolldown, in-process), embeds a Node for the target
@@ -1366,6 +1365,10 @@ pub enum Command {
         sourcemap_exclude_sources: bool,
     },
 
+    // nub's own project init, not the engine's npm-style manifest write —
+    // deliberately excluded from ENGINE_VERBS; design record in
+    // internal/commands/init.md. (The doc comment below is user-facing `--help`
+    // text: no internal references.)
     /// Scaffold a new TypeScript-first project.
     Init {
         /// Non-interactive: skip all prompts and take the defaults.
@@ -1857,6 +1860,9 @@ struct WorkspaceOpts {
     fail_if_no_match: bool,
     workspace_concurrency: Option<i32>,
     parallel: bool,
+    /// `--sequential`, which like `--parallel` reaches across the workspace when
+    /// there is one.
+    sequential: bool,
     bail: bool,
     reverse: bool,
     sort: bool,
@@ -2101,6 +2107,8 @@ fn normalize_leading_run_flags(args: &[String]) -> Option<Vec<String>> {
         "--no-sort",
         "--sequential",
         "--stream",
+        "--reporter-hide-prefix",
+        "--if-present",
         "--node",
     ];
     const VALUE_FLAGS: &[&str] = &[
@@ -2254,6 +2262,9 @@ fn run_nub() -> Result<i32> {
                     cwd = Some(PathBuf::from(&raw_args[i]));
                 }
             }
+            s if s.starts_with("--cwd=") => {
+                cwd = Some(PathBuf::from(&s["--cwd=".len()..]));
+            }
             // `--color` (bare = always), `--color=<when>`, `--no-color`: consumed
             // here so they never reach Node as unknown flags, and RECORDED so the
             // choice actually takes effect. Dropping the value on the floor left
@@ -2315,7 +2326,7 @@ fn run_nub() -> Result<i32> {
                 // `--env-file-if-exists` mirrors Node v22: load the file if present,
                 // skip SILENTLY when it is absent — vs `--env-file`, which errors on
                 // a missing file. Everything else is identical: same last-writer
-                // merge, same `${VAR}` expansion, and the flag's presence opts the
+                // merge, and the flag's presence opts the
                 // run out of eager `.env*` auto-discovery either way (even when the
                 // if-exists target turns out to be absent — the user named explicit
                 // file(s), so guessing is off).
@@ -2367,9 +2378,9 @@ fn run_nub() -> Result<i32> {
                         if let Some(abs) = abs_path {
                             env_file_paths.push((abs, if_exists));
                         }
-                        // Route through parse_env (not dotenvy directly) so the
-                        // explicit --env-file flag strips backtick-quoted values
-                        // like Node's parser, matching the .env auto-load path.
+                        // Route through parse_env so the explicit --env-file flag
+                        // strips backtick-quoted values like Node's parser, matching
+                        // the .env auto-load path.
                         for (k, v) in nub_core::workspace::env::parse_env(&content) {
                             // Last-writer-wins across multiple `--env-file` flags,
                             // matching Node: "subsequent files override pre-existing
@@ -2854,10 +2865,6 @@ fn split_subcommand_argv(rest: Vec<String>) -> (Vec<String>, Vec<String>) {
     (rest, Vec::new())
 }
 
-/// Parse a forwarding subcommand (`run`/`exec`/`watch`) by splitting off the
-/// verbatim position-3 suffix first, parsing only the prefix, then
-/// appending the suffix to the parsed `args`. `upgrade`/`help` have no
-/// positional-forwarding semantics and go straight to the parser.
 fn run_global(rest: &[String]) -> Result<i32> {
     const USAGE: &str = "Usage: nub global config <COMMAND> [OPTIONS]\n\n\
 Commands:\n\
@@ -2898,6 +2905,10 @@ Commands:\n\
     crate::pm_engine::dispatch_verb(spec, "global config", &args, &pm)
 }
 
+/// Parse a forwarding subcommand (`run`/`exec`/`watch`) by splitting off the
+/// verbatim position-3 suffix first, parsing only the prefix, then
+/// appending the suffix to the parsed `args`. `upgrade`/`help` have no
+/// positional-forwarding semantics and go straight to the parser.
 fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     let subcommand = rest[0].clone();
 
@@ -2927,7 +2938,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // offline fallbacks for the homepage prompt's fetch of start.md/skill.md).
     // Like `node`/`pm`, it's a non-forwarding manual sub-verb match — its
     // bare-usage and invalid-verb messages read consistently and it never reaches
-    // parser dispatch. Spec: .fray/ai-friendliness.md. Print-only, so it reads no
+    // parser dispatch. Print-only, so it reads no
     // project config and never initializes the snapshot — a malformed `nub.jsonc`
     // in some ancestor must not silence the offline docs.
     if subcommand == "agent" {
@@ -2953,8 +2964,8 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 
     // Compatibility alias: npm and pnpm treat `install <pkg>` / `i <pkg>` (and
     // the global form `install -g <pkg>`) as a package add. Route that shape
-    // through the engine's `add` implementation, translating npm save/spec/
-    // workspace spellings, before the native argumentless-install variant
+    // through the engine's `add` implementation, translating pnpm's save
+    // spellings, before the native argumentless-install variant
     // rejects the positional / `-g` / unknown save flags. Plain `nub install`
     // and `nub install <native-flags>` stay on the native install path.
     if let Some(add_argv) = install_to_add_args(&rest)
@@ -3092,11 +3103,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             // `--include-workspace-root` / `--resume-from` imply a workspace run
             // even without `-r`/`--filter` (they only mean anything across the
             // member set); promote to recursive so run_script routes correctly.
-            let recursive = recursive
-                || parallel
-                || sequential
-                || include_workspace_root
-                || resume_from.is_some();
+            // `--parallel` and `--sequential` are promoted there, once it knows
+            // whether there is a workspace to reach across.
+            let recursive = recursive || include_workspace_root || resume_from.is_some();
             let ws_opts = WorkspaceOpts {
                 recursive,
                 filter,
@@ -3111,6 +3120,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                     workspace_concurrency
                 },
                 parallel,
+                sequential,
                 bail: !no_bail,
                 reverse,
                 // `--sequential` also drops topological ordering (flat set).
@@ -3173,6 +3183,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 fail_if_no_match,
                 workspace_concurrency,
                 parallel,
+                sequential: false,
                 bail: false,
                 reverse: false,
                 sort: !parallel,
@@ -3265,6 +3276,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                     fail_if_no_match,
                     workspace_concurrency,
                     parallel,
+                    sequential: false,
                     bail: false,
                     reverse: false,
                     sort: !parallel,
@@ -4330,7 +4342,6 @@ fn write_preload_chain(
 /// `.cjs` one) — the same conditions Node itself would use for that flag. That set
 /// includes [`NUB_CONDITION`], because this resolves a specifier the child Node
 /// would otherwise resolve for itself, with the `nub` condition already on its argv.
-///
 pub(crate) fn bare_preload_resolver(esm: bool) -> oxc_resolver::Resolver {
     oxc_resolver::Resolver::new(oxc_resolver::ResolveOptions {
         condition_names: vec![
@@ -5241,9 +5252,12 @@ fn run_script(
         return Ok(0);
     };
 
-    // Workspace-wide execution: -r, --filter, or --parallel. It gates itself,
-    // once it knows the selection is not empty.
-    if ws.recursive || !ws.filter.is_empty() || !ws.filter_prod.is_empty() || ws.parallel {
+    // Workspace-wide execution: -r, --filter, and, where there is a workspace,
+    // --parallel or --sequential. In a package outside any workspace those two
+    // schedule its own scripts (`nub run --sequential '/^build:/'`), as in pnpm.
+    // It gates itself, once it knows the selection is not empty.
+    let scheduled_across = (ws.parallel || ws.sequential) && project.workspace_root.is_some();
+    if ws.recursive || !ws.filter.is_empty() || !ws.filter_prod.is_empty() || scheduled_across {
         return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
     }
 
@@ -5410,7 +5424,11 @@ fn run_selected_scripts(
                                 exec_ref,
                                 aggregate,
                             )
-                            .unwrap_or(1);
+                            .unwrap_or_else(|e| {
+                                let err_prefix = format_status_prefix(".", name, idx);
+                                eprintln!("{err_prefix}error: {e}");
+                                1
+                            });
                             if code != 0 {
                                 failed_ref.store(code, AtomicOrdering::Relaxed);
                             }
@@ -5569,6 +5587,11 @@ fn run_workspace_target(
         .map(|(idx, _)| idx)
         .collect();
 
+    // How many workspace projects there are, for pnpm's "Scope:" header. The
+    // workspace root counts too; it is in `members` exactly when `root_idx` is
+    // set, and otherwise (no readable root manifest) is added here.
+    let total_projects = members.len() + usize::from(root_idx.is_none());
+
     // Zero-match handling, as pnpm 12: a filter that selects nothing is an
     // exit-0 no-op reporting the scope and `No projects matched the filters
     // in "<dir>"`, since CI runs selectors like `...[origin/main]` that are
@@ -5584,8 +5607,7 @@ fn run_workspace_target(
         }
         // pnpm reports the scope for `run`, and only the notice for `exec`.
         if matches!(target, WorkspaceTarget::Script(..)) {
-            let total = members.len() + usize::from(root_idx.is_none());
-            eprintln!("Scope: 0 of {total} workspace projects");
+            eprintln!("Scope: 0 of {total_projects} workspace projects");
         }
         eprintln!("{notice}");
         return Ok(0);
@@ -5600,16 +5622,9 @@ fn run_workspace_target(
     }
 
     // pnpm's "Scope:" header (reportScope.ts): how many workspace projects this
-    // run touches out of the total. `total` counts the workspace root too — it
-    // is in `members` only when `--include-workspace-root` appended it
-    // (`root_idx`), otherwise add one for it. Suppressed for a single selected
-    // project (pnpm prints nothing then), and reads "all N" when every project
-    // is selected.
-    let total_projects = if root_idx.is_some() {
-        members.len()
-    } else {
-        members.len() + 1
-    };
+    // run touches out of the total. Suppressed for a single selected project
+    // (pnpm prints nothing then), and reads "all N" when every project is
+    // selected.
     let selected = matched_set.len();
     if selected > 1 {
         if selected == total_projects {
@@ -7014,9 +7029,6 @@ impl PipeReaders {
 /// Concurrently drain stdout + stderr on the CURRENT thread (no second thread),
 /// using `poll(2)` to multiplex the two pipes so a full buffer on either can
 /// never block the other — preserving the no-deadlock guarantee without a thread.
-/// Non-Unix has no `poll` here; it falls back to sequential draining, accepting
-/// the rare large-output deadlock window (the abort this replaces was Linux-only,
-/// and Windows never exhibited the thread-exhaustion bug).
 #[cfg(unix)]
 fn drain_both_inline(
     out: std::process::ChildStdout,
@@ -7085,14 +7097,6 @@ fn drain_both_inline(
         }
         let out_lines = out_pipe.finish();
         let err_lines = err_pipe.map(LinePipe::finish).unwrap_or_default();
-        (out_lines, err_lines)
-    }
-    #[cfg(not(unix))]
-    {
-        // No `poll` — drain sequentially. Safe for the small-output common case;
-        // the thread-exhaustion abort this guards was never seen off Linux.
-        let out_lines = out_policy.run(out);
-        let err_lines = err.map(|e| err_policy.run(e)).unwrap_or_default();
         (out_lines, err_lines)
     }
 }
@@ -7196,7 +7200,7 @@ impl LinePipe {
 }
 
 /// Spawn a script with piped stdout/stderr, prefixing each output line
-/// with `<prefix> <script>: `. Returns (exit_code, collected_output).
+/// with `<prefix> <script>: `. Returns the script's exit code.
 ///
 /// `aggregate` selects the output discipline: `false` streams each line live
 /// (interleaved across packages, the TTY default); `true` buffers the whole
@@ -7713,25 +7717,22 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // direct child, launched by absolute path, and never comes back here.
     //
     // The configured `prefix` goes in front of all of that, the loader included,
-    // exactly as `spawn_node` orders it — and, like the loader, not in compat mode.
-    let prefix = if compat_mode {
-        None
-    } else {
-        crate::prefix::Prefix::resolve(
-            project
-                .as_ref()
-                .map_or(cwd.as_path(), |project| project.root.as_path()),
-            &project
-                .as_ref()
-                .map(|project| {
-                    nub_core::workspace::scripts::bin_dirs(
-                        &project.root,
-                        project.workspace_root.as_deref(),
-                    )
-                })
-                .unwrap_or_default(),
-        )?
-    };
+    // exactly as `spawn_node` orders it. Compat mode never reaches here: it took
+    // the bare `node --watch` branch above.
+    let prefix = crate::prefix::Prefix::resolve(
+        project
+            .as_ref()
+            .map_or(cwd.as_path(), |project| project.root.as_path()),
+        &project
+            .as_ref()
+            .map(|project| {
+                nub_core::workspace::scripts::bin_dirs(
+                    &project.root,
+                    project.workspace_root.as_deref(),
+                )
+            })
+            .unwrap_or_default(),
+    )?;
     let owner_target = env_owner
         .as_ref()
         .and_then(crate::env_owner::EnvOwner::spawn_target);
@@ -7777,17 +7778,13 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     cmd.env(crate::project_config::RUNTIME_CONFIG_ENV, runtime_json);
     // Default-export `fetch` handler, same signal the direct-spawn path sets. Node's
     // watch supervisor re-execs the child with this environment, so a restart rebinds
-    // the listener — which is the whole point of watching a server. `nub watch` has no
-    // `--node` form to exclude (it refuses compat outright), so the resolved
-    // `nodeCompat` from the project config is the only opt-out to honor.
-    if !compat_mode {
-        cmd.env(
-            nub_core::node::flags::SERVE_ENTRY_ENV,
-            nub_core::node::flags::serve_entry_marker(
-                std::iter::once(file).chain(args.iter().map(String::as_str)),
-            ),
-        );
-    }
+    // the listener — which is the whole point of watching a server.
+    cmd.env(
+        nub_core::node::flags::SERVE_ENTRY_ENV,
+        nub_core::node::flags::serve_entry_marker(
+            std::iter::once(file).chain(args.iter().map(String::as_str)),
+        ),
+    );
     // Tell the preload to hide nub's argv-only V8 flags from `process.execArgv`, the same
     // signal the direct-spawn path sets. Node's watch supervisor re-execs the child with
     // this environment, so it survives every restart.
@@ -8194,6 +8191,10 @@ fn launch_bin(bin_path: &Path, args: &[String], compat_mode: bool, cwd: &Path) -
     }
 
     let mut cmd = bin_launcher(bin_path, args);
+    // The node branch above runs in `cwd` through `run_file_in_dir`; a workspace
+    // run (`nub exec -r`) passes each member's dir, and a shell-shim `.bin` entry
+    // must start there too.
+    cmd.current_dir(cwd);
     // --env-file first (applies in compat too); aug's NODE_OPTIONS/PATH/NODE_PATH
     // are set after so nub's values win over any same-named env-file keys (A19).
     apply_env_file_vars(&mut cmd);
@@ -8388,9 +8389,6 @@ fn apply_exec_augmentation(cmd: &mut std::process::Command, cwd: &Path) -> Resul
     );
     Ok(())
 }
-
-// dlx removed per the maintainer 2026-05-26 (exec.md). nubx is local-bin-only; on a miss it
-// SUGGESTS the PM dlx command and exits non-zero (127) — it never runs a fetch.
 
 /// Walk up from `cwd` (bounded to 16 levels) looking for a lockfile, returning
 /// the owning PM's name as soon as one is found. Shared by
@@ -8685,13 +8683,10 @@ fn mise_upgrade_args(tool: &str, version_spec: &str, source: &Path) -> Vec<Strin
 /// switch on Windows). `None` on a platform Nub doesn't publish an archive for
 /// (the self-owned channel then falls back to a clear error rather than
 /// fetching a 404). musl vs glibc on Linux is a runtime distinction install.sh
-/// makes via `ldd`/`/etc/alpine-release`; we encode the glibc default here and
-/// document musl as the known gap (see note below).
+/// makes via `ldd`/`/etc/alpine-release`; here it is the libc this binary was
+/// built for (`target_env`), so the archive matches the running binary's flavor.
 pub(crate) fn platform_target() -> Option<&'static str> {
-    // NOTE: a glibc build and a musl build of the same arch are the same Rust
-    // `target_env` only under `target_env = "musl"`, so this distinguishes them
-    // correctly when Nub itself is built for musl. The detection matches the
-    // archive names release.yml publishes.
+    // The tokens match the archive names release.yml publishes.
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Some("darwin-arm64"),
         ("macos", "x86_64") => Some("darwin-x64"),
@@ -9296,8 +9291,8 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
     // template above all — must travel with the binary, or an upgraded install
     // silently keeps the PREVIOUS release's copies. The POSIX path gets that free
     // by swapping the whole directory. Here `nub.exe` was renamed OUT of the
-    // staging dir above, nubx is refreshed from it, and busybox is installed by
-    // the block just above, so all three are skipped and everything remaining is
+    // staging dir above, and the nubx / nubr aliases and busybox are installed by
+    // the blocks just above, so those are skipped and everything remaining is
     // refreshed. Best-effort per the resilience contract: nub is already swapped
     // and authoritative.
     //
@@ -9309,6 +9304,7 @@ fn swap_bin_files_windows(install_dir: &Path, staged_bin: &Path) -> Result<()> {
         for entry in entries.flatten() {
             let name = entry.file_name();
             if name == "nubx.exe"
+                || name == "nubr.exe"
                 || name == "busybox.exe"
                 || !entry.file_type().is_ok_and(|t| t.is_file())
             {
@@ -10093,8 +10089,9 @@ fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::Res
         DiscoveryError::PinnedNotFound { pin, shell_version } => anyhow::anyhow!(
             "pinned Node version {pin} not found\n\
              \x20\x20Active shell Node: {shell_version} (does not satisfy the pin)\n\
-             \x20\x20Provision it: nub node install {pin} (or run a file — nub installs the pin on demand)\n\
-             \x20\x20The pin comes from .node-version / .nvmrc / .tool-versions / engines.node / devEngines.runtime."
+             \x20\x20Provision it: {} (or run a file — nub installs the pin on demand)\n\
+             \x20\x20The pin comes from .node-version / .nvmrc / .tool-versions / engines.node / devEngines.runtime.",
+            nub_core::node::discovery::pinned_install_command(&pin)
         ),
         other => anyhow::Error::new(other),
     })
@@ -11853,7 +11850,7 @@ fn shim_plan_at(
                     });
                 }
                 pin.version = Some(
-                    lockfile_family_spec(pin.pm, &shim_lockfile_root(cwd))
+                    lockfile_family(pin.pm, &shim_lockfile_root(cwd))
                         .unwrap_or_else(|| "latest".to_string()),
                 );
             }
@@ -12053,21 +12050,15 @@ fn shim_lockfile_root(cwd: &Path) -> PathBuf {
 /// lockfile belongs to that PM (`lockfile_version::infer`); `None` otherwise
 /// (no lockfile, or it belongs to a different PM — bun included). The single
 /// home for the name-level family rule (Display collapses classic/Berry yarn);
-/// both [`lockfile_family_spec`] and [`dynamic_default_spec`] route their
-/// "same PM → its range" branch through here so the comparison can't drift.
+/// both the name-only-pin PATH miss in [`shim_plan_at`] and [`dynamic_default_spec`]
+/// route their "same PM → its range" branch through here so the comparison can't
+/// drift.
 fn lockfile_family(pm: nub_core::pm::Pm, root: &Path) -> Option<String> {
     use nub_core::pm::lockfile_version::{LockfileHint, infer};
     match infer(root) {
         Some(LockfileHint::Pm(hint)) if hint.pm.to_string() == pm.to_string() => Some(hint.range),
         _ => None,
     }
-}
-
-/// The lockfile-implied version family of `pm` itself; `None` → caller defaults
-/// to `latest`. Thin alias over [`lockfile_family`] for the cache-first PATH-miss
-/// site, which wants silent fallthrough with no bun bail and no why-string.
-fn lockfile_family_spec(pm: nub_core::pm::Pm, root: &Path) -> Option<String> {
-    lockfile_family(pm, root)
 }
 
 /// The dynamic-default spec for a PATH miss (decision 3): the lockfile-implied
@@ -12568,7 +12559,8 @@ mod tests {
 
     #[test]
     fn watch_env_file_arg_stays_absolute_for_windows_watchers() {
-        let root = std::env::temp_dir().join("nub-watch-env-arg-windows");
+        let root =
+            std::env::temp_dir().join(format!("nub-watch-env-arg-windows-{}", std::process::id()));
         let path = root.join(".env");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -12871,6 +12863,16 @@ mod tests {
         assert_eq!(
             norm(&["-r", "-F", "x", "exec", "tsc"]),
             Some(v(&["exec", "-r", "-F", "x", "tsc"]))
+        );
+        // Every `run` flag reorders, not only the scheduling ones: a flag missing
+        // from the list reached Node as `node: bad option`.
+        assert_eq!(
+            norm(&["--if-present", "run", "build"]),
+            Some(v(&["run", "--if-present", "build"]))
+        );
+        assert_eq!(
+            norm(&["--reporter-hide-prefix", "run", "build"]),
+            Some(v(&["run", "--reporter-hide-prefix", "build"]))
         );
 
         // Left untouched (None):
@@ -14220,11 +14222,16 @@ mod tests {
         let _ctx = crate::pm_engine::ENGINE_GLOBAL_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let prev = env::current_dir().unwrap();
+        // Restored on unwind too, so a failing test does not move every later one.
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = env::set_current_dir(&self.0);
+            }
+        }
+        let _restore = Restore(env::current_dir().unwrap());
         env::set_current_dir(dir).unwrap();
-        let out = f();
-        env::set_current_dir(prev).unwrap();
-        out
+        f()
     }
 
     #[test]

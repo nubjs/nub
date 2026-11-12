@@ -59,8 +59,9 @@ const SCAN_DEADLINE: Duration = Duration::from_millis(500);
 /// wall of warnings; the rest are summarized.
 const MAX_REPORTED: usize = 10;
 
-/// Source extensions nub itself can load/transpile. `.d.ts` is intentionally
-/// excluded — it is type-only and carries no runtime imports.
+/// Source extensions nub itself can load/transpile. Declaration files
+/// (`.d.ts`/`.d.mts`/`.d.cts`) are intentionally excluded — they are type-only
+/// and carry no runtime imports.
 const SOURCE_EXTS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"];
 
 /// Directory names never descended into: third-party trees and generated output
@@ -251,8 +252,9 @@ fn collect_hard_candidates(
             let SpecKind::Bare(name) = specifier::classify(&occ.spec) else {
                 continue;
             };
-            // Constant per-name exclusions — drop before aggregating.
-            if is_builtin(&name)
+            // Constant exclusions — drop before aggregating. Builtin-ness is
+            // judged on the whole specifier: `buffer/` is the npm package.
+            if is_builtin(&occ.spec)
                 || name == self_name
                 || name.starts_with("@types/")
                 || declared.contains(&name)
@@ -348,9 +350,12 @@ fn walk_source(
 }
 
 fn is_source_file(path: &Path) -> bool {
-    // `.d.ts` is type-only — exclude even though its extension is `ts`.
+    // A declaration file is type-only — exclude it even though its extension is
+    // `ts`/`mts`/`cts`. `extract` KEEPS type-only imports for a declaration file
+    // (it reads it as a package's type surface), so one admitted here would
+    // report a type import as an undeclared runtime dependency.
     if let Some(name) = path.file_name().and_then(|n| n.to_str())
-        && name.ends_with(".d.ts")
+        && (name.ends_with(".d.ts") || name.ends_with(".d.mts") || name.ends_with(".d.cts"))
     {
         return false;
     }
@@ -622,6 +627,35 @@ mod tests {
     }
 
     #[test]
+    fn declaration_files_of_every_module_flavor_are_not_scanned() {
+        // A declaration file's imports are type-only, and `extract` keeps them
+        // for one, so a scanned `.d.mts`/`.d.cts` would report a hoisted package
+        // it only names in a type as an undeclared runtime import.
+        let root = tmpdir("dts");
+        for file in ["env.d.ts", "env.d.mts", "env.d.cts"] {
+            fs::write(
+                root.join(file),
+                "import type { X } from 'hoisted-ghost';\nexport type Y = X;\n",
+            )
+            .unwrap();
+        }
+        install_dep(&root, "hoisted-ghost");
+        assert!(
+            run(&root, r#"{"name":"app"}"#).is_empty(),
+            "a declaration file never contributes a phantom"
+        );
+
+        // THE CONTROL: the same import as a runtime import in a source file is
+        // flagged, so the empty result above is the exclusion and not a fixture
+        // that could never fire.
+        fs::write(root.join("index.mts"), "import 'hoisted-ghost';").unwrap();
+        assert_eq!(
+            run(&root, r#"{"name":"app"}"#),
+            vec![("hoisted-ghost".to_string(), "index.mts".to_string())]
+        );
+    }
+
+    #[test]
     fn node_modules_and_output_dirs_are_not_scanned() {
         let root = tmpdir("skip");
         install_dep(&root, "phantom-dep");
@@ -682,6 +716,23 @@ mod tests {
             got.is_empty(),
             "member's declared dep must not be flagged at the root: {got:?}"
         );
+    }
+
+    #[test]
+    fn a_trailing_slash_builtin_name_is_the_npm_package() {
+        // `require('buffer/')` bypasses Node's builtin and loads the npm `buffer`
+        // from node_modules (`require('node:module').isBuiltin('buffer/')` is
+        // false), so an undeclared, hoisted one is a phantom. The plain builtin
+        // in the same file stays silent.
+        let root = tmpdir("slash");
+        fs::write(
+            root.join("index.js"),
+            "require('buffer'); require('node:fs'); require('buffer/');",
+        )
+        .unwrap();
+        install_dep(&root, "buffer");
+        let got = run(&root, r#"{"name":"app"}"#);
+        assert_eq!(got, vec![("buffer".to_string(), "index.js".to_string())]);
     }
 
     #[test]

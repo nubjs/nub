@@ -37,12 +37,19 @@ for dst in "$wrapper" "$governor"; do
   mv "$dst.tmp.$$" "$dst"
 done
 
-# Refuse to fight a foreign wrapper (sccache and friends own the same slot).
-if [ -f "$cfg" ] && grep -q '^[[:space:]]*rustc-wrapper' "$cfg" \
-  && ! grep -qF "rustc-wrapper = \"$wrapper\"" "$cfg"; then
-  echo "qos-global: $cfg sets a different rustc-wrapper; not touching it" >&2
-  exit 1
-fi
+# Refuse to fight a foreign wrapper in either slot (sccache and friends own
+# them). Checked for both keys before either is written: ensure_key only adds a
+# missing line, so a different value would become a duplicate TOML key, which
+# breaks every cargo invocation on the machine.
+refuse_foreign() {
+  if [ -f "$cfg" ] && grep -q "^[[:space:]]*$1" "$cfg" \
+    && ! grep -qF "$1 = \"$2\"" "$cfg"; then
+    echo "qos-global: $cfg sets a different $1; not touching it" >&2
+    exit 1
+  fi
+}
+refuse_foreign rustc-wrapper "$wrapper"
+refuse_foreign rustc-workspace-wrapper "$governor"
 
 # Ensure one `<key> = "$wrapper"` line exists under [build], creating the section
 # if needed. Split out because the two keys are added independently — the second
@@ -51,6 +58,13 @@ ensure_key() {
   _k=$1
   _line="$_k = \"$2\""
   grep -qF "$_line" "$cfg" 2>/dev/null && return 0
+  # A [build] table cannot be added beside `build.<key> = …` or `build = { … }`:
+  # TOML rejects it as a redefinition, and that breaks every cargo invocation.
+  if [ -f "$cfg" ] && grep -Eq '^[[:space:]]*build[[:space:]]*[.=]' "$cfg"; then
+    echo "qos-global: $cfg sets build keys outside a [build] table; not touching it" >&2
+    echo "qos-global: add by hand: build.$_line" >&2
+    exit 1
+  fi
   if [ -f "$cfg" ] && grep -q '^\[build\]' "$cfg"; then
     awk -v line="$_line" \
       '{ print; if (!done && $0 == "[build]") { print line; done = 1 } }' \

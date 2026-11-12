@@ -12,7 +12,8 @@
 //!   4. injects version-appropriate Node flags via nub-core's `compute_inject_flags`,
 //!      and hands over the compiled bootstrap — as a `--require` preload, or as a
 //!      path for the preamble to bootstrap from (`configure_compiled_bootstrap`),
-//!   5. spawns Node on the app entry, forwarding signals + the exit code
+//!   5. runs Node on the app entry: on Unix by `exec`ing it in place of this
+//!      process; on Windows as a child, forwarding signals + the exit code
 //!      (nub-core's `status_forwarding_signals`, the same machinery as `nub run`).
 //!
 //! Node itself is bit-exact official Node — never patched. The compile preamble
@@ -44,7 +45,7 @@ use nub_core::version_management::{extract_verified_node_archive, parse_target_s
 use ui::FirstRun;
 
 /// Internal launcher control channel. The values are set only by Nub's compile
-/// verifier and parent-death reaper; application arguments are never reserved.
+/// verifier and release CI; application arguments are never reserved.
 const INTERNAL_MODE_ENV: &str = "__NUB_COMPILED_LAUNCHER_MODE";
 /// Private process-identity channel. The launcher always overwrites this on the
 /// child Command, so an inherited value can never spoof the compiled executable.
@@ -73,7 +74,6 @@ const UNUSED_CACHE_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 #[derive(Debug, PartialEq, Eq)]
 enum InternalMode {
     Probe,
-    PdeathWatch,
     Licenses,
 }
 
@@ -87,9 +87,10 @@ fn internal_mode(args: &[String], mode: Option<&str>) -> Option<InternalMode> {
         // its whole argv surface: no flag a publisher might already use is
         // intercepted, at any argument count.
         Some("licenses") if args.len() == 1 => Some(InternalMode::Licenses),
-        // PID and read-fd remain ordinary positional values; only this private
-        // environment channel selects their interpretation.
-        Some("pdeath-watch") if args.len() == 3 => Some(InternalMode::PdeathWatch),
+        // `pdeath-watch` is deliberately absent. nub-core's macOS SIGKILL backstop
+        // re-invokes `current_exe` under that mode, but it is planted only by a
+        // process that spawns and waits on a child — and this launcher `exec`s Node
+        // on Unix, so no process ever re-invokes it as a watcher.
         _ => None,
     }
 }
@@ -133,16 +134,10 @@ fn phase_with(f: impl FnOnce() -> String) {
 }
 
 fn run() -> i32 {
-    // nub-core's signal-forwarding spawn plants a macOS SIGKILL-backstop watcher by
-    // re-invoking `current_exe <pgid> <fd>` under the private pdeath-watch mode —
-    // which, for a compiled binary, IS this launcher. Dispatch that mode to the
-    // watcher entry instead of decoding the payload and re-launching the app.
     LAUNCH_T0.get_or_init(std::time::Instant::now);
     phase("process entry");
     let args: Vec<String> = std::env::args().collect();
     match internal_mode(&args, std::env::var(INTERNAL_MODE_ENV).ok().as_deref()) {
-        #[cfg(unix)]
-        Some(InternalMode::PdeathWatch) => return spawn::run_pdeath_watch(&args[1..]),
         Some(InternalMode::Probe) => {
             // Compile-time self-check: `nub compile` runs this on the produced
             // binary to catch an under-padded / corrupt section injection (which
@@ -286,7 +281,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
                 }
                 (None, None) => {
                     phase("ARM: COLD — acquire_node + ensure_app");
-                    let n = acquire_node(view, &base, &notice, None)?;
+                    let n = acquire_node(view, &base, &notice)?;
                     phase("  acquire_node done");
                     let a = ensure_app_unless_inline(view, &base)?;
                     phase("  ensure_app done");
@@ -407,7 +402,7 @@ fn launch(view: &PayloadView<'_>, launcher_path: &Path) -> Result<ExitStatus> {
     for flag in &inject {
         execargv.push(flag);
     }
-    // `--node-flag`, baked in at compile time. AFTER nub's own injected flags,
+    // `--node-options`, baked in at compile time. AFTER nub's own injected flags,
     // because Node takes the last occurrence of a repeated flag — so a publisher
     // who asked for one gets it even where nub injects the opposite. Still ahead
     // of the entry, which is where application argv begins.
@@ -1402,7 +1397,6 @@ fn acquire_node(
     view: &PayloadView<'_>,
     base: &Path,
     notice: &FirstRun,
-    external_smol: Option<(PathBuf, NodeVersion)>,
 ) -> Result<(PathBuf, NodeVersion, NodeOrigin)> {
     match view.manifest.shape {
         Shape::Embed => {
@@ -1414,7 +1408,7 @@ fn acquire_node(
                 .unwrap_or_else(|_| NodeVersion::new(22, 15, 0));
             Ok((path, version, NodeOrigin::Managed))
         }
-        Shape::Smol => acquire_smol_node(&view.manifest, base, notice, external_smol),
+        Shape::Smol => acquire_smol_node(&view.manifest, base, notice),
     }
 }
 
@@ -1468,10 +1462,17 @@ fn acquire_embedded_node(
     // one opaque span — which is what stopped an investigation into where that
     // second goes. Free unless __NUB_LAUNCHER_TIMING is set.
     phase("      node: staging ready");
-    decompress_to_file(view.node_blob, &tmp_bin).context("decompressing the embedded Node")?;
+    // A failure here is most often a full disk, so the partial ~100 MB Node goes
+    // now rather than waiting out the orphan sweep's age limit.
+    let discard = |_: &anyhow::Error| {
+        let _ = fs::remove_dir_all(&tmp);
+    };
+    decompress_to_file(view.node_blob, &tmp_bin)
+        .context("decompressing the embedded Node")
+        .inspect_err(discard)?;
     phase("      node: decompressed + written");
-    set_executable(&tmp_bin)?;
-    sync_file(&tmp_bin)?;
+    set_executable(&tmp_bin).inspect_err(discard)?;
+    sync_file(&tmp_bin).inspect_err(discard)?;
     phase("      node: chmod + fsync");
 
     publish_cache_dir(&tmp, &node_cache, |dir| {
@@ -1584,10 +1585,11 @@ fn alpine_package_for(lib: &str) -> String {
     }
 }
 
-/// `smol` shape discovery + provisioning. Order: nub's own Node store → the known
-/// version-manager layouts → PATH → shell-out provision. Legacy payloads accept
-/// any Node at or above their target; new payloads enforce exact targets and
-/// explicit ranges. Provisioning prefers `provision_version` — the newest release
+/// `smol` shape discovery + provisioning for a run that found no external Node.
+/// The version-manager layouts and PATH were already tried before cache
+/// resolution ([`discover_external_smol_node`]), so what is left is nub's own Node
+/// store → shell-out provision. Legacy payloads accept any Node at or above their
+/// target; new payloads enforce exact targets and explicit ranges. Provisioning prefers `provision_version` — the newest release
 /// the COMPILER resolved for the pin AND judged able to run the payload — and
 /// falls back to the manifest version when the payload names none, which covers a
 /// legacy manifest and one whose newest match could not run its shim alike.
@@ -1596,15 +1598,12 @@ fn acquire_smol_node(
     m: &Manifest,
     base: &Path,
     notice: &FirstRun,
-    external_smol: Option<(PathBuf, NodeVersion)>,
 ) -> Result<(PathBuf, NodeVersion, NodeOrigin)> {
     let target = smol_target(m)?;
     let probes = cache::ProbeStore::resolve();
 
-    // 1. nub's Node store, then every version manager's install root. nub's store
-    //    is checked first (it is the one nub itself provisioned into), but WITHIN
-    //    the version managers the newest satisfying install wins rather than
-    //    whichever manager happens to sort first.
+    // 1. nub's Node stores: the probed cache base, then the location nub-core
+    //    would name (`node_stores`).
     for store in node_stores(base) {
         // These are nub's OWN stores, so the trusted half is what answers; the
         // unprobed list is empty for a cache-owned directory. Probing the tail
@@ -1622,14 +1621,7 @@ fn acquire_smol_node(
             }
         }
     }
-    // 2. A version-manager or PATH Node proved before cache resolution. This is
-    // deliberately not rediscovered: PATH probing can spawn Node, and the early
-    // proof is also what authorized a noexec app cache.
-    if let Some((path, ver)) = external_smol {
-        return Ok((path, ver, NodeOrigin::Discovered));
-    }
-
-    // 3. Provision via shell-out. Prefer the version the COMPILER resolved as the
+    // 2. Provision via shell-out. Prefer the version the COMPILER resolved as the
     // newest satisfying the pin THAT CAN RUN THIS PAYLOAD: the target's floor may
     // be the oldest release this binary tolerates — `--target 26` landing on
     // 26.0.0. Two payloads name no preference and get the floor instead: a legacy
@@ -1741,7 +1733,6 @@ fn smol_target(m: &Manifest) -> Result<SmolTarget> {
 /// Find a compatible Node outside the selected cache. Version-manager installs
 /// and PATH are external trust domains; a Node store below the cache is assessed
 /// only after cache resolution because it would execute from that cache.
-/// Find a Node this `--smol` artifact will accept.
 ///
 /// Rank every external candidate by its CLAIMED version across all managers before
 /// executing any of them, then probe in that order and stop at the first that
@@ -1759,22 +1750,14 @@ fn smol_target(m: &Manifest) -> Result<SmolTarget> {
 /// before — it can never be accepted unverified, which is the property that matters.
 fn discover_external_smol_node(m: &Manifest) -> Result<Option<(PathBuf, NodeVersion)>> {
     let target = smol_target(m)?;
-    let mut trusted: Option<(PathBuf, NodeVersion)> = None;
     let mut ranked: Vec<(PathBuf, NodeVersion)> = Vec::new();
     let roots = version_manager_dirs();
     phase_with(|| format!("  smol: {} version-manager root(s)", roots.len()));
     for dir in roots {
-        let (owned, candidates) = best_node_in(&dir, &target, &m.triple);
-        if let Some(found) = owned {
-            if trusted.as_ref().is_none_or(|(_, cur)| found.1 > *cur) {
-                trusted = Some(found);
-            }
-        }
+        // Version-manager roots are never cache-owned, so the trusted half of the
+        // scan is always empty here: every candidate is probed before it counts.
+        let (_, candidates) = best_node_in(&dir, &target, &m.triple);
         ranked.extend(candidates);
-    }
-    // Our own store outranks any external claim: it needs no exec at all.
-    if trusted.is_some() {
-        return Ok(trusted);
     }
     ranked.sort_by(|(_, left), (_, right)| right.cmp(left));
     phase_with(|| format!("  smol: {} candidate(s) scanned + ranked", ranked.len()));
@@ -2023,10 +2006,6 @@ fn smol_candidate_matches(candidate: &NodeVersion, target: &SmolTarget) -> bool 
     target.matches(candidate)
 }
 
-/// Scan one install root for the newest Node satisfying the payload's version
-/// policy that can also actually RUN here — the same libc gate the embed-shape
-/// dedup applies, which matters more for a version manager's tree than for nub's
-/// own store, since nothing nub controls put it there.
 /// Candidates from one directory: `(already trusted, needs probing)`.
 ///
 /// Split because verifying an external candidate costs a full `node` process spawn
@@ -2034,6 +2013,10 @@ fn smol_candidate_matches(candidate: &NodeVersion, target: &SmolTarget) -> bool 
 /// the directory names already said. See [`discover_external_smol_node`].
 type NodeDirScan = (Option<(PathBuf, NodeVersion)>, Vec<(PathBuf, NodeVersion)>);
 
+/// Scan one install root for the newest Node satisfying the payload's version
+/// policy that can also actually RUN here — the same libc gate the embed-shape
+/// dedup applies, which matters more for a version manager's tree than for nub's
+/// own store, since nothing nub controls put it there.
 fn best_node_in(dir: &NodeDir, target: &SmolTarget, triple: &str) -> NodeDirScan {
     if dir.cache_owned && cache::revalidate(&dir.root).is_err() {
         return (None, Vec::new());
@@ -2266,7 +2249,10 @@ fn provision_smol_node(version: &NodeVersion, base: &Path, notice: &FirstRun) ->
         let _ = fs::remove_dir_all(&work);
     })?;
     let shasums = fs::read_to_string(&shasums_path)
-        .with_context(|| format!("reading {}", shasums_path.display()))?;
+        .with_context(|| format!("reading {}", shasums_path.display()))
+        .inspect_err(|_| {
+            let _ = fs::remove_dir_all(&work);
+        })?;
     verify_archive_checksum(&archive, &shasums, &filename).inspect_err(|_| {
         let _ = fs::remove_dir_all(&work);
     })?;
@@ -2471,6 +2457,17 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
     cleanup_orphan_staging(base, &tmp, ".compile-app.");
     let _ = fs::remove_dir_all(&tmp);
     create_staging_dir(&tmp)?;
+    // A partial tree goes now rather than waiting out the orphan sweep's age
+    // limit; `publish_cache_dir` owns the staging directory from here on.
+    extract_app_files(view, &tmp).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&tmp);
+    })?;
+    publish_cache_dir(&tmp, &app_dir, |dir| app_cache_matches_payload(view, dir))?;
+    Ok(app_dir)
+}
+
+/// Write every payload file into the staging directory `tmp`.
+fn extract_app_files(view: &PayloadView<'_>, tmp: &Path) -> Result<()> {
     let mut split = ExtractSplit::default();
     // One decompressor for the whole payload, and one pass per DIRECTORY rather
     // than per file. Both exist because this loop runs per file and a payload is
@@ -2500,7 +2497,7 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
         if let Some(parent) = dest.parent()
             && !dirs.contains(parent)
         {
-            create_staging_subdirs(&tmp, parent)?;
+            create_staging_subdirs(tmp, parent)?;
             dirs.insert(parent.to_path_buf());
         }
         let mark = split.lap(mark, |s| &mut s.mkdir);
@@ -2517,8 +2514,7 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
         }
     }
     split.report(view.app_files.len());
-    publish_cache_dir(&tmp, &app_dir, |dir| app_cache_matches_payload(view, dir))?;
-    Ok(app_dir)
+    Ok(())
 }
 
 /// Where the extraction loop's wall clock goes, split three ways.
@@ -2592,11 +2588,6 @@ fn print_embedded_node_license(view: &PayloadView<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Write one extracted file. Durability is `seal_cache_dir`'s job, not this one's:
-/// fsyncing here forces a flush while the write is still hot, which serializes
-/// every file against the disk and dominates a many-file payload — a `--include`d
-/// directory or a native island. The end-of-tree sweep gives the same guarantee
-/// for practically nothing, because the OS has already flushed by then.
 /// A payload file's real bytes, decompressing only if the payload stores them
 /// compressed. Borrowed on the uncompressed path, so an older payload stays
 /// zero-copy out of the mapped image.
@@ -2641,6 +2632,11 @@ fn new_app_decoder(manifest: &Manifest) -> Result<Option<zstd::bulk::Decompresso
         .context("creating the payload decompressor")
 }
 
+/// Write one extracted file. Durability is `seal_cache_dir`'s job, not this one's:
+/// fsyncing here forces a flush while the write is still hot, which serializes
+/// every file against the disk and dominates a many-file payload — a `--include`d
+/// directory or a native island. The end-of-tree sweep gives the same guarantee
+/// for practically nothing, because the OS has already flushed by then.
 fn write_file(dest: &Path, data: &[u8]) -> Result<()> {
     let mut file =
         create_private_file(dest).with_context(|| format!("creating {}", dest.display()))?;
@@ -2667,7 +2663,11 @@ fn create_staging_dir(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let result = fs::create_dir(path);
     result.with_context(|| format!("creating {}", path.display()))?;
-    normalize_staging_dir(path)
+    // Nothing is in it yet, and a directory that could not be made private is
+    // of no use to the caller.
+    normalize_staging_dir(path).inspect_err(|_| {
+        let _ = fs::remove_dir(path);
+    })
 }
 
 fn create_staging_subdirs(root: &Path, path: &Path) -> Result<()> {
@@ -2765,9 +2765,9 @@ fn seal_cache_dir(tmp: &Path) -> Result<()> {
 /// Across eight threads the same barriers cost **161 ms**, because the device
 /// coalesces flushes that are in flight together.
 ///
-/// Concurrency does not weaken anything: these are read-only handles on distinct
-/// paths, and every barrier still completes before the function returns. Dropping
-/// to plain `fsync(2)` would be faster still (46 ms) but would make macOS
+/// Concurrency does not weaken anything: each thread opens its own handle on a
+/// distinct path, and every barrier still completes before the function returns.
+/// Dropping to plain `fsync(2)` would be faster still (46 ms) but would make macOS
 /// durability weaker than the code asks for, which is not a trade to make silently
 /// in a cache that a power loss should not be able to tear.
 ///
@@ -2872,7 +2872,9 @@ fn publish_cache_dir<F>(tmp: &Path, dest: &Path, is_complete: F) -> Result<()>
 where
     F: Fn(&Path) -> bool,
 {
-    seal_cache_dir(tmp)?;
+    seal_cache_dir(tmp).inspect_err(|_| {
+        let _ = fs::remove_dir_all(tmp);
+    })?;
     phase("   publish: sealed");
     if !is_complete(tmp) {
         let _ = fs::remove_dir_all(tmp);
@@ -2892,7 +2894,9 @@ where
         .inspect_err(|_| {
             let _ = fs::remove_dir_all(tmp);
         })?;
-    let _publication_lock = lock_cache_publication(dest)?;
+    let _publication_lock = lock_cache_publication(dest).inspect_err(|_| {
+        let _ = fs::remove_dir_all(tmp);
+    })?;
 
     // Validate a concurrent winner before discarding the staged replacement.
     if is_complete(dest) {
@@ -2905,7 +2909,10 @@ where
     };
     match fs::rename(tmp, dest) {
         Ok(()) => {}
-        Err(first) => match move_incomplete_cache_path_aside_locked(dest, &is_complete)? {
+        Err(first) => match move_incomplete_cache_path_aside_locked(dest, &is_complete)
+            .inspect_err(|_| {
+                let _ = fs::remove_dir_all(tmp);
+            })? {
             ExistingCachePath::Complete => {
                 let _ = fs::remove_dir_all(tmp);
                 return Ok(());
@@ -2916,7 +2923,10 @@ where
                     let _ = fs::remove_dir_all(tmp);
                     return Ok(());
                 }
-                Err(second) => return Err(install(second).context(first)),
+                Err(second) => {
+                    let _ = fs::remove_dir_all(tmp);
+                    return Err(install(second).context(first));
+                }
             },
             ExistingCachePath::Moved(stale) => match fs::rename(tmp, dest) {
                 Ok(()) => {
@@ -4123,10 +4133,9 @@ mod tests {
             internal_mode(&probe, Some("probe")),
             Some(InternalMode::Probe)
         );
-        assert_eq!(
-            internal_mode(&pdeath, Some("pdeath-watch")),
-            Some(InternalMode::PdeathWatch)
-        );
+        // Nothing re-invokes an exec'ing launcher as a watcher, so that mode's
+        // argument shape is ordinary application argv here.
+        assert_eq!(internal_mode(&pdeath, Some("pdeath-watch")), None);
         assert_eq!(internal_mode(&probe, Some("pdeath-watch")), None);
         assert_eq!(internal_mode(&pdeath, Some("probe")), None);
 
@@ -4556,6 +4565,30 @@ mod tests {
         );
         assert!(!app_dir.join("package.json").exists());
         assert!(app_cache_matches_payload(&view, &app_dir));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ensure_app_removes_its_staging_dir_when_extraction_fails() {
+        let base = fresh_cache_dir("app-extract-fails");
+        let mut view = test_view();
+        // Last, so the files ahead of it are already written into the stage.
+        view.app_files
+            .push(AppFile::plain("../outside.js", &b"escape"[..]));
+
+        let error = ensure_app(&view, &base).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            r#"compiled payload has an unsafe file name: "../outside.js""#
+        );
+        let stages: Vec<_> = fs::read_dir(&base)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".compile-app."))
+            .collect();
+        assert!(stages.is_empty(), "staging left behind: {stages:?}");
+        assert!(!app_cache_dir(&base, &view.manifest).exists());
         let _ = fs::remove_dir_all(&base);
     }
 

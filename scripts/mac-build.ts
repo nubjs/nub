@@ -222,6 +222,13 @@ async function main() {
   // which also leaves the previous artifact intact if the download itself fails.
   const unpacked = mkdtempSync(join(outDir, ".download-"));
   sh("gh", ["run", "download", String(runId), "-n", name, "-D", unpacked], { cwd: root });
+  // mac-build.yml always records SHA256SUMS, so an artifact without one is incomplete. Checked
+  // here, before the move: a SHA256SUMS left in outDir by an earlier build must not stand in.
+  if (!existsSync(join(unpacked, "SHA256SUMS"))) {
+    rmSync(unpacked, { recursive: true });
+    process.stderr.write(`mac-build: the ${name} artifact carries no SHA256SUMS — refusing to stage an unverified binary.\n`);
+    process.exit(1);
+  }
   for (const entry of readdirSync(unpacked)) {
     renameSync(join(unpacked, entry), join(outDir, entry));
   }
@@ -235,15 +242,12 @@ async function main() {
   // The runner recorded checksums; verifying them here is what makes this a TRANSFER rather
   // than a leap of faith — it catches a truncated download or a mismatched artifact before the
   // binary is staged and run.
-  const sums = join(outDir, "SHA256SUMS");
-  if (existsSync(sums)) {
-    try {
-      sh("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: outDir, stdio: "pipe" });
-      process.stdout.write("mac-build: checksums match the runner\n");
-    } catch (e: any) {
-      process.stderr.write(`mac-build: CHECKSUM MISMATCH — refusing to stage.\n${e?.stdout || ""}\n`);
-      process.exit(1);
-    }
+  try {
+    sh("shasum", ["-a", "256", "-c", "SHA256SUMS"], { cwd: outDir, stdio: "pipe" });
+    process.stdout.write("mac-build: checksums match the runner\n");
+  } catch (e: any) {
+    process.stderr.write(`mac-build: CHECKSUM MISMATCH — refusing to stage.\n${e?.stdout || ""}\n`);
+    process.exit(1);
   }
 
   const fileOut = sh("file", [bin]);
@@ -263,6 +267,10 @@ async function main() {
   if (a.stage && existsSync(addon)) {
     const staged = join(root, "runtime", "addons");
     mkdirSync(staged, { recursive: true });
+    // Unlink first, as the Makefile's addon targets do: copyFileSync writes into the existing
+    // inode, and macOS keys its cached code-signing validation to that inode, so a process
+    // loading the overwritten dylib is SIGKILLed.
+    rmSync(join(staged, "nub-native.node"), { force: true });
     copyFileSync(addon, join(staged, "nub-native.node"));
     process.stdout.write(`mac-build: staged addon → ${join(staged, "nub-native.node")}\n`);
   }

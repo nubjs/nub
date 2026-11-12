@@ -74,7 +74,7 @@ pub struct PlatformFlags {
 }
 
 impl PlatformFlags {
-    /// Whether any axis was named on the command line.
+    /// Whether no axis was named on the command line.
     pub fn is_empty(&self) -> bool {
         self.os.is_empty() && self.cpu.is_empty() && self.libc.is_empty()
     }
@@ -144,7 +144,7 @@ impl PlatformFlags {
             }
         }
         let set = self.override_set();
-        aube_util::update_engine_context(move |c| c.cli_supported_architectures = set.clone());
+        aube_util::update_engine_context(move |c| c.cli_supported_architectures = set);
     }
 }
 

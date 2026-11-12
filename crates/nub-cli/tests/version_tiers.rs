@@ -21,11 +21,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -890,7 +886,7 @@ fn run_nub_script(
 }
 
 /// The resolveSync hook-composition fix (nodejs/node#59666). On the broken band
-/// (22.15.0–24.11.0) nub's sync `module.registerHooks` fast tier crashes with
+/// (22.15.0–24.11.1 and 25.0–25.1) nub's sync `module.registerHooks` fast tier crashes with
 /// ERR_METHOD_NOT_IMPLEMENTED when it composes with a foreign async loader
 /// (tsx/ts-node), because the async loader's `resolveSync` is a throwing stub
 /// there. nub avoids it by registering its own hooks via the async tier for that

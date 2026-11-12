@@ -43,8 +43,9 @@ pub enum ScriptSelection {
 ///
 /// Note: pnpm uses JS `RegExp`; nub uses the Rust `regex` crate. The two share
 /// the common subset script-name selectors use (`^`, `$`, `:`, char classes,
-/// alternation), so `/^build:/`, `/test|lint/`, etc. behave identically; exotic
-/// JS-only constructs (lookbehind) are not supported by either in this context.
+/// alternation), so `/^build:/`, `/test|lint/`, etc. behave identically. A
+/// JS-only construct (lookaround, a backreference) does not compile here, and
+/// the selector then falls back to a plain — and thus missing — script name.
 pub fn select_scripts(manifest: &serde_json::Value, selector: &str) -> ScriptSelection {
     let scripts = match manifest.get("scripts").and_then(|s| s.as_object()) {
         Some(map) => map,
@@ -310,7 +311,7 @@ pub fn bin_dirs(project_root: &Path, workspace_root: Option<&Path>) -> Vec<PathB
     let mut dir = project_root.to_path_buf();
     for _ in 0..16 {
         dirs.push(dir.join("node_modules").join(".bin"));
-        if workspace_root.is_some() && Some(dir.as_path()) == workspace_root {
+        if Some(dir.as_path()) == workspace_root {
             break;
         }
         if !dir.pop() {
@@ -326,14 +327,14 @@ pub fn bin_path(project_root: &Path, workspace_root: Option<&Path>) -> String {
         .iter()
         .map(|dir| dir.to_string_lossy().to_string())
         .collect();
-
-    let existing = env::var("PATH").unwrap_or_default();
-    if dirs.is_empty() {
-        existing
-    } else {
-        dirs.push(existing);
-        dirs.join(crate::PATH_LIST_SEPARATOR)
-    }
+    // Lossy, not `env::var`: one entry that is not UTF-8 must not cost the
+    // script every other directory on PATH.
+    dirs.push(
+        env::var_os("PATH")
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    );
+    dirs.join(crate::PATH_LIST_SEPARATOR)
 }
 
 /// Find a binary in node_modules/.bin by name, walking up from `cwd`.
@@ -369,6 +370,7 @@ pub fn find_bin(name: &str, cwd: &Path) -> Option<PathBuf> {
 /// ([`crate::workspace::npmrc::project_npmrc_paths`]: the workspace root's, and
 /// per incumbent the invoking member's on top), then the user `~/.npmrc` —
 /// returning the most specific file's value with surrounding quotes stripped.
+/// Within one file the last assignment of a repeated key wins, as in npm.
 /// `script-shell`, `ignore-scripts` and `node-mirror:release` read through it.
 pub(crate) fn npmrc_value(project_root: &Path, key: &str) -> Option<String> {
     let mut candidates = crate::workspace::npmrc::project_npmrc_paths(project_root);
@@ -377,16 +379,12 @@ pub(crate) fn npmrc_value(project_root: &Path, key: &str) -> Option<String> {
 
     for path in &candidates {
         if let Ok(content) = fs::read_to_string(path) {
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if let Some((k, value)) = trimmed.split_once('=')
-                    && k.trim() == key
-                {
-                    let value = value.trim().trim_matches('"').trim_matches('\'');
-                    if !value.is_empty() {
-                        return Some(value.to_string());
-                    }
-                }
+            let value = content.lines().rev().find_map(|line| {
+                let (k, value) = line.trim().split_once('=')?;
+                (k.trim() == key).then(|| value.trim().trim_matches('"').trim_matches('\''))
+            });
+            if let Some(value) = value.filter(|value| !value.is_empty()) {
+                return Some(value.to_string());
             }
         }
     }
@@ -537,11 +535,12 @@ mod tests {
         fs::create_dir_all(&tmp).unwrap();
         fs::write(
             tmp.join(".npmrc"),
-            "registry=https://example.test/\nscript-shell = \"/bin/dash\"\n",
+            "registry=https://first.test/\nregistry=https://example.test/\nscript-shell = \"/bin/dash\"\n",
         )
         .unwrap();
 
-        // Arbitrary keys round-trip, with surrounding quotes/whitespace stripped.
+        // Arbitrary keys round-trip, with surrounding quotes/whitespace stripped,
+        // and the last assignment of a repeated key wins.
         assert_eq!(
             npmrc_value(&tmp, "registry").as_deref(),
             Some("https://example.test/")

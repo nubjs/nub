@@ -137,7 +137,7 @@ pub(crate) fn starts_with_bom(path: &Path) -> bool {
 /// JSON-family formats in its own workspace, shares this implementation and its
 /// tests rather than carrying a copy that could drift.
 pub(crate) fn check_nesting_depth(text: &str) -> Result<(), String> {
-    nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH)
+    nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH, nub_json_guard::Dialect::Jsonc)
 }
 
 #[cfg(test)]

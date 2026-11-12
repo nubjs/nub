@@ -1255,12 +1255,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
-
-[[package]]
 name = "dragonbox_ecma"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2719,7 +2713,6 @@ dependencies = [
  "console",
  "demand",
  "dirs-next",
- "dotenvy",
  "glob-match",
  "hex",
  "jsonc-parser",
@@ -2778,7 +2771,6 @@ dependencies = [
  "camino",
  "criterion",
  "dirs-next",
- "dotenvy",
  "flate2",
  "getrandom 0.3.4",
  "glob-match",

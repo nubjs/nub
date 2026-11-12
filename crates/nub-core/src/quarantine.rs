@@ -31,10 +31,11 @@
 
 /// Best-effort clear of `com.apple.quarantine` on one path.
 ///
-/// Returns whether the attribute was actually removed, which only the
-/// callers that want to report a failure need; the common outcome is
-/// `false` because nothing was there. Never fails: the worst case is an
-/// artifact Gatekeeper may refuse, which is the status quo without this.
+/// Returns whether the attribute was actually removed; the common outcome is
+/// `false` because nothing was there, and a path that vanished is `false`
+/// too. Any other removal failure is returned for the caller to report, never
+/// to abort on: the worst case is an artifact Gatekeeper may refuse, which is
+/// the status quo without this.
 #[cfg(target_os = "macos")]
 pub fn clear(path: &std::path::Path) -> Result<bool, std::io::Error> {
     use std::ffi::CString;

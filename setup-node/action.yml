@@ -15,7 +15,7 @@ inputs:
     description: "Provision this Node version and front its bin dir on PATH for the rest of the job, as actions/setup-node does. Any range npm understands, or an nvm alias (lts/*, lts/<codename>, node). Default: the project's own pin (package.json#devEngines.runtime, .node-version, .nvmrc, .tool-versions, package.json#engines.node); the runner's Node stays when it satisfies the pin or the project has none. nub itself still runs the project's pin at its own invocation; the action warns if the two differ."
     required: false
   node-version-file:
-    description: "Read a Node version from this file (.node-version, .nvmrc, package.json), provision it, and front it on PATH. An explicit alternative to node-version; the file must exist."
+    description: "Read a Node version from this file (.node-version, .nvmrc, .tool-versions, package.json), provision it, and front it on PATH. An explicit alternative to node-version; the file must exist."
     required: false
   cache:
     description: "Cache nub's global store and provisioned Node toolchains across runs. A boolean (true/false); for setup-node drop-in compatibility a PM name (npm/yarn/pnpm/bun) is also accepted and treated as truthy. Leave UNSET to auto-enable when a lockfile or a package.json packageManager/devEngines field is present (mirrors setup-node). Set false to disable."
@@ -481,8 +481,21 @@ runs:
           fi
           case "$NODE_VERSION_FILE" in
             # devEngines.runtime.version first (nub's primary signal), then engines.node.
-            *.json) want="$(node -p "try{const p=require('./'+process.argv[1]);const r=p.devEngines&&p.devEngines.runtime;(r&&r.version)||(p.engines&&p.engines.node)||''}catch(e){''}" "$NODE_VERSION_FILE" 2>/dev/null || true)" ;;
-            *)      want="$(head -n1 "$NODE_VERSION_FILE" | tr -d 'v[:space:]')" ;;
+            *.json) want="$(node -p "try{const p=require(require('path').resolve(process.argv[1]));const r=p.devEngines&&p.devEngines.runtime;(r&&r.version)||(p.engines&&p.engines.node)||''}catch(e){''}" "$NODE_VERSION_FILE" 2>/dev/null || true)" ;;
+            # asdf/mise: `<tool> <version...>` lines, `#` comments. The first
+            # nodejs (asdf) or node (mise) line's first version, as Nub's own pin walk reads it.
+            *.tool-versions)
+              want="$(LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { sub(/#.*/, ""); gsub(/\r/, "") } $1 == "nodejs" || $1 == "node" { v = $2; sub(/^v/, "", v); print v; exit }' "$NODE_VERSION_FILE")"
+              if [ -z "$want" ]; then
+                echo "::error::node-version-file '${NODE_VERSION_FILE}' has no nodejs or node line with a version."
+                exit 1
+              fi ;;
+            # LC_ALL=C on both awk calls so the byte-order mark matches as three bytes
+            # under every awk.
+            # .nvmrc and .node-version, read as nvm reads them: `#` starts a comment
+            # anywhere, and the version is the first line with anything left on it.
+            # Only a leading `v` goes, so a range such as `>=20 <23` keeps its space.
+            *)      want="$(LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "") } $0 != "" { sub(/^v/, ""); print; exit }' "$NODE_VERSION_FILE")" ;;
           esac
         fi
         # nvm-style aliases, as setup-node reads them: lts/*, lts/<codename>, node,

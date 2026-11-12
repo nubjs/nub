@@ -1,16 +1,15 @@
 # nub-phantom — an INTERNAL/eval tool, not part of the shipped `nub` binary.
 #
 # It is its OWN single-member Cargo workspace (like crates/nub-native), and is
-# `exclude`d from the main workspace, for ONE reason: it depends on the full oxc
-# parser (`oxc` with `features = ["full"]`). Baking that into the main workspace
-# would pull oxc into the shipped `nub` CLI binary's build graph and every default
-# `cargo build`/CI leg — a large compile the CLI never needs. Isolating it here
-# keeps the `nub` binary lean and the main workspace's build unaffected; the tool
-# is built explicitly on demand: `cargo build --manifest-path
-# crates/nub-phantom/Cargo.toml --release`.
+# `exclude`d from the main workspace, for ONE reason: it depends on the registry
+# fetch stack (reqwest/tar/flate2) that the shipped `nub` CLI never needs, so
+# isolating it keeps that compile out of the main workspace's build graph and
+# every default `cargo build`/CI leg. The tool is built explicitly on demand:
+# `cargo build --manifest-path crates/nub-phantom/Cargo.toml --release`.
 #
-# The oxc pin is byte-identical to the main workspace / nub-native pin (=0.140.0)
-# so the parse semantics match nub's own transpile/detect pipeline exactly.
+# Its parser comes through nub-phantom-scan → nub-phantom-core, which pins the
+# same oxc parser crates as the main workspace, so the parse semantics match
+# nub's own transpile/detect pipeline exactly.
 [workspace]
 members = ["."]
 resolver = "3"

@@ -13,7 +13,7 @@
 //! - **Never false-warn.** Every uncertain case — yarn-PnP, an unrecognized
 //!   layout, a spec that isn't a semver range, a prerelease install, no manifest
 //!   — degrades to a SILENT skip. A missed warning is cheap; a wrong one erodes
-//!   trust (the maintainer's explicit concern).
+//!   trust.
 //! - **Fire at most once per user command.** A process latch stops nested
 //!   in-process entrypoints (`exec` → bin launch → file runner) from re-checking,
 //!   and the `npm_lifecycle_event` re-entry guard stops the inner `node`s a
@@ -22,8 +22,8 @@
 //! Policy lives in the neutral `.npmrc` key `verify-deps-before-run` (with the
 //! `NUB_VERIFY_DEPS` env override); nub's default is `warn`. That is a
 //! deliberate divergence from the vendored engine's `install` default, wired
-//! through nub's OWN resolution so standalone aube's default is untouched
-//! (fork-discipline). Under a pnpm-**11+** incumbent the key lives SOLELY in
+//! through nub's OWN resolution so the engine's default is untouched. Under a
+//! pnpm-**11+** incumbent the key lives SOLELY in
 //! `pnpm-workspace.yaml` — v11 dropped `.npmrc` support for it entirely — so
 //! `resolve_policy` reads whichever home the detected incumbent major actually
 //! uses (see its doc).
@@ -451,6 +451,18 @@ fn installed_tree_reason(project: &Project) -> Option<String> {
     };
     for (name, spec) in &deps {
         let Some(installed) = resolved(name) else {
+            // An `optionalDependencies` entry overrides the same name in
+            // `dependencies` (npm's package.json contract), and an optional
+            // dependency that failed or was platform-skipped is a legitimate
+            // install outcome no reinstall changes.
+            if project
+                .manifest
+                .get("optionalDependencies")
+                .and_then(|o| o.get(name))
+                .is_some()
+            {
+                continue;
+            }
             return Some(format!("`{name}` is not installed"));
         };
         if let Some(reason) = version_mismatch(name, spec, &installed)
@@ -786,6 +798,41 @@ mod tests {
             installed_tree_reason(&project_at(dir.path(), pinned)).as_deref(),
             None,
             "the override pins typescript to the installed version, so `nub install` could never clear this warning"
+        );
+    }
+
+    /// npm lets `optionalDependencies` override the same name in `dependencies`,
+    /// so a dependency listed in both is optional, and its absence (a
+    /// platform-gated package like `fsevents` on Linux) is not staleness. A plain
+    /// production dependency that is absent still is.
+    #[test]
+    fn an_absent_dependency_also_listed_as_optional_is_not_reported_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("node_modules").join("present");
+        std::fs::create_dir_all(&present).unwrap();
+        std::fs::write(
+            present.join("package.json"),
+            r#"{"name":"present","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        let both = serde_json::json!({
+            "dependencies": { "present": "^1.0.0", "fsevents": "^2.3.0" },
+            "optionalDependencies": { "fsevents": "^2.3.0" }
+        });
+        assert_eq!(
+            installed_tree_reason(&project_at(dir.path(), both)),
+            None,
+            "an optional dependency that was not installed is not a stale tree"
+        );
+
+        let required = serde_json::json!({
+            "dependencies": { "present": "^1.0.0", "fsevents": "^2.3.0" }
+        });
+        assert_eq!(
+            installed_tree_reason(&project_at(dir.path(), required)).as_deref(),
+            Some("`fsevents` is not installed"),
+            "the same absence in a required dependency is still reported"
         );
     }
 

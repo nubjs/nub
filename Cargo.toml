@@ -127,8 +127,8 @@ jsonc-parser = { version = "0.32.4", features = ["serde", "cst"] }
 # version oxc itself ships on. The `napi8` feature pins the NAPI-version FLOOR to
 # 8 (node_api_version 8 — available since Node 12.22/14.12/15.0, comfortably below
 # the 18.19 floor) so any accidental higher-API use fails at compile-time rather
-# than at load on 18.19. serde-json preserves the bridge the data parsers rely on.
-napi = { version = "3", features = ["serde-json", "napi8"] }
+# than at load on 18.19.
+napi = { version = "3", features = ["napi8"] }
 napi-derive = "3"
 # oxc transpiler — pinned EXACT and lockstepped ACROSS EVERY oxc consumer in the
 # repo: this pin, crates/nub-native's workspace pin, crates/nub-phantom-core's

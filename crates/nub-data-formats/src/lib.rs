@@ -16,6 +16,7 @@ mod value;
 use std::collections::{HashMap, HashSet};
 
 use jsonc_parser::ParseOptions;
+use nub_json_guard::Dialect;
 
 pub use value::{MAX_SAFE_INTEGER, Value};
 
@@ -51,8 +52,12 @@ pub fn jsonc_parse_options() -> ParseOptions {
 
 /// Bound `source`'s nesting, reporting a violation as `format`'s parse error so a
 /// hostile document reads like any other malformed one.
-fn check_depth(source: &str, format: &str) -> Result<(), String> {
-    nub_json_guard::check_nesting_depth(source, MAX_NESTING_DEPTH)
+fn check_depth(source: &str, dialect: Dialect) -> Result<(), String> {
+    let format = match dialect {
+        Dialect::Jsonc => "JSONC",
+        Dialect::Json5 => "JSON5",
+    };
+    nub_json_guard::check_nesting_depth(source, MAX_NESTING_DEPTH, dialect)
         .map_err(|e| format!("{format} parse error: {e}"))
 }
 
@@ -89,7 +94,7 @@ pub fn parse_toml(source: &str) -> Result<Value, String> {
 
 /// Parse JSON5 source.
 pub fn parse_json5(source: &str) -> Result<Value, String> {
-    check_depth(source, "JSON5")?;
+    check_depth(source, Dialect::Json5)?;
     json5::from_str(source).map_err(|e| format!("JSON5 parse error: {e}"))
 }
 
@@ -99,7 +104,7 @@ fn jsonc_error(message: impl std::fmt::Display) -> String {
 
 /// Parse JSONC (JSON with comments) source.
 pub fn parse_jsonc(source: &str) -> Result<Value, String> {
-    check_depth(source, "JSONC")?;
+    check_depth(source, Dialect::Jsonc)?;
     // Deserializing into `Option<T>` maps both an empty document and a literal
     // `null` to `None`, and the two must not share a fate: the data loader turns
     // a parsed null into an undefined default export, matching its JavaScript
@@ -812,6 +817,18 @@ mod tests {
         let deep = format!("{}{}", "[".repeat(600), "]".repeat(600));
         assert!(parse_json5(&deep).unwrap_err().contains("JSON5"));
         assert!(parse_jsonc(&deep).unwrap_err().contains("JSONC"));
+        // The two parsers end a `//` comment at different bytes, and each bound
+        // follows its own. JSON5 ends this one at the `\r`, so the nesting after
+        // it is code. JSONC keeps it open to the `\n`, so the quote after the
+        // `\r` opens no string and the nesting on the next line is code.
+        let over = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+        for refused in [
+            parse_json5(&format!("// c\r{over}")),
+            parse_jsonc(&format!("// c\r\"\n{over}")),
+        ] {
+            let error = refused.unwrap_err();
+            assert!(error.contains("deeper than the 128-level limit"), "{error}");
+        }
 
         let nested = format!(
             "a:\n{}",

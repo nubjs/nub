@@ -132,6 +132,12 @@ pub fn entry_index(args: &[String]) -> Option<usize> {
     }
 }
 
+/// The leading arguments Node reads as its own options. Everything from the entry,
+/// a `--` or a `-` on belongs to the program.
+pub fn leading_options(args: &[String]) -> &[String] {
+    &args[..options_end(args)]
+}
+
 /// `args` with the test runner and watch mode spelled the way Node's filters know
 /// them, wherever Node reads them as its own options.
 ///
@@ -397,6 +403,31 @@ mod tests {
         ];
         for (input, want) in cases {
             assert_eq!(entry_index(&argv(input)), want, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn leading_options_stop_where_the_program_begins() {
+        let cases = [
+            (
+                &[
+                    "--permission",
+                    "--allow-fs-read",
+                    "/a",
+                    "app.js",
+                    "--permission",
+                ][..],
+                &["--permission", "--allow-fs-read", "/a"][..],
+            ),
+            (&["app.js", "--permission"][..], &[][..]),
+            (&["--test", "--", "--permission"][..], &["--test"][..]),
+            (
+                &["-e", "1", "--permission"][..],
+                &["-e", "1", "--permission"][..],
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(leading_options(&argv(input)), argv(want), "{input:?}");
         }
     }
 }

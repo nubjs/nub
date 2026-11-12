@@ -37,9 +37,8 @@ fn string_map(tag: usize) -> BTreeMap<String, String> {
     BTreeMap::from([("KEY".to_string(), format!("value-{tag}"))])
 }
 
-/// Only the two values a `nub.jsonc` may carry — `Install`/`Prompt` exist for
-/// the pnpm-mirroring surfaces, not this one. Both differ from the explicit-
-/// empty form (`Enabled(false)`), which is what the falsy-precedence case needs.
+/// Alternates the two string modes. Both differ from the explicit-empty form
+/// (`Enabled(false)`), which is what the falsy-precedence case needs.
 fn verify_deps(tag: usize) -> VerifyDeps {
     if tag.is_multiple_of(2) {
         VerifyDeps::Warn

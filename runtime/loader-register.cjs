@@ -17,7 +17,7 @@ try {
   require("./loader-entry.mjs").arm({ esm: true, cjs: true });
 } catch (err) {
   // Node re-runs a `--require` preload in the hook worker that `module.register` spawns.
-  // On 22.15-24.11 a require(esm) with imports reaches that thread's own unimplemented
+  // On 22.15-24.11 and 25.0-25.1 a require(esm) with imports reaches that thread's own unimplemented
   // `resolveSync`. The thread only hosts hooks, so it has nothing to arm.
   if (err && err.code === "ERR_METHOD_NOT_IMPLEMENTED" &&
       !require("node:worker_threads").isMainThread) return;

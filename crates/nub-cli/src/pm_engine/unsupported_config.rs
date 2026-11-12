@@ -58,19 +58,18 @@ fn read_config_text(path: &Path) -> Option<Arc<String>> {
 }
 
 /// A config-derived override of the dependency selection axis
-/// (`--prod`/`--dev`/`--no-optional`). `None` per field means "not pinned by
+/// (`--prod`/`--no-optional`). `false` per field means "not pinned by
 /// config — leave the CLI/default behavior". Composed onto the install args
 /// only when the active PM owns the config that set it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DepSelectionConfig {
     pub(crate) prod: bool,
-    pub(crate) dev: bool,
     pub(crate) no_optional: bool,
 }
 
 impl DepSelectionConfig {
     fn is_empty(self) -> bool {
-        !self.prod && !self.dev && !self.no_optional
+        !self.prod && !self.no_optional
     }
 }
 
@@ -100,11 +99,17 @@ pub(crate) fn dep_selection_from_config(role: Role, root: &Path) -> Option<DepSe
 /// npm `.npmrc` `omit` / `include` → dep-selection axis. Reads the project
 /// `.npmrc` (walk-up to the root) then the user `~/.npmrc`, project winning.
 fn npm_omit_include(root: &Path) -> DepSelectionConfig {
+    npm_omit_include_in(&npmrc_paths(root))
+}
+
+/// [`npm_omit_include`] over an explicit low-to-high precedence path list, so
+/// tests can name the user `.npmrc` instead of reading the real one.
+fn npm_omit_include_in(paths: &[PathBuf]) -> DepSelectionConfig {
     // Collect `omit` / `include` from user then project so project wins.
     let mut omit: Vec<String> = Vec::new();
     let mut include: Vec<String> = Vec::new();
-    for path in npmrc_paths(root) {
-        let Some(content) = read_config_text(&path) else {
+    for path in paths {
+        let Some(content) = read_config_text(path) else {
             continue;
         };
         if let Some(v) = npmrc_scalar(&content, "omit") {
@@ -118,7 +123,6 @@ fn npm_omit_include(root: &Path) -> DepSelectionConfig {
     let omits = |ty: &str| omit.iter().any(|o| o == ty) && !include.iter().any(|i| i == ty);
     DepSelectionConfig {
         prod: omits("dev"),
-        dev: false,
         no_optional: omits("optional"),
     }
 }
@@ -128,7 +132,6 @@ fn bunfig_production(root: &Path) -> DepSelectionConfig {
     let prod = bunfig_install_bool(root, "production").unwrap_or(false);
     DepSelectionConfig {
         prod,
-        dev: false,
         no_optional: false,
     }
 }
@@ -274,13 +277,7 @@ pub(crate) enum ScanResult {
 /// the role-keyed scan here). `checksumBehavior`/`enableHardenedMode` are NOT here: aube verifies
 /// every tarball's SHA-512 by default (`verifyStoreIntegrity=true`), satisfying
 /// the `throw` posture.
-pub(crate) fn scan_unsupported_config(
-    role: Role,
-    major: Option<u64>,
-    minor: Option<u64>,
-    root: &Path,
-) -> ScanResult {
-    let _ = (major, minor);
+pub(crate) fn scan_unsupported_config(role: Role, root: &Path) -> ScanResult {
     // FATAL — first hit aborts.
     if let Some(fatal) = scan_fatal(role, root) {
         return ScanResult::Fatal(anyhow::anyhow!(
@@ -471,8 +468,9 @@ fn npmrc_project_bool_set(root: &Path, key: &str) -> bool {
 }
 
 /// Parse a single scalar key from `.npmrc` content (ini-style `key=value`,
-/// `#`/`;` comments). Returns the LAST occurrence's value. Key match is
-/// kebab/camel insensitive on the exact spelling passed.
+/// `#`/`;` comments). Returns the LAST occurrence's value. Key match is ASCII
+/// case-insensitive; the kebab and camel spellings of a key do not match each
+/// other.
 fn npmrc_scalar(content: &str, key: &str) -> Option<String> {
     let mut found = None;
     for line in content.lines() {
@@ -538,21 +536,12 @@ fn bunfig_install_bool(root: &Path, key: &str) -> Option<bool> {
 }
 
 /// bunfig files in low-to-high precedence: global `~/.bunfig.toml` then the
-/// project `bunfig.toml` (project wins). Mirrors [`super::bun_config`]'s path
-/// resolution.
+/// project `bunfig.toml` (project wins). The global path is
+/// [`super::bun_config`]'s, so both readers see the same file.
 fn bunfig_paths(root: &Path) -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    let global = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        })
-        .map(|dir| dir.join(".bunfig.toml"));
-    if let Some(g) = global {
-        paths.push(g);
+    if let Some(global) = super::bun_config::global_bunfig_path() {
+        paths.push(global);
     }
     paths.push(root.join("bunfig.toml"));
     paths
@@ -659,19 +648,27 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
-    /// Serializes the two tests that mutate the process-global `$HOME`. This lib
+    /// Serializes the tests here that mutate the process-global `$HOME`. This lib
     /// test binary runs MULTI-THREADED (nothing pins `--test-threads=1`), so the
-    /// set→use→restore window must be held under a lock or it races sibling tests
-    /// (and each other) — every `scan_unsupported_config` call reads
+    /// set→use→restore window must be held under a lock or it races sibling
+    /// tests — every `scan_unsupported_config` call reads
     /// `dirs_next::home_dir()`. Poison-recovering, matching the crate's other
     /// process-global seams (`RELEASE_ENV_LOCK`, `CWD_LOCK`).
     static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`npm_omit_include`]'s read for `project`, with an empty temp dir as the
+    /// user home: a developer's own `~/.npmrc` (`include=dev`, say) must not
+    /// decide these assertions. No env mutation, so no lock.
+    fn omit_include_with_empty_home(project: &Path) -> DepSelectionConfig {
+        let home = tmp();
+        npm_omit_include_in(&[home.path().join(".npmrc"), project.join(".npmrc")])
+    }
 
     #[test]
     fn npm_omit_dev_selects_prod() {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "omit=dev\n").unwrap();
-        let cfg = npm_omit_include(d.path());
+        let cfg = omit_include_with_empty_home(d.path());
         assert!(cfg.prod, "omit=dev must select prod-only");
         assert!(!cfg.no_optional);
     }
@@ -680,7 +677,7 @@ mod tests {
     fn npm_omit_optional_skips_optional() {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "omit=optional\n").unwrap();
-        let cfg = npm_omit_include(d.path());
+        let cfg = omit_include_with_empty_home(d.path());
         assert!(cfg.no_optional);
         assert!(!cfg.prod);
     }
@@ -689,7 +686,7 @@ mod tests {
     fn npm_include_overrides_omit_of_same_type() {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "omit=dev\ninclude=dev\n").unwrap();
-        let cfg = npm_omit_include(d.path());
+        let cfg = omit_include_with_empty_home(d.path());
         assert!(!cfg.prod, "include=dev must cancel omit=dev");
     }
 
@@ -829,7 +826,7 @@ mod tests {
     fn scan_fatal_on_legacy_peer_deps() {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "legacy-peer-deps=true\n").unwrap();
-        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()) {
+        match scan_unsupported_config(Role::Npm, d.path()) {
             ScanResult::Fatal(e) => {
                 let msg = e.to_string();
                 assert!(msg.contains("legacy-peer-deps"), "msg: {msg}");
@@ -852,7 +849,7 @@ mod tests {
             .unwrap();
             assert!(
                 matches!(
-                    scan_unsupported_config(Role::Npm, None, None, d.path()),
+                    scan_unsupported_config(Role::Npm, d.path()),
                     ScanResult::Warn(_)
                 ),
                 "install-strategy={value} is layout and must not abort"
@@ -867,7 +864,7 @@ mod tests {
         let d = tmp();
         fs::write(d.path().join(".npmrc"), "legacy-peer-deps=true\n").unwrap();
         assert!(matches!(
-            scan_unsupported_config(Role::Npm, None, None, d.path()),
+            scan_unsupported_config(Role::Npm, d.path()),
             ScanResult::Fatal(_)
         ));
     }
@@ -883,7 +880,7 @@ mod tests {
             "supportedArchitectures:\n  os:\n    - linux\n",
         )
         .unwrap();
-        match scan_unsupported_config(Role::Yarn, None, None, d.path()) {
+        match scan_unsupported_config(Role::Yarn, d.path()) {
             ScanResult::Warn(_) => {}
             ScanResult::Fatal(e) => {
                 panic!("supportedArchitectures is honored and must not be fatal: {e}")
@@ -895,7 +892,7 @@ mod tests {
     fn scan_warn_on_hardened_mode_not_fatal() {
         let d = tmp();
         fs::write(d.path().join(".yarnrc.yml"), "enableHardenedMode: true\n").unwrap();
-        match scan_unsupported_config(Role::Yarn, None, None, d.path()) {
+        match scan_unsupported_config(Role::Yarn, d.path()) {
             ScanResult::Warn(w) => {
                 assert!(w.iter().any(|f| f.field == "enableHardenedMode"));
             }
@@ -912,7 +909,7 @@ mod tests {
             "registry=https://registry.npmjs.org/\nsave-exact=true\n",
         )
         .unwrap();
-        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()) {
+        match scan_unsupported_config(Role::Npm, d.path()) {
             ScanResult::Warn(w) => assert!(w.is_empty(), "supported config must not warn: {w:?}"),
             ScanResult::Fatal(e) => panic!("supported config tripped FATAL: {e}"),
         }
@@ -929,7 +926,7 @@ mod tests {
     #[test]
     fn global_npmrc_legacy_peer_deps_does_not_trip_fatal() {
         // Held for the whole set→use→restore window: the lib binary is
-        // multi-threaded, and HOME_LOCK serializes the two HOME-mutating tests.
+        // multi-threaded, and HOME_LOCK serializes the HOME-mutating tests.
         let _home_guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tmp();
         let project = tmp();
@@ -940,12 +937,12 @@ mod tests {
             std::env::set_var("HOME", home.path());
         }
 
-        let global_only = scan_unsupported_config(Role::Npm, Some(10), None, project.path());
+        let global_only = scan_unsupported_config(Role::Npm, project.path());
         let global_is_fatal = matches!(global_only, ScanResult::Fatal(_));
 
         // Now the SAME key in the PROJECT .npmrc — must be fatal.
         fs::write(project.path().join(".npmrc"), "legacy-peer-deps=true\n").unwrap();
-        let project_set = scan_unsupported_config(Role::Npm, Some(10), None, project.path());
+        let project_set = scan_unsupported_config(Role::Npm, project.path());
         let project_is_fatal = matches!(project_set, ScanResult::Fatal(_));
 
         // Restore $HOME before asserting so a panic can't leak it.
@@ -974,7 +971,7 @@ mod tests {
             r#"{"name":"x","pnpm":{"overrides":{"lodash":"4.17.21"}}}"#,
         )
         .unwrap();
-        match scan_unsupported_config(Role::Npm, Some(10), None, d.path()) {
+        match scan_unsupported_config(Role::Npm, d.path()) {
             ScanResult::Warn(w) => assert!(w.iter().any(|f| f.field == "pnpm.overrides")),
             ScanResult::Fatal(_) => panic!("pnpm.overrides is a WARN, not FATAL"),
         }

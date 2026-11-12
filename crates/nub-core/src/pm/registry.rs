@@ -554,13 +554,26 @@ fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
 /// A spec that already uses commas, or that is a single comparator (`^9`, `10`,
 /// `>=9`), is returned unchanged. This is a syntactic bridge only — it does not
 /// translate the `||` OR operator (unsupported by Cargo's `semver`).
+///
+/// node-semver also allows a space between an operator and its version
+/// (`>= 9 < 10`), so an operator-only token stays attached to the token after
+/// it rather than becoming a comparator of its own.
 pub(crate) fn normalize_range(spec: &str) -> String {
     let spec = spec.trim();
     // Single token, or the user already comma-separated → nothing to do.
     if spec.contains(',') || !spec.contains(char::is_whitespace) {
         return spec.to_string();
     }
-    spec.split_whitespace().collect::<Vec<_>>().join(", ")
+    let mut comparators: Vec<String> = Vec::new();
+    for token in spec.split_whitespace() {
+        match comparators.last_mut() {
+            Some(op) if op.chars().all(|c| matches!(c, '<' | '>' | '=' | '^' | '~')) => {
+                op.push_str(token);
+            }
+            _ => comparators.push(token.to_string()),
+        }
+    }
+    comparators.join(", ")
 }
 
 /// Reject a registry-declared version string before it becomes a STORE PATH
@@ -745,6 +758,12 @@ const CORGI_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 /// packument, so no registry the packument path handled regresses. A TRANSPORT
 /// failure (host unreachable) propagates instead, since the packument fetch
 /// would only re-run the same doomed connect (and take its own retries doing it).
+///
+/// The manifest must name `pkg` itself. `spec` is a project's pin text (or a
+/// `nub pm use` argument) spliced into a URL path, and the HTTP client resolves
+/// dot segments, so `pnpm@../npm/10.9.0` fetches npm's manifest. Without the
+/// check, that package installs into the store as pnpm 10.9.0, where every
+/// later exact `pnpm@10.9.0` pin on the machine takes it as a cache hit.
 pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
     let spec = spec.trim();
     let base = cfg.base.trim_end_matches('/');
@@ -755,12 +774,14 @@ pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Re
         match download::fetch_text_accept_auth(&url, None, cfg.auth.as_ref()) {
             Ok(body) => {
                 if let Ok(meta) = serde_json::from_str::<Value>(&body)
+                    && meta.get("name").and_then(Value::as_str) == Some(pkg)
                     && let Ok(mut dist) = resolve_dist_from_version_manifest(&meta)
                 {
                     dist.tarball = rewrite_tarball_origin(&dist.tarball, &cfg.base);
                     return Ok(dist);
                 }
-                // 200 but not a version manifest → packument fallback below.
+                // 200 but not this package's version manifest → packument
+                // fallback below.
             }
             Err(e) if e.status.is_none() => {
                 return Err(e.error).with_context(|| format!("fetching {url}"));
@@ -856,8 +877,9 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Standard-alphabet base64 encode — only used to render the *actual* digest in a
-/// mismatch message (the happy path never encodes).
+/// Standard-alphabet base64 encode — builds the Basic credential from a
+/// username + password, and renders the *actual* digest in an integrity
+/// mismatch message.
 fn base64_encode(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -992,6 +1014,79 @@ mod tests {
             err.contains("unsafe version string"),
             "escaping version must be refused: {err}"
         );
+    }
+
+    /// A loopback registry answering `GET /pnpm` with a one-version pnpm
+    /// packument and every other path with npm's 10.9.0 version manifest. The
+    /// accept loop rides a detached thread for the rest of the test process.
+    fn mock_registry_with_a_foreign_version_manifest() -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let manifest = |name: &str| {
+            format!(
+                r#"{{ "name": "{name}", "version": "10.9.0", "bin": {{ "{name}": "bin/{name}.js" }},
+                     "dist": {{ "tarball": "http://127.0.0.1:{port}/{name}/-/{name}-10.9.0.tgz",
+                                "integrity": "sha512-AAAA" }} }}"#
+            )
+        };
+        let packument = format!(
+            r#"{{ "name": "pnpm", "versions": {{ "10.9.0": {} }} }}"#,
+            manifest("pnpm")
+        );
+        let foreign = manifest("npm");
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let mut buf = [0u8; 4096];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let body = if head.starts_with("GET /pnpm ") {
+                    &packument
+                } else {
+                    &foreign
+                };
+                let _ = conn.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[test]
+    fn a_version_manifest_naming_another_package_is_never_used() {
+        let cfg = RegistryConfig {
+            base: mock_registry_with_a_foreign_version_manifest(),
+            auth: None,
+        };
+        // The version endpoint answers with npm's manifest, so the exact pin
+        // resolves through pnpm's own packument instead.
+        let dist = resolve_version_authed(&cfg, "pnpm", "10.9.0").unwrap();
+        assert!(
+            dist.tarball.ends_with("/pnpm/-/pnpm-10.9.0.tgz"),
+            "an exact pin must resolve to pnpm's tarball, not npm's: {}",
+            dist.tarball
+        );
+        // A spec that walks out of `/pnpm/` reaches npm's manifest over the
+        // wire; it must fail rather than install npm as pnpm 10.9.0.
+        let err = resolve_version_authed(&cfg, "pnpm", "../npm/10.9.0").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("resolving pnpm@../npm/10.9.0"),
+            "a traversing spec must fail to resolve: {err:#}"
+        );
+    }
+
+    #[test]
+    fn normalize_range_keeps_a_spaced_operator_on_its_version() {
+        assert_eq!(normalize_range(">= 9 < 10"), ">=9, <10");
+        assert_eq!(normalize_range("^ 9"), "^9");
+        assert!(semver::VersionReq::parse(&normalize_range(">= 9 < 10")).is_ok());
     }
 
     #[test]

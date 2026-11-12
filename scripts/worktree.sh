@@ -59,7 +59,7 @@ create() {
   local wt="${WORKTREE_BASE}/${name}"
   [ -e "$wt" ] && die "worktree path already exists: $wt"
   branch_exists "$name" && die "local branch '$name' already exists; remove it or pick another name"
-  git -C "$REPO_ROOT" rev-parse --verify --quiet "refs/heads/${base}" >/dev/null 2>&1 \
+  git -C "$REPO_ROOT" rev-parse --verify --quiet "${base}^{commit}" >/dev/null 2>&1 \
     || die "base ref '${base}' not found locally"
   mkdir -p "$WORKTREE_BASE"
   run git -C "$REPO_ROOT" worktree add --no-track -b "$name" "$wt" "$base"
@@ -98,7 +98,6 @@ remove() {
 reap() {
   run git -C "$REPO_ROOT" worktree prune -v
   echo "--- worktrees with uncommitted changes (NOT reaped — commit or rm --force yourself): ---" >&2
-  git -C "$REPO_ROOT" worktree list --porcelain | awk '/^worktree /{p=$2} /^HEAD /{h=$2} END{}'
   local wt
   while IFS= read -r wt; do
     [ "$wt" = "$REPO_ROOT" ] && continue

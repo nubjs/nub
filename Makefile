@@ -218,15 +218,15 @@ clean:
 
 # ── npm packaging ───────────────────────────────────────────────────
 
-# Set version across all npm packages + Cargo.toml + preload.mjs. Usage: make version V=0.0.3
-# Portable (node-based, no macOS-only sed). preload.mjs NUB_VERSION must stay in
+# Set version across all npm packages + Cargo.toml + runtime/version.mjs. Usage: make version V=0.0.3
+# Portable (node-based, no macOS-only sed). runtime/version.mjs NUB_VERSION must stay in
 # lockstep with the binary version — it is the transpile-cache key, so a stale
 # value would serve stale cached output after an upgrade. The file-stamping body
 # lives in scripts/set-version.mjs; this target adds the Cargo.lock refresh a
 # committed bump wants.
 version:
 	@test -n "$(V)" || (echo "Usage: make version V=0.0.3" && exit 1)
-	@echo "Setting version to $(V) across all packages, Cargo.toml, and preload.mjs..."
+	@echo "Setting version to $(V) across all packages, Cargo.toml, and runtime/version.mjs..."
 	@node scripts/set-version.mjs "$(V)"
 	@cargo update -p nub-cli -p nub-cache-key -p nub-core --precise $(V)
 	@# nub-native is its own workspace (split for panic=abort vs unwind); its

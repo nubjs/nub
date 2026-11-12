@@ -80,7 +80,7 @@ try {
     # Replace any prior nub artifacts for a clean upgrade. In the default ~\.nub —
     # which nub owns outright — drop the whole bin\ and a stale runtime\ from a
     # pre-single-binary install. A user-supplied NUB_INSTALL_DIR may hold unrelated
-    # files, so there remove only the two executables we wrote. Then extract bin\.
+    # files, so there remove only the executables we wrote. Then extract bin\.
     if ($InstallDir -ieq $DefaultInstallDir) {
         if (Test-Path $BinDir) { Remove-Item -Recurse -Force $BinDir }
         if (Test-Path "$InstallDir\runtime") { Remove-Item -Recurse -Force "$InstallDir\runtime" }

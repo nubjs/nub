@@ -10,20 +10,23 @@
 //! That native code returns napi-bridged types, so it cannot be linked into a
 //! bench executable (same constraint as `test = false` on nub-native — the
 //! `napi_*` symbols resolve only inside Node at dlopen). These benches
-//! therefore reproduce the EXACT hashing work — same preimage layout, same
-//! `to_hex` lowercasing, same `[..16]` integrity truncation — over a realistic
-//! medium source so the hash cost itself is measured faithfully. The figures
-//! are the per-pass cost; the warm-hit path pays roughly the sum of both.
+//! therefore reproduce the hashing work — `to_hex` lowercasing, the `[..16]`
+//! integrity truncation, and the schema-4 key preimage — over a realistic
+//! medium source so the hash cost itself is measured faithfully. The live key
+//! (`nub-cache-key`) has since replaced the exe hash with a build id and added
+//! `filename` and `url_band`; those are short, so the source text still
+//! dominates the cost. The figures are the per-pass cost; the warm-hit path
+//! pays roughly the sum of both.
 //!
 //! Each pass is benched under BOTH SHA-256 (the prior algo) and blake3 (the
-//! current algo, schema v4) so the speedup is measured directly. cache.rs ships
-//! blake3 only; SHA-256 stays here purely as the baseline to compare against.
+//! current algo) so the speedup is measured directly. cache.rs ships blake3
+//! only; SHA-256 stays here purely as the baseline to compare against.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use sha2::{Digest, Sha256};
 
-// Mirrors cache.rs constants/layout exactly (kept in sync by hand — these are
-// the literal byte preimage components).
+// The schema-4 preimage components (see the module doc for how the live key
+// differs).
 const NUB_VERSION: &str = "0.0.0-bench";
 const CACHE_SCHEMA: &str = "4";
 const INTEGRITY_LEN: usize = 16;
@@ -67,7 +70,7 @@ fn integrity_sha(body: &[u8]) -> String {
     full[..INTEGRITY_LEN].to_string()
 }
 
-// --- blake3 (current, schema v4) ---
+// --- blake3 (current) ---
 
 fn cache_key_blake3(source: &str, ext: &str, tsconfig_hash: &str, pkg_type: &str) -> String {
     let mut h = blake3::Hasher::new();

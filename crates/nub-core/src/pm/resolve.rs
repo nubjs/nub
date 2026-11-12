@@ -904,9 +904,6 @@ fn pin_target_dir(cwd: &Path) -> PathBuf {
 /// errors naming the required `name@version` shape. The Corepack hash suffix
 /// (`yarn@4.2.2+sha512.xxxx`) is kept verbatim in `version` — resolution never
 /// lies about what was written; the engine strips it before download.
-///
-/// Public so the CLI's pin consumers parse through the SAME pin parser the
-/// `packageManager` reader uses — there is no second spec parser.
 fn parse_spec(spec: &str) -> Result<PmPin> {
     let spec = spec.trim();
     let (name, version) = spec.split_once('@').with_context(|| {
@@ -977,9 +974,9 @@ fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
 ///
 /// The pinned route ([`classify`]) calls this with the version. The unpinned route
 /// does NOT reach here — it defers to whatever `yarn` is on PATH and so needs no
-/// classic/Berry split. The `None`-version arm is the seam a future
-/// provisioning-from-lockfile path would use; it is exercised by tests but has no
-/// production caller today.
+/// classic/Berry split. [`project_pm_identity`] is the caller of the
+/// `None`-version arm: a versionless yarn declaration beside a `.yarnrc.yml` is
+/// a Berry identity.
 fn classify_yarn(version: Option<&str>, yarnrc_present: bool) -> Pm {
     match version.and_then(yarn_major) {
         Some(major) if major >= 2 => Pm::YarnBerry,
@@ -1040,7 +1037,7 @@ pub fn committed_yarn_path(cwd: &Path) -> Option<PathBuf> {
 /// `# comment` removed — `yarnPath: .yarn/releases/x.cjs # pinned` is the path,
 /// not `… # pinned`. Comments are only recognized on unquoted values (a `#`
 /// inside quotes is part of the path).
-fn strip_yaml_value(rest: &str) -> &str {
+pub fn strip_yaml_value(rest: &str) -> &str {
     let rest = rest.trim();
     for quote in ['"', '\''] {
         if let Some(inner) = rest.strip_prefix(quote)
@@ -1049,10 +1046,14 @@ fn strip_yaml_value(rest: &str) -> &str {
             return &inner[..end];
         }
     }
-    // Unquoted: an inline comment starts at the first ` #` (space then hash);
-    // a bare `#` mid-token is not a comment in flow scalars.
-    match rest.split_once(" #") {
-        Some((value, _comment)) => value.trim_end(),
+    // Unquoted: a comment starts at a `#` that opens the value or follows a space
+    // or a tab. A `#` inside a token is part of the value.
+    let comment = rest
+        .match_indices('#')
+        .map(|(at, _)| at)
+        .find(|&at| at == 0 || rest[..at].ends_with([' ', '\t']));
+    match comment {
+        Some(at) => rest[..at].trim_end(),
         None => rest,
     }
 }
@@ -1433,6 +1434,11 @@ mod tests {
             ".yarn/releases/with space.cjs",
             "a quoted value keeps its spaces and is taken verbatim"
         );
+        // YAML separates a comment with a space or a tab, and a `#` inside a
+        // token belongs to the value.
+        assert_eq!(strip_yaml_value(" pnp\t# linker"), "pnp");
+        assert_eq!(strip_yaml_value(" a#b # c"), "a#b");
+        assert_eq!(strip_yaml_value(" # nothing set"), "");
 
         // End to end: a commented yarnPath still resolves to the real release path.
         let dir = tmpdir("yarnpath-comment");

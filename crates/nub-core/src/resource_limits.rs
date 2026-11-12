@@ -220,10 +220,9 @@ pub fn cpu_budget() -> Option<usize> {
     #[cfg(target_os = "linux")]
     {
         // `num_cpus::get()` returns min(ceil(quota), logical) reading the cgroup
-        // files directly (v1 AND v2, even when affinity is unreadable). Gate on
-        // "actually below available_parallelism()" so a box std already sized
-        // correctly (v2 + readable affinity) stays `None` — we only ADD the v1 /
-        // sandbox coverage std misses.
+        // files directly. Gate on "actually below available_parallelism()" so a
+        // box std already sized correctly stays `None` — per the measurement
+        // above, every box except a cgroup v2 at a non-standard mountpoint.
         cpu_budget_from(available_cores(), num_cpus::get())
     }
     #[cfg(not(target_os = "linux"))]
@@ -247,17 +246,20 @@ pub fn available_cores() -> usize {
         .unwrap_or(1)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The budget a unit test forces on `cpu_budget()` from its own thread.
+    /// Thread-local rather than an environment variable, so a test setting it
+    /// never mutates process state that sibling tests read concurrently.
+    static TEST_CPU_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// `#[cfg(test)]`-only injection seam: force `cpu_budget()` to a deterministic value
-/// in unit tests via the INTERNAL `__NUB_TEST_CPU_BUDGET` env var. Double-underscore
-/// = internal test plumbing (brand-EXEMPT per the brand boundary), never a public
-/// knob — it does NOT exist in a release build (this fn compiles to a constant
-/// `None`). Production CPU sizing is auto-detect-only.
+/// in unit tests. It does NOT exist in a release build (this fn compiles to a
+/// constant `None`). Production CPU sizing is auto-detect-only.
 #[cfg(test)]
 fn test_cpu_budget_override() -> Option<usize> {
-    std::env::var("__NUB_TEST_CPU_BUDGET")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|&n| n >= 1)
+    TEST_CPU_BUDGET.with(std::cell::Cell::get)
 }
 
 #[cfg(not(test))]
@@ -480,14 +482,6 @@ fn current_thread_count() -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serializes the tests that drive `cpu_budget()` against the process-global
-    // `__NUB_TEST_CPU_BUDGET` seam: the suite runs `#[test]`s on multiple threads,
-    // so a test reading `cpu_budget()` with no seam must not interleave with the
-    // seam test mid-mutation (on a 1-core host an observed `=2` would fail the
-    // range assertion). Both tests below take this lock.
-    static CPU_SEAM_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn headroom_is_none_or_positive() {
@@ -714,9 +708,7 @@ mod tests {
     #[test]
     fn cpu_budget_is_none_or_in_range() {
         // Detector contract: either `None` (unconstrained / undetectable) or a
-        // value in `[1, cores]`. Never 0, never above the host cores. Hold the seam
-        // lock so the seam test isn't mid-mutation when we read `cpu_budget()`.
-        let _guard = CPU_SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // value in `[1, cores]`. Never 0, never above the host cores.
         if let Some(n) = cpu_budget() {
             let cores = available_cores();
             assert!(n >= 1 && n <= cores, "budget {n} out of [1, {cores}]");
@@ -754,21 +746,14 @@ mod tests {
 
     #[test]
     fn test_seam_forces_a_deterministic_budget() {
-        // The `#[cfg(test)]` injection seam (NOT a public knob — `__NUB_TEST_*`
-        // internal plumbing) lets a test pin `cpu_budget()` regardless of the host.
-        // The seam env var is process-global and the suite is multi-threaded, so
-        // hold the shared lock to serialize against other `cpu_budget()` readers.
-        let _guard = CPU_SEAM_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: `set_var`/`remove_var` mutate the process env; the lock above
-        // serializes against the only other test that reads `cpu_budget()`, so no
-        // concurrent env reader races us here.
-        unsafe { std::env::set_var("__NUB_TEST_CPU_BUDGET", "2") };
+        // The `#[cfg(test)]` injection seam (NOT a public knob) lets a test pin
+        // `cpu_budget()` regardless of the host.
+        TEST_CPU_BUDGET.with(|budget| budget.set(Some(2)));
         assert_eq!(cpu_budget(), Some(2));
-        unsafe { std::env::set_var("__NUB_TEST_CPU_BUDGET", "garbage") };
-        // Invalid → seam yields None; falls through to real auto-detection, whose
-        // contract is None-or-in-range (asserted by `cpu_budget_is_none_or_in_range`).
+        // Unset → falls through to real auto-detection, whose contract is
+        // None-or-in-range (asserted by `cpu_budget_is_none_or_in_range`).
+        TEST_CPU_BUDGET.with(|budget| budget.set(None));
         let auto = cpu_budget();
         assert!(auto.is_none_or(|n| n >= 1 && n <= available_cores()));
-        unsafe { std::env::remove_var("__NUB_TEST_CPU_BUDGET") };
     }
 }

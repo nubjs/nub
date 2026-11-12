@@ -25,11 +25,7 @@ const WRAPPER_CAP: usize = 200;
 const MAX_DEPTH: usize = 64;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/ (or fast/)
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 fn tmp(tag: &str) -> PathBuf {

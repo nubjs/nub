@@ -465,7 +465,6 @@ fn reaches_builtin(source: &str, is_target: fn(&str) -> bool) -> bool {
     use oxc_ast_visit::{Visit, walk};
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use std::collections::BTreeSet;
 
     /// A no-substitution template literal is as static as a string literal, and
     /// the minifier emits both.
@@ -835,20 +834,6 @@ mod tests {
             .err()
     }
 
-    /// Which source maps each container can honour — one cell per measured row of
-    /// the table on [`Decline::SourceMap`].
-    ///
-    /// The two `Inline` cells are the whole point. The same mode is reachable from
-    /// the single-executable container and not from the no-extract launcher, so a
-    /// test that checked one of them would read as coverage whichever way the code
-    /// went.
-    ///
-    /// `External` pins the correction that a review caught: it looked admissible
-    /// everywhere, because its map is never named by the bundle and its frames come
-    /// back unmapped in every shape. But `Mode::Inline` publishes a DETACHED map
-    /// made before [`rewrite_chunk`] shifts the code it describes, so admitting it
-    /// there hands an error tracker a map that resolves to the wrong line and says
-    /// nothing about it.
     /// Only the no-extract launcher declines a worker chunk.
     ///
     /// The asymmetry is the whole point and it is easy to revert by accident, so it
@@ -901,6 +886,19 @@ mod tests {
         );
     }
 
+    /// Which source maps each container can honour — one cell per measured row of
+    /// the table on [`Decline::SourceMap`].
+    ///
+    /// The two `Inline` cells are the whole point. The same mode is reachable from
+    /// the single-executable container and not from the no-extract launcher, so a
+    /// test that checked one of them would read as coverage whichever way the code
+    /// went.
+    ///
+    /// `External` is the cell that looks admissible everywhere, because its map is never named by the bundle and its frames come
+    /// back unmapped in every shape. But `Mode::Inline` publishes a DETACHED map
+    /// made before [`rewrite_chunk`] shifts the code it describes, so admitting it
+    /// there hands an error tracker a map that resolves to the wrong line and says
+    /// nothing about it.
     #[test]
     fn each_container_declines_only_the_source_maps_it_cannot_honour() {
         use bundle::SourcemapMode::{External, Inline as InlineMap, Linked, None as NoMap};

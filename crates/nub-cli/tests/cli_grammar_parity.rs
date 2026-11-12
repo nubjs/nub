@@ -39,11 +39,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push(format!("nub{}", std::env::consts::EXE_SUFFIX));
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 /// Spawn `nub <args> --help` in an isolated, network-free-ish env and return

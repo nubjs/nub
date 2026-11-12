@@ -38,7 +38,12 @@ function sh(cmd: string): string {
   return execSync(cmd, { encoding: "utf8" }).trim();
 }
 
-const token = sh("gh auth token");
+// `gh auth token` exits non-zero when it holds no credential, so a throw is the
+// no-token case too.
+let token = "";
+try {
+  token = sh("gh auth token");
+} catch {}
 if (!token) {
   console.error('no `gh auth token`; plain gh holds no credential, so run this under `keyward run --reason "<the task>" GH_TOKEN -- …`');
   process.exit(1);

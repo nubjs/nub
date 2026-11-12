@@ -21,11 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 /// Env vars that would silently decide these rows if the developer running

@@ -2,7 +2,9 @@
 //! consumer (resolution, provisioning, the `nub pm` CLI surface).
 //!
 //! There is exactly ONE [`Pm`] enum, ONE pin reader ([`resolve`]), ONE yarn
-//! classifier, and ONE `.npmrc` reader (`workspace::scripts::npmrc_value`).
+//! classifier, and ONE `.npmrc` reader (`workspace::scripts::npmrc_value`) —
+//! except in [`registry`], which reads the project and user files separately
+//! so each gets its own `${VAR}` trust.
 //!
 //! [`registry`] resolves a spec (exact / dist-tag / range) to a tarball + dist
 //! integrity; [`extract`] unpacks the `.tgz`; [`provision`] ties them together

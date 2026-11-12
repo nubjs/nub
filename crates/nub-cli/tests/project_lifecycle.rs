@@ -21,11 +21,7 @@ const HOOKS: [&str; 10] = [
 ];
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 fn tmpdir(tag: &str) -> PathBuf {

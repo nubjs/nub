@@ -91,7 +91,7 @@ function __getBuiltin(id) {
   return _bootstrapCreateRequire(import.meta.url)(id);
 }
 
-// `ErrorEvent` only became a global in Node 26. On the 22/24 floor it is
+// `ErrorEvent` only became a global in Node 25. On the 22/24 floor it is
 // undefined, so `new ErrorEvent(...)` below would throw a ReferenceError inside
 // the worker's "error" handler — crashing the PARENT thread on every worker
 // that throws. Resolve the constructor lazily and memoize on first use: use the
@@ -112,16 +112,54 @@ function getErrorEventCtor() {
   return (_ErrorEventCtor ??=
     typeof globalThis.ErrorEvent === "function"
       ? globalThis.ErrorEvent
-      : class ErrorEvent extends Event {
-          constructor(type, init = {}) {
-            super(type, init);
-            this.message = init.message ?? "";
-            this.error = init.error ?? null;
-            this.filename = init.filename ?? "";
-            this.lineno = init.lineno ?? 0;
-            this.colno = init.colno ?? 0;
-          }
-        });
+      : fallbackErrorEvent());
+}
+
+// The five fields are read-only accessors on the prototype, as on Node 25+'s
+// native ErrorEvent; nothing is an own property of the instance.
+function fallbackErrorEvent() {
+  class ErrorEvent extends Event {
+    #message;
+    #error;
+    #filename;
+    #lineno;
+    #colno;
+    constructor(type, init = {}) {
+      super(type, init);
+      this.#message = init.message ?? "";
+      // Left undefined when the caller gives none, as the native class leaves it.
+      this.#error = init.error;
+      this.#filename = init.filename ?? "";
+      this.#lineno = init.lineno ?? 0;
+      this.#colno = init.colno ?? 0;
+    }
+    get message() {
+      return this.#message;
+    }
+    get filename() {
+      return this.#filename;
+    }
+    get lineno() {
+      return this.#lineno;
+    }
+    get colno() {
+      return this.#colno;
+    }
+    get error() {
+      return this.#error;
+    }
+  }
+  // WebIDL attributes are enumerable; class accessors are not.
+  const enumerable = { enumerable: true };
+  Object.defineProperties(ErrorEvent.prototype, {
+    message: enumerable,
+    filename: enumerable,
+    lineno: enumerable,
+    colno: enumerable,
+    error: enumerable,
+    [Symbol.toStringTag]: { value: "ErrorEvent", configurable: true },
+  });
+  return ErrorEvent;
 }
 
 // Define the browser-shape `Worker` global (main thread) + the worker-side scope
@@ -358,7 +396,8 @@ export function installWorkerPolyfill() {
         this.dispatchEvent(
           new ErrorEventCtor("error", {
             error: err,
-            message: err.message,
+            // A worker may throw any value, `null` and `undefined` included.
+            message: err?.message,
             filename,
             lineno,
             colno,

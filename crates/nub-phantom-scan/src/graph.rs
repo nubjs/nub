@@ -300,7 +300,7 @@ pub(crate) fn walk_index_with(
 
 /// OR `bit` into `key`'s provenance mask. Returns true if the mask GREW (new
 /// file, or new bits) — the caller then (re)queues it so the new provenance
-/// propagates to its edges. The 2-bit lattice bounds re-queues to ≤2 per file.
+/// propagates to its edges. The 4-bit mask bounds re-queues to ≤4 per file.
 fn add_flags<K: Ord + Clone>(flags: &mut BTreeMap<K, u8>, key: &K, bit: u8) -> bool {
     let entry = flags.entry(key.clone()).or_insert(0);
     let before = *entry;
@@ -483,11 +483,12 @@ fn config_roots(text: &str) -> Vec<String> {
     out
 }
 
-/// Bound on `main`-chasing recursion. A dir whose `package.json` `main` points
-/// back at itself (`"."`/`""`/`"./"`) or a mutual `main` cycle across dirs would
-/// otherwise recurse forever → a stack-overflow ABORT that kills the whole scan
-/// (a process abort, not a catchable panic). Such manifests occur in the wild, so
-/// the cap is a hard robustness requirement, not a nicety.
+/// Bound on `main`-chasing recursion. Node's rule already stops it after one hop
+/// (a `main` target never consults its own `package.json`; see [`fs_resolve`]),
+/// so a dir whose `main` points back at itself (`"."`/`""`/`"./"`) or a mutual
+/// `main` cycle resolves to nothing instead of looping. The cap stays as the
+/// backstop because a tarball is untrusted input and a stack overflow is a
+/// process ABORT that kills the whole scan, not a catchable panic.
 const MAX_RESOLVE_DEPTH: u32 = 16;
 
 /// Node-style RUNTIME resolution extensions, in priority order — used when
@@ -543,7 +544,8 @@ impl FileSource for FsSource<'_> {
     type Key = PathBuf;
 
     fn resolve_entry(&self, entry_path: &str, prefer_dts: bool) -> Option<PathBuf> {
-        fs_resolve(self.root, self.root, entry_path, prefer_dts, 0)
+        // A published entry is a `main` target already: depth 1 (see `fs_resolve`).
+        fs_resolve(self.root, self.root, entry_path, prefer_dts, 1)
     }
 
     fn resolve_rel(&self, from: &PathBuf, spec: &str) -> Option<PathBuf> {
@@ -649,28 +651,25 @@ fn fs_resolve(
             return Some(cand);
         }
     }
-    // 3. `base/index.<ext>`.
+    // 3. `base/package.json` → its `main` (runtime) or `types`/`typings` (type
+    // surface), AHEAD of the directory's own `index` — Node's LOAD_AS_DIRECTORY,
+    // which TypeScript mirrors. The target is resolved as a file, then as a
+    // directory `index`, but never through ITS OWN `package.json` (depth 1 skips
+    // this step), and a missing or unresolvable target falls back to this
+    // directory's `index` below, as Node does.
+    if depth == 0
+        && let Ok(raw) = fs::read(base.join("package.json"))
+        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
+        && let Some(entry) = manifest_entry(&v, prefer_dts)
+        && let Some(found) = fs_resolve(root, &base, &entry, prefer_dts, depth + 1)
+    {
+        return Some(found);
+    }
+    // 4. `base/index.<ext>`.
     for ext in exts {
         let cand = base.join(format!("index.{ext}"));
         if is_resolvable_file(&cand, prefer_dts) {
             return Some(cand);
-        }
-    }
-    // 4. `base/package.json` → its `types`/`main` (depth-bounded). The type surface
-    // chases `types`/`typings`; the runtime surface chases `main`.
-    let pkg = base.join("package.json");
-    if let Ok(raw) = fs::read(&pkg) {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
-            && let Some(entry) = manifest_entry(&v, prefer_dts)
-        {
-            return fs_resolve(root, &base, &entry, prefer_dts, depth + 1);
-        }
-        // package.json with no entry → default `index.<ext>` in that dir.
-        for ext in exts {
-            let cand = base.join(format!("index.{ext}"));
-            if is_resolvable_file(&cand, prefer_dts) {
-                return Some(cand);
-            }
         }
     }
     None
@@ -738,7 +737,7 @@ impl FileSource for IndexSource {
     type Key = String;
 
     fn resolve_entry(&self, entry_path: &str, prefer_dts: bool) -> Option<String> {
-        self.resolve("", entry_path, prefer_dts, 0)
+        self.resolve("", entry_path, prefer_dts, 1)
     }
 
     fn resolve_rel(&self, from: &String, spec: &str) -> Option<String> {
@@ -803,26 +802,19 @@ impl IndexSource {
                 return Some(cand);
             }
         }
+        if depth == 0
+            && let Some(blob) = self.files.get(&join_rel(&base, "package.json"))
+            && let Ok(raw) = fs::read(blob)
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
+            && let Some(entry) = manifest_entry(&v, prefer_dts)
+            && let Some(found) = self.resolve(&base, &entry, prefer_dts, depth + 1)
+        {
+            return Some(found);
+        }
         for ext in exts {
             let cand = join_rel(&base, &format!("index.{ext}"));
             if self.contains_surface(&cand, prefer_dts) {
                 return Some(cand);
-            }
-        }
-        let pkg = join_rel(&base, "package.json");
-        if let Some(blob) = self.files.get(&pkg)
-            && let Ok(raw) = fs::read(blob)
-        {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&raw)
-                && let Some(entry) = manifest_entry(&v, prefer_dts)
-            {
-                return self.resolve(&base, &entry, prefer_dts, depth + 1);
-            }
-            for ext in exts {
-                let cand = join_rel(&base, &format!("index.{ext}"));
-                if self.contains_surface(&cand, prefer_dts) {
-                    return Some(cand);
-                }
             }
         }
         None
@@ -944,8 +936,8 @@ mod tests {
 
     #[test]
     fn self_cyclic_main_does_not_stack_overflow() {
-        // A dir whose package.json `main` points back at itself would recurse
-        // forever without the depth cap → process abort, killing the whole scan.
+        // A dir whose package.json `main` points back at itself must resolve to
+        // nothing rather than recurse (a stack overflow aborts the whole scan).
         let root = scratch("cycle");
         fs::write(root.join("index.js"), "require('./lib');").unwrap();
         fs::create_dir_all(root.join("lib")).unwrap();
@@ -953,6 +945,58 @@ mod tests {
         // Must return (not abort); the cyclic dir simply resolves to nothing.
         let w = walk(&root, &[main_entry("index.js")]);
         assert_eq!(w.files_analyzed, 1); // only index.js; lib/ resolves to no file
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_directory_resolves_through_package_json_main_before_index_like_node() {
+        // Node's LOAD_AS_DIRECTORY, each rule checked against `node -e`: a
+        // `package.json` `main` wins over the directory's `index`, with or without
+        // an extension; a `main` naming a missing file falls back to `index`; and
+        // a `main` target is resolved as a file or a directory `index` only, never
+        // through its own `package.json`.
+        let root = scratch("dir-main");
+        fs::write(
+            root.join("index.js"),
+            "require('./a'); require('./b'); require('./c'); require('./d'); require('./e');",
+        )
+        .unwrap();
+        let put = |rel: &str, text: &str| {
+            let p = root.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, text).unwrap();
+        };
+        // `main` beats `index`.
+        put("a/package.json", r#"{"main":"./entry.js"}"#);
+        put("a/entry.js", "require('a-main');");
+        put("a/index.js", "require('a-index');");
+        // `main` names a missing file → `index`.
+        put("b/package.json", r#"{"main":"./missing.js"}"#);
+        put("b/index.js", "require('b-index');");
+        // `main` names a directory → that directory's `index`, not its `main`.
+        put("c/package.json", r#"{"main":"./lib"}"#);
+        put("c/lib/package.json", r#"{"main":"./other.js"}"#);
+        put("c/lib/index.js", "require('c-lib-index');");
+        put("c/lib/other.js", "require('c-lib-other');");
+        // …and with no `index` there, nothing resolves (Node throws).
+        put("d/package.json", r#"{"main":"./lib"}"#);
+        put("d/lib/package.json", r#"{"main":"./other.js"}"#);
+        put("d/lib/other.js", "require('d-nested');");
+        // An extensionless `main` beats `index` too.
+        put("e/package.json", r#"{"main":"./entry"}"#);
+        put("e/entry.js", "require('e-main');");
+        put("e/index.js", "require('e-index');");
+
+        let want = ["a-main", "b-index", "c-lib-index", "e-main"].map(String::from);
+        let eps = [main_entry("index.js")];
+        assert_eq!(packages(&walk(&root, &eps)), want);
+        assert_eq!(packages(&walk_index(&index_of(&root), &eps)), want);
+
+        // A published entry is itself a `main` target: `"main": "./d"` resolves
+        // `d` as a file or `d/index.*`, and never reads `d/package.json`.
+        let eps = [main_entry("d")];
+        assert!(packages(&walk(&root, &eps)).is_empty());
+        assert!(packages(&walk_index(&index_of(&root), &eps)).is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 

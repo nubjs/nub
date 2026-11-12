@@ -1,5 +1,5 @@
 // Bounded-size eviction for the transpile cache (A16). Kept in its own module
-// so it loads lazily — only when a sweep is actually due (see preload.mjs's
+// so it loads lazily — only when a sweep is actually due (see transform-core.mjs's
 // throttled maybeSweepCache) — and so it can be tested in isolation.
 //
 // LRU by mtime: when the cache exceeds `maxBytes`, delete oldest-written entries
@@ -36,10 +36,9 @@ function ensureBuiltins() {
   ({ join } = get("node:path"));
 }
 
-// A valid cache entry is a 64-char lowercase-hex sha256 (see cacheKey in
-// preload.mjs). Everything else — the `.sweep` sentinel, `*.tmp` in-flight
-// writes from cacheSet — is skipped: never counted toward the cap, never
-// evicted.
+// A valid cache entry is a 64-char lowercase-hex blake3 (see `cache_key` in the
+// nub-cache-key crate). Everything else — the `.sweep` sentinel, `*.tmp` in-flight
+// writes — is skipped: never counted toward the cap, never evicted.
 const ENTRY_RE = /^[0-9a-f]{64}$/;
 
 // What one entry actually costs the filesystem. `stat.size` is the LOGICAL

@@ -54,13 +54,6 @@ use rolldown_utils::url::clean_url;
 
 use super::native_layout::{DroppedEdge, IslandFile, Seed};
 
-/// The module a `.node` import evaluates to: the addon, `dlopen`ed from its
-/// extracted package-island copy.
-///
-/// `createRequire(import.meta.url)` rather than a baked path — the build
-/// machine's directory layout has nothing to do with the deploy machine's, and
-/// the app dir is content-hash-keyed, so the only base that is right on both is
-/// the chunk's own URL. `name` is already a nested, payload-relative island path.
 /// Whether an ELF addon is linked against musl, glibc, or neither detectably.
 ///
 /// The ELF header records machine and OS but NOT which libc, so a glibc build and
@@ -98,7 +91,8 @@ fn elf_libc_is_musl(bytes: &[u8]) -> Option<bool> {
 /// silently is not in the artifact: the binary either loads the wrong version or
 /// fails outright.
 ///
-/// Matches `native_layout::install_anchor`, which has always taken the first.
+/// `native_layout::install_anchor` takes the first as well, after looking for a
+/// `.yarn` boundary.
 pub(super) fn install_tree_root(package: &Path) -> Option<PathBuf> {
     let mut parts: Vec<&std::ffi::OsStr> = package.components().map(|c| c.as_os_str()).collect();
     let index = parts.iter().position(|part| *part == "node_modules")?;
@@ -106,8 +100,6 @@ pub(super) fn install_tree_root(package: &Path) -> Option<PathBuf> {
     Some(parts.iter().collect())
 }
 
-/// Copy one package directory into the payload at `rel`, skipping the nested
-/// `node_modules` each package is materialised through on its own account.
 /// A payload path: relative, `/`-separated, whatever the host uses.
 fn payload_path(rel: &Path) -> String {
     rel.to_string_lossy().replace('\\', "/")
@@ -255,7 +247,8 @@ fn manifest_runs_on(manifest: &serde_json::Value, target: &TargetPlatform) -> bo
             .iter()
             .filter_map(serde_json::Value::as_str)
             .collect();
-        if listed.is_empty() {
+        // `["any"]` is npm's and pnpm's explicit spelling of "every platform".
+        if listed.is_empty() || listed == ["any"] {
             return true;
         }
         if listed.iter().any(|v| v.strip_prefix('!') == Some(want)) {
@@ -333,6 +326,8 @@ fn package_files(dir: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Copy one package directory into the payload at `rel`, skipping the nested
+/// `node_modules` each package is materialised through on its own account.
 fn copy_package_tree(
     dir: &Path,
     rel: &Path,
@@ -448,6 +443,13 @@ pub(super) fn resolve_package_root(importer: &Path, specifier: &str) -> Option<P
     }
 }
 
+/// The module a `.node` import evaluates to: the addon, `dlopen`ed from its
+/// extracted package-island copy.
+///
+/// `createRequire(import.meta.url)` rather than a baked path — the build
+/// machine's directory layout has nothing to do with the deploy machine's, and
+/// the app dir is content-hash-keyed, so the only base that is right on both is
+/// the chunk's own URL. `name` is already a nested, payload-relative island path.
 pub(super) fn addon_module(name: &str) -> String {
     format!(
         "const record = process[Symbol.for(\"nub.compile.bootstrap\")];\n\
@@ -551,9 +553,6 @@ impl NativeAddons {
             .unwrap_or_default()
     }
 
-    /// Plan only islands whose fixed-width seed token survived into emitted
-    /// JavaScript. Replacing it with the equal-length content digest does not
-    /// move generated lines or columns, so source-map geometry stays valid.
     /// Materialise a package that was excluded from the bundle, at the position it
     /// already occupies on disk, together with everything it needs there.
     ///
@@ -1133,6 +1132,9 @@ impl NativeAddons {
         Ok((payload, bundled))
     }
 
+    /// Plan only islands whose fixed-width seed token survived into emitted
+    /// JavaScript. Replacing it with the equal-length content digest does not
+    /// move generated lines or columns, so source-map geometry stays valid.
     pub fn plan_survivors(
         &self,
         chunks: &mut [super::bundle::BundledFile],
@@ -2310,7 +2312,9 @@ fn require_rebindings(id: &str, source: &str) -> Vec<(usize, usize)> {
         }
     }
 
-    let source_type = SourceType::from_path(id).unwrap_or_else(|_| SourceType::mjs());
+    // The id can carry a `?query`, which would hide the extension and parse a
+    // TypeScript module as JavaScript.
+    let source_type = SourceType::from_path(clean_url(id)).unwrap_or_else(|_| SourceType::mjs());
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, source_type).parse();
     // A parse failure yields nothing: Rolldown's own error is the better
@@ -3120,6 +3124,18 @@ mod tests {
     }
 
     #[test]
+    fn a_queried_typescript_module_is_parsed_as_typescript() {
+        let source = "import { createRequire } from 'node:module'\n\
+                      const loaded: boolean = true\n\
+                      require = createRequire(import.meta.url)\n";
+        assert_eq!(
+            require_rebindings("loader.ts?v=1", source).len(),
+            1,
+            "a query suffix must not turn TypeScript syntax into a parse failure"
+        );
+    }
+
+    #[test]
     fn custom_create_require_bindings_and_side_effects_are_preserved() {
         for source in [
             // Matching a local helper by spelling deleted real program behavior.
@@ -3156,8 +3172,6 @@ mod tests {
         }
     }
 
-    // The interop contract: a CJS consumer must receive the addon's own exports,
-    // never a `{ default: … }` namespace.
     /// Only the target platform's addon travels.
     ///
     /// Packages ship prebuilds for every platform they support — better-sqlite3
@@ -3502,6 +3516,22 @@ mod tests {
         assert!(!manifest_runs_on(&not_win, &target("win32-x64")));
     }
 
+    /// `["any"]` admits every platform in npm's and pnpm's install check, so a
+    /// package that says so is never one a manifest positively rules out.
+    #[test]
+    fn an_any_platform_list_runs_everywhere() {
+        let m = |json: &str| serde_json::from_str::<serde_json::Value>(json).expect("valid json");
+        let any = m(r#"{"os":["any"],"cpu":["any"],"libc":["any"]}"#);
+        for triple in ["linux-arm64", "linux-x64-musl", "darwin-arm64", "win32-x64"] {
+            assert!(
+                manifest_runs_on(&any, &target(triple)),
+                "an `any` list must admit {triple}"
+            );
+        }
+    }
+
+    // The interop contract: a CJS consumer must receive the addon's own exports,
+    // never a `{ default: … }` namespace.
     #[test]
     fn the_emitted_module_is_commonjs_and_locates_itself_from_the_chunk() {
         let code = addon_module("watcher-a1b2c3d4.node");

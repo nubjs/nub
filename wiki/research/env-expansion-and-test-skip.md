@@ -181,7 +181,7 @@ The parser implements the "universal ecosystem" subset:
 - **Escape `\$` for literal dollar.** Matches Bun, Next.js, Vite, `dotenv-expand`. The escape is the single most-used parser feature besides expansion itself.
 - **Resolution order: shell `process.env` first, then accumulated `.env*` values, then this-file values.** A variable defined in `.env` is visible to `.env.local`'s expansion because `.env` is loaded first into the accumulator. Shell wins everywhere; this matches every tool except `dotenv-expand` v12.
 - **Undefined variable → empty string.** Matches every tool. Document loudly — this is a silent footgun. (Anything else breaks too many existing `.env` files.)
-- **Iterative nested expansion with cycle guard.** Walk the result of an expansion looking for more `$`. Stop when no `$` remains, or when the same intermediate has been seen before. Cycles resolve to empty string, not stack overflow.
+- **Iterative nested expansion with cycle guard.** Walk the result of an expansion looking for more `$`, for at most ten rounds. A reference that leads back to the variable it sits in, directly or through other variables, resolves to empty string, not stack overflow.
 - **No `${VAR:-default}`.** Vite supports it (via `dotenv-expand`), Bun does not, Next.js doesn't document it. Omitting it keeps the parser smaller and the contract narrower.
 - **No `$(cmd)` command substitution.** This is `dotenvx`-only. Security hazard (arbitrary command execution at env-load time, before user code), and no demand from the Vite / Next / Bun users being targeted.
 - **No `${VAR:?error}`.** Same reasoning as `:-` defaults.
@@ -207,7 +207,7 @@ These belong in user-facing docs:
 2. **Escape literal `$` with `\$`, not `$$`.** Shell users sometimes try `$$` (which works in `make` and `docker-compose` but not in dotenv-expand). Document the difference.
 3. **`PASSWORD=foo$bar` truncates silently to `foo`.** The single biggest footgun the Node team cited when rejecting expansion for `--env-file`. Nub accepts the hit (it's the only way to match Vite/Next user expectations) but should call it out in docs and migration guides. Recommended fix in user docs: quote the value, `PASSWORD="foo$bar"`, AND escape, `PASSWORD="foo\$bar"`.
 4. **`.env.local` skip is silent.** No log line in default mode. Document the test-skip prominently alongside the precedence stack.
-5. **Cycles silently produce empty strings.** A → B → A becomes empty for both. Cycle-detection-via-seen-set means there's no crash; the user sees mysteriously empty values. This is `dotenv-expand`-conformant behavior; document it.
+5. **Cycles silently produce empty strings.** A → B → A becomes empty for both, and `A=x$A` becomes `x`. There is no crash and no warning; the user sees mysteriously empty values. This is `dotenv-expand`-conformant behavior; document it.
 
 ## Sources
 
@@ -249,3 +249,4 @@ Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Initial publication.
 - 2026-08-28 — Trimmed to the measured findings and current behavior.
+- 2026-11-11 — Cycle guard: stated the implemented rule, a reference that leads back to its own variable resolves to empty within ten rounds.

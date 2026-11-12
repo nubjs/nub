@@ -2,8 +2,9 @@
 //!
 //! Aggregation rule: a package is HARD-needed if it is referenced by at least one
 //! UNGUARDED occurrence; it is soft only if EVERY occurrence is guarded (in a
-//! try/catch). The classification then answers the one question that matters —
-//! is this reference covered by something a consumer install makes resolvable?
+//! try/catch or a conditional branch). The classification then answers the one
+//! question that matters — is this reference covered by something a consumer
+//! install makes resolvable?
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,8 +20,8 @@ use nub_phantom_core::builtins::{is_builtin, is_host_provided};
 pub enum Verdict {
     /// Undeclared and hard-required — a genuine phantom dependency.
     HardPhantom,
-    /// Undeclared but only ever loaded under a try/catch — a soft/optional load,
-    /// not a hard break.
+    /// Undeclared but only ever loaded under a guard (try/catch or a conditional
+    /// branch) — a soft/optional load, not a hard break.
     SoftPhantom,
     /// Declared as an OPTIONAL peer (`peerDependenciesMeta.<x>.optional`). NOT a
     /// phantom — the pick-your-plugin pattern. Tracked so the report can show how
@@ -129,8 +130,20 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
         specs: Vec<String>,
         files: BTreeSet<String>,
     }
+    // Builtin-ness is a property of the SPECIFIER, not the package name: `buffer`
+    // is Node's module while `buffer/` is the npm package of that name. A package
+    // with any non-builtin reference is judged on those references alone, so a
+    // builtin `require('buffer')` beside it neither hardens nor provenances it.
+    let package_refs: BTreeSet<&str> = references
+        .iter()
+        .filter(|r| !is_builtin(&r.raw))
+        .map(|r| r.package.as_str())
+        .collect();
     let mut by_pkg: BTreeMap<String, Agg> = BTreeMap::new();
     for r in references {
+        if is_builtin(&r.raw) && package_refs.contains(r.package.as_str()) {
+            continue;
+        }
         let e = by_pkg.entry(r.package.clone()).or_insert(Agg {
             all_soft: true,
             from_main: false,
@@ -168,7 +181,15 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
             // `types_package_for`.
             let types_only =
                 agg.from_types && !agg.from_main && !agg.from_subpath && !agg.from_deep_path;
-            let verdict = verdict_for(manifest, &package, agg.all_soft, deep_path_only, types_only);
+            let builtin = !package_refs.contains(package.as_str());
+            let verdict = verdict_for(
+                manifest,
+                &package,
+                builtin,
+                agg.all_soft,
+                deep_path_only,
+                types_only,
+            );
             Finding {
                 package,
                 verdict,
@@ -185,9 +206,11 @@ pub fn classify(manifest: &Manifest, references: &[Reference]) -> Vec<Finding> {
         .collect()
 }
 
+/// `builtin`: every reference to `package` was a builtin specifier.
 fn verdict_for(
     manifest: &Manifest,
     package: &str,
+    builtin: bool,
     all_soft: bool,
     deep_path_only: bool,
     types_only: bool,
@@ -195,7 +218,7 @@ fn verdict_for(
     if is_self(manifest, package) {
         return Verdict::SelfRef;
     }
-    if is_builtin(package) {
+    if builtin {
         return Verdict::Builtin;
     }
     if is_host_provided(package) {
@@ -431,6 +454,34 @@ mod tests {
         assert_eq!(v("ghost"), Verdict::HardPhantom);
         assert_eq!(v("maybe"), Verdict::SoftPhantom);
         assert_eq!(v("fs"), Verdict::Builtin);
+    }
+
+    #[test]
+    fn builtin_is_decided_per_specifier_not_per_package_name() {
+        // `require('buffer/')` is the documented way to load the npm `buffer`
+        // polyfill instead of Node's module, and `fs/whatever` is not a builtin
+        // subpath: Node resolves both from node_modules, so an undeclared one is a
+        // phantom. `buffer` and `fs/promises` stay builtins.
+        let m = Manifest::parse(br#"{"name":"pkg"}"#).unwrap();
+        let f = classify(
+            &m,
+            &refs(&[
+                ("buffer", "buffer/", false),
+                ("fs", "fs/whatever", false),
+                ("path", "path", false),
+                ("util", "util/types", false),
+                // A hard builtin `require('events')` beside a GUARDED
+                // `require('events/')` must not harden the npm package.
+                ("events", "events", false),
+                ("events", "events/", true),
+            ]),
+        );
+        let v = |name: &str| f.iter().find(|x| x.package == name).unwrap().verdict;
+        assert_eq!(v("buffer"), Verdict::HardPhantom);
+        assert_eq!(v("fs"), Verdict::HardPhantom);
+        assert_eq!(v("path"), Verdict::Builtin);
+        assert_eq!(v("util"), Verdict::Builtin);
+        assert_eq!(v("events"), Verdict::SoftPhantom);
     }
 
     #[test]

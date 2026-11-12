@@ -45,7 +45,7 @@ const previous = (() => {
 // First match wins; anything else is "untriaged" with the most informative
 // line of output, for a human to classify.
 const CLASSES = [
-  [(f, t) => /--permission requires --allow-addons/.test(t), "permission-model: nub refuses --permission without --allow-addons because its transpiler is a native addon (use --node)"],
+  [(f, t) => /--(experimental-)?permission (requires --allow-addons|blocks Nub's native addon)/.test(t), "permission-model: nub refuses --permission without --allow-addons because its transpiler is a native addon (use --node)"],
   [(f) => /test-internal-modules\.js$|test-loaders-hidden-from-users\.js$/.test(f), "layout-artifact: the Node checkout's tsconfig.json maps internal/* onto lib/ through paths, which nub resolves for require(), so the module-not-found the test asserts never happens"],
   [(f) => /^parallel\/test-process-versions\.js$/.test(f), "process-versions: nub adds process.versions.nub, so the fixed key list the test deep-equals no longer matches"],
   [(f) => /^parallel\/test-runner-coverage-default-exclusion\.mjs$/.test(f), "coverage-exclude: a grandchild spawned through process.execPath inherits nub's runtime exclude from NODE_OPTIONS, which turns Node's default test-file exclusion off there; nub restates the default only on its own argv so a grandchild's own exclude keeps working, so the two no-exclude cases see test files in their report"],

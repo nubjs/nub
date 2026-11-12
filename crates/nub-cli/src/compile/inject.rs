@@ -463,6 +463,9 @@ fn find_in_macho<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
         }
         if cmd == LC_SEGMENT_64 {
             let nsects = u32le(image, cursor + 64).context("truncated Mach-O segment")? as usize;
+            // A section header lies inside its load command, so the command's size
+            // bounds whatever count the file claims.
+            let nsects = nsects.min(cmdsize.saturating_sub(72) / 80);
             for i in 0..nsects {
                 // section_64 entries follow the 72-byte segment_command_64.
                 let sect = cursor
@@ -513,6 +516,12 @@ fn find_in_elf<'a>(image: &'a [u8], name: &str, shape: NoteShape) -> Result<Opti
         let offset = u64le(image, ph + 8).context("truncated ELF program header")?;
         let filesz = u64le(image, ph + 32).context("truncated ELF program header")?;
         let align = u64le(image, ph + 48).unwrap_or(4).max(4) as usize;
+        // The gABI requires a power of two, and the note walk's rounding depends on
+        // it: a huge non-power-of-two mask wraps an offset back toward the start of
+        // the segment, and the walk then revisits the same notes forever.
+        if !align.is_power_of_two() {
+            bail!("ELF note segment alignment {align} is not a power of two");
+        }
         let segment = slice_at(image, offset, filesz)?;
         if let Some(found) = find_in_note_segment(segment, align, name, shape) {
             return Ok(Some(found));
@@ -644,6 +653,24 @@ fn pe_header_offset(image: &[u8]) -> Result<usize> {
     Ok(pe)
 }
 
+/// The PE `Subsystem` field, read back the way Windows' loader reads it.
+///
+/// Exists for the same reason the version-resource scanner does: a cross-compiled
+/// Windows binary cannot be run on this host, so reading the field back out of the
+/// finished file is the only evidence the flip survived libsui's header rebuild.
+/// `None` when the image is not a placeable PE.
+pub fn pe_subsystem(image: &[u8]) -> Option<u16> {
+    let pe = pe_header_offset(image).ok()?;
+    match u16le(image, pe + 24) {
+        Some(0x20b) | Some(0x10b) => u16le(image, pe + 24 + 68),
+        _ => None,
+    }
+}
+
+/// `IMAGE_SUBSYSTEM_WINDOWS_GUI` — the value that stops Windows allocating a
+/// console for the process it starts from this image.
+pub const SUBSYSTEM_WINDOWS_GUI: u16 = 2;
+
 /// Flip a PE's subsystem to GUI, so Windows opens no console beside the app.
 ///
 /// `Subsystem` sits at optional-header offset 68 in BOTH PE32 and PE32+. The two
@@ -663,24 +690,6 @@ fn pe_header_offset(image: &[u8]) -> Result<usize> {
 /// gets a console allocated for that child, so the launcher must also pass
 /// `CREATE_NO_WINDOW`. Bun and Deno need this half alone because each one IS the
 /// process it is hiding.
-/// The PE `Subsystem` field, read back the way Windows' loader reads it.
-///
-/// Exists for the same reason the version-resource scanner does: a cross-compiled
-/// Windows binary cannot be run on this host, so reading the field back out of the
-/// finished file is the only evidence the flip survived libsui's header rebuild.
-/// `None` when the image is not a placeable PE.
-pub fn pe_subsystem(image: &[u8]) -> Option<u16> {
-    let pe = pe_header_offset(image).ok()?;
-    match u16le(image, pe + 24) {
-        Some(0x20b) | Some(0x10b) => u16le(image, pe + 24 + 68),
-        _ => None,
-    }
-}
-
-/// `IMAGE_SUBSYSTEM_WINDOWS_GUI` — the value that stops Windows allocating a
-/// console for the process it starts from this image.
-pub const SUBSYSTEM_WINDOWS_GUI: u16 = 2;
-
 pub(super) fn set_pe_subsystem_gui(image: &mut [u8]) -> Result<()> {
     let pe = pe_header_offset(image)?;
     let optional_header = pe + 24;
@@ -721,7 +730,7 @@ fn pe_sections(image: &[u8], pe: usize) -> Result<Vec<(u32, u32, u32, u32)>> {
 fn rva_to_offset(sections: &[(u32, u32, u32, u32)], rva: u32) -> Option<usize> {
     sections.iter().find_map(|&(va, vsize, raw, rawsize)| {
         let span = vsize.max(rawsize);
-        (rva >= va && rva < va.saturating_add(span)).then(|| (raw + (rva - va)) as usize)
+        (rva >= va && rva < va.saturating_add(span)).then(|| raw as usize + (rva - va) as usize)
     })
 }
 
@@ -1172,6 +1181,44 @@ mod tests {
         assert!(find_payload(ContainerFormat::Elf, b"nope").is_err());
         assert!(find_payload(ContainerFormat::Pe, b"nope").is_err());
         assert!(find_payload(ContainerFormat::MachO, b"nope").is_err());
+    }
+
+    /// A section's raw offset and an RVA's distance into it both come out of the
+    /// file, so their sum must not be taken in 32 bits: near `u32::MAX` it
+    /// overflows before the bounds check can refuse the extent.
+    #[test]
+    fn a_pe_resource_offset_past_u32_is_an_error_not_a_panic() {
+        let mut pe = fixtures::pe();
+        let opt = 0x80 + 24;
+        // Data directory entry 2 (resources): one byte into `.text`.
+        pe[opt + 112 + 16..opt + 112 + 20].copy_from_slice(&0x1001u32.to_le_bytes());
+        // `.text`'s PointerToRawData, at the top of the u32 range.
+        let section = opt + 240;
+        pe[section + 20..section + 24].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(find_payload(ContainerFormat::Pe, &pe).is_err());
+    }
+
+    /// The note walk rounds every offset up to the segment's `p_align`, and that
+    /// rounding only moves forward for a power of two. A huge non-power-of-two
+    /// alignment wraps the cursor back into the segment, so without the check the
+    /// scan never returns.
+    #[test]
+    fn an_elf_note_segment_with_a_malformed_alignment_is_refused() {
+        let mut elf = fixtures::elf();
+        let ph = elf.len();
+        let note_at = ph + 56;
+        elf[56..58].copy_from_slice(&2u16.to_le_bytes()); // e_phnum
+        elf.resize(note_at, 0);
+        elf[ph..ph + 4].copy_from_slice(&PT_NOTE.to_le_bytes());
+        elf[ph + 8..ph + 16].copy_from_slice(&(note_at as u64).to_le_bytes()); // p_offset
+        elf[ph + 32..ph + 40].copy_from_slice(&16u64.to_le_bytes()); // p_filesz
+        elf[ph + 48..ph + 56].copy_from_slice(&u64::MAX.to_le_bytes()); // p_align
+        // One note: namesz 4 ("SUI\0"), descsz 0, type 0.
+        elf.extend_from_slice(&4u32.to_le_bytes());
+        elf.extend_from_slice(&0u32.to_le_bytes());
+        elf.extend_from_slice(&0u32.to_le_bytes());
+        elf.extend_from_slice(b"SUI\0");
+        assert!(find_payload(ContainerFormat::Elf, &elf).is_err());
     }
 
     /// Minimal-but-real ELF and PE images to inject into. Hand-built rather than

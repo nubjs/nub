@@ -16,11 +16,7 @@ use std::thread;
 use std::time::Duration;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 // Inline `npm pack` output, so the fixture needs no test-only tar dependency.

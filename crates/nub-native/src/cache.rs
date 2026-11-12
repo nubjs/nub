@@ -83,7 +83,7 @@ pub struct CachedTransformResult {
 /// because every other key component is already JS-supplied, and because it is an
 /// INPUT to the cached bytes: the derived band goes into the key alongside them.
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
-#[napi]
+#[napi(catch_unwind)]
 pub fn transform_cached(
     filename: String,
     source: String,
@@ -307,14 +307,9 @@ fn match_empty_export_tail(s: &str) -> Option<String> {
     // After trimming trailing whitespace, the tail must be `export <ws> { <ws> }
     // <ws> ;?` preceded by start-of-string or a newline.
     let bytes = s.as_bytes();
-    let mut i = bytes.len();
+    let mut end = bytes.len();
 
     // optional trailing `;`
-    let mut end = i;
-    // skip trailing spaces/tabs (already trimmed, but be defensive)
-    while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
-        end -= 1;
-    }
     if end > 0 && bytes[end - 1] == b';' {
         end -= 1;
     }
@@ -347,9 +342,8 @@ fn match_empty_export_tail(s: &str) -> Option<String> {
     if marker_start > 0 && bytes[marker_start - 1] != b'\n' {
         return None;
     }
-    i = marker_start;
     // Trim a single preceding newline + the marker, leaving the rest intact.
-    let mut head_end = i;
+    let mut head_end = marker_start;
     if head_end > 0 && bytes[head_end - 1] == b'\n' {
         head_end -= 1;
     }
@@ -360,9 +354,8 @@ fn match_empty_export_tail(s: &str) -> Option<String> {
 /// napi `SourceMap` object the old JS path saw. Key order matches napi's struct
 /// field declaration order (the order napi `Object::set`s them), with `None`
 /// fields omitted (JS `JSON.stringify` skips `undefined`) and `sourcesContent`
-/// overridden to `[source]`. Built by hand because serde_json (no `preserve_order`
-/// feature) would reorder keys alphabetically, and the napi `SourceMap` type
-/// derives no `Serialize`.
+/// overridden to `[source]`. Built by hand because the napi `SourceMap` type derives
+/// no `Serialize`.
 fn serialize_source_map(map: &oxc_sourcemap::napi::SourceMap, source: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     let js_str = |s: &str| serde_json::Value::String(s.to_string()).to_string();

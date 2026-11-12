@@ -125,8 +125,8 @@ function refreshShimsIn(shimDir, binPath, binStat, ext) {
     return;
   }
 
-  // Writers on the shim dir serialize on ~/.nub/shims.lock (the Rust ShimLock —
-  // see shim.rs). Take it O_EXCL; steal a stale one (>30s old = the holder died
+  // Writers on the shim dir serialize on the sibling `<shimDir>.lock` (the Rust
+  // ShimLock — see shim.rs). Take it O_EXCL; steal a stale one (>30s old = the holder died
   // mid-operation); a FRESH lock means a live `nub pm shim`/`unshim` is rewriting
   // the dir right now — skip the refresh rather than interleave or block the
   // install. Lock failures for any other reason (read-only ~/.nub) proceed
@@ -216,7 +216,6 @@ function refreshShimsIn(shimDir, binPath, binStat, ext) {
 // the launcher's own recovery paths never rely on this file having run.
 function dropStaleWindowsExe() {
   if (process.platform !== "win32") return;
-  const path = require("path");
   for (const dir of (process.env.PATH || "").split(path.delimiter)) {
     if (!dir) continue;
     for (const verb of ["nub", "nubx", "nubr"]) {

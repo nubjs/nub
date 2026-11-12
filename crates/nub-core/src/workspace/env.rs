@@ -245,11 +245,12 @@ pub fn discover_env_files(project_root: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// A self-referential value grows MULTIPLICATIVELY per round, so the 10-round
-/// bound alone does not bound the output: `A=${A}${A}${A}${A}${A}${A}${A}${A}`
-/// is 8x per pass, i.e. 8^10 ≈ a billion characters, which leaves the process
-/// thrashing swap rather than looping forever. Reachable from a cloned repo —
-/// a `.env` file has always fed this, and a `nub.jsonc` `envFile` now does too.
+/// References MULTIPLY, so the 10-round bound alone does not bound the output:
+/// with `B=${A}${A}${A}${A}${A}${A}${A}${A}`, `C` the same eight of `B`, and so
+/// on, each link is 8x the one before, and ten links are 8^10 ≈ a billion times
+/// the first value, which leaves the process thrashing swap rather than looping
+/// forever. Reachable from a cloned repo — a `.env` file has always fed this,
+/// and a `nub.jsonc` `envFile` now does too.
 ///
 /// A value that would exceed the cap keeps its PRE-expansion text rather than
 /// being truncated: a truncated value is a silently wrong one, and the raw form
@@ -260,10 +261,17 @@ const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 /// Expand `${VAR}` and `$VAR` references within all values of a map, in-place.
 /// Multi-pass (up to 10 rounds) to resolve nested chains like `A=hello`,
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
-/// (consistent with [`load_env_files`]). Mutates `map` in-place and returns it
-/// for easy chaining.
+/// (consistent with [`load_env_files`]), and so does a reference that leads back
+/// to the variable it sits in ([`remove_reference_cycles`]). Mutates `map`
+/// in-place and returns it for easy chaining.
+///
+/// A `\$` escape stays escaped through every round and becomes a literal `$`
+/// only once the rounds are done. Resolving it inside a round would hand the
+/// next round a bare `$`, which it would then expand — `PASSWORD="foo\$bar"`
+/// would come out as `foo`, the exact result the escape exists to prevent.
 // @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#What Nub does#Expansion ruleset]]
 pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
+    remove_reference_cycles(map);
     for _ in 0..10 {
         let snapshot = map.clone();
         let mut changed = false;
@@ -280,7 +288,128 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
             break;
         }
     }
+    for value in map.values_mut() {
+        if value.contains("\\$") {
+            *value = value.replace("\\$", "$");
+        }
+    }
     map
+}
+
+/// Remove every reference that leads back to the variable it sits in, directly
+/// or through other variables: `A=x$A` becomes `x`, and `A=$B` with `B=$A`
+/// leaves both empty.
+///
+/// Expanding such a reference splices a variable into its own value, which
+/// never settles: each round re-reads the result, so `A=x$A` doubled ten times
+/// over into 1,024 copies of `x` and a literal `$A`. This runs before the
+/// rounds because a round copies raw text between variables, and a cycle copied
+/// into a variable outside it can no longer be told from an ordinary reference.
+///
+/// What stood on either side of a removed reference must not join up across
+/// the gap: `$B${A}suffix` would become `$Bsuffix`, another variable, and
+/// `$${A}B` would become `$B`. So a rewritten value spells every reference it
+/// keeps with braces and every other `$` as the `\$` escape, which leaves no
+/// piece of it able to absorb its neighbor.
+fn remove_reference_cycles(map: &mut HashMap<String, String>) {
+    let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+    let index: HashMap<&str, usize> = keys
+        .iter()
+        .enumerate()
+        .map(|(at, &key)| (key, at))
+        .collect();
+    let references: Vec<Vec<usize>> = keys
+        .iter()
+        .map(|&key| {
+            let mut to = Vec::new();
+            scan_references(&map[key], "$", |_, name| {
+                to.extend(index.get(name));
+                Some(())
+            });
+            to
+        })
+        .collect();
+    // A reference leads back to its own variable exactly when both ends sit in
+    // one strongly connected component, so one pass over the graph settles
+    // every reference. Asking per reference walks the rest of a chain each
+    // time, which is quadratic in the length of an ordinary acyclic chain.
+    let component = strongly_connected(&references);
+    let rewritten: Vec<(String, String)> = keys
+        .iter()
+        .enumerate()
+        .filter(|&(at, _)| {
+            references[at]
+                .iter()
+                .any(|&to| component[to] == component[at])
+        })
+        .filter_map(|(at, &key)| {
+            let value = scan_references(&map[key], "\\$", |result, name| {
+                if index
+                    .get(name)
+                    .is_some_and(|&to| component[to] == component[at])
+                {
+                    return Some(());
+                }
+                push_bounded(result, "${")?;
+                push_bounded(result, name)?;
+                push_bounded(result, "}")
+            })?;
+            Some((key.to_string(), value))
+        })
+        .collect();
+    map.extend(rewritten);
+}
+
+/// The strongly connected component of each node, as an id per node, where
+/// `edges[node]` lists the nodes it points at (Tarjan's algorithm). Iterative,
+/// because a chain of references is as deep as it is long.
+fn strongly_connected(edges: &[Vec<usize>]) -> Vec<usize> {
+    const UNSET: usize = usize::MAX;
+    let mut visited = vec![UNSET; edges.len()];
+    let mut lowest = vec![UNSET; edges.len()];
+    let mut component = vec![UNSET; edges.len()];
+    let mut open = Vec::new();
+    let mut visits = 0;
+    let mut components = 0;
+
+    for root in 0..edges.len() {
+        if visited[root] != UNSET {
+            continue;
+        }
+        // Each frame is a node and the next of its edges to follow.
+        let mut path = vec![(root, 0)];
+        while let Some(&mut (node, ref mut next)) = path.last_mut() {
+            if *next == 0 {
+                visited[node] = visits;
+                lowest[node] = visits;
+                visits += 1;
+                open.push(node);
+            }
+            if let Some(&to) = edges[node].get(*next) {
+                *next += 1;
+                if visited[to] == UNSET {
+                    path.push((to, 0));
+                } else if component[to] == UNSET {
+                    lowest[node] = lowest[node].min(visited[to]);
+                }
+                continue;
+            }
+            path.pop();
+            if let Some(&(parent, _)) = path.last() {
+                lowest[parent] = lowest[parent].min(lowest[node]);
+            }
+            if lowest[node] == visited[node] {
+                while let Some(member) = open.pop() {
+                    component[member] = components;
+                    if member == node {
+                        break;
+                    }
+                }
+                components += 1;
+            }
+        }
+    }
+    component
 }
 
 /// Load and merge `.env*` files WITHOUT `${VAR}` expansion — the *raw* values
@@ -350,7 +479,7 @@ fn load_env_files_raw_reporting(
                 // dispatcher → `useContext` of null), #263. Reaching here means ambient
                 // `NODE_ENV` is unset (shell-wins above), so this value WOULD have been
                 // injected — drop it and flag it for the caller's warning.
-                if key == "NODE_ENV" {
+                if env_keys_equal(&key, "NODE_ENV") {
                     node_env_ignored = true;
                     continue;
                 }
@@ -603,18 +732,36 @@ fn push_var_bounded(result: &mut String, name: &str, env: &HashMap<String, Strin
     }
 }
 
-/// Expand `${VAR}` and `$VAR` references in a value.
+/// Expand `${VAR}` and `$VAR` references in a value, for one round of
+/// [`expand_env_map`]. A `\$` escape is copied through unchanged, so the `$`
+/// after it is never expanded; [`expand_env_map`] resolves it after its last
+/// round.
 ///
 /// `None` means the expansion would exceed [`MAX_EXPANDED_VALUE`]. Callers keep
 /// the raw value in that case rather than publishing a truncated replacement.
 fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
+    scan_references(value, "$", |result, name| {
+        push_var_bounded(result, name, env)
+    })
+}
+
+/// Copy `value`, handing each `${VAR}` and `$VAR` reference to `reference`
+/// with the output so far and the name, and writing `bare_dollar` for a `$`
+/// that starts no reference. A `\$` escape is copied through unchanged, so the
+/// `$` after it is never a reference. `None` means the copy would exceed
+/// [`MAX_EXPANDED_VALUE`], or `reference` gave up.
+fn scan_references(
+    value: &str,
+    bare_dollar: &str,
+    mut reference: impl FnMut(&mut String, &str) -> Option<()>,
+) -> Option<String> {
     let mut result = String::new();
     let chars: Vec<char> = value.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
         if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '$' {
-            push_bounded(&mut result, "$")?;
+            push_bounded(&mut result, "\\$")?;
             i += 2;
             continue;
         }
@@ -624,7 +771,7 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
                 // ${VAR} form
                 if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
                     let var_name: String = chars[i + 2..i + 2 + close].iter().collect();
-                    push_var_bounded(&mut result, &var_name, env)?;
+                    reference(&mut result, &var_name)?;
                     i += close + 3;
                     continue;
                 }
@@ -637,10 +784,13 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
                     end += 1;
                 }
                 let var_name: String = chars[start..end].iter().collect();
-                push_var_bounded(&mut result, &var_name, env)?;
+                reference(&mut result, &var_name)?;
                 i = end;
                 continue;
             }
+            push_bounded(&mut result, bare_dollar)?;
+            i += 1;
+            continue;
         }
 
         push_char_bounded(&mut result, chars[i])?;
@@ -654,27 +804,31 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A self-referential value must not be expanded into swap. The 10-round
-    /// bound does not bound the OUTPUT — each pass multiplies, so eight
-    /// self-references reach ~8^10 characters and the process thrashes long
-    /// before it terminates. Measured before the cap: `nub` on a project whose
-    /// `envFile` held this line did not finish inside 15s.
+    /// A chain of repeating references must not be expanded into swap. The
+    /// 10-round bound does not bound the OUTPUT — each link multiplies the one
+    /// before it, so eight references per link reach ~8^10 times the first value
+    /// and the process thrashes long before it terminates.
     #[test]
-    fn a_self_referential_value_cannot_blow_up_the_expansion() {
+    fn a_chain_of_repeating_references_cannot_blow_up_the_expansion() {
         let mut map = HashMap::new();
-        map.insert(
-            "A".to_string(),
-            "${A}${A}${A}${A}${A}${A}${A}${A}".to_string(),
-        );
+        map.insert("L0".to_string(), "x".repeat(1024));
+        for link in 1..=10 {
+            map.insert(format!("L{link}"), format!("${{L{}}}", link - 1).repeat(8));
+        }
         map.insert("SANE".to_string(), "plain".to_string());
 
         expand_env_map(&mut map);
 
-        assert!(
-            map["A"].len() <= MAX_EXPANDED_VALUE,
-            "runaway value grew to {} bytes",
-            map["A"].len()
-        );
+        for (key, value) in &map {
+            assert!(
+                value.len() <= MAX_EXPANDED_VALUE,
+                "runaway {key} grew to {} bytes",
+                value.len()
+            );
+        }
+        // Proof the cap was reached: the last link is still unexpanded text.
+        assert!(map["L10"].contains("${"), "the chain never reached the cap");
+        assert_eq!(map["L2"].len(), 64 * 1024, "links under the cap expand");
         // The control: capping the pathological value must not stop ordinary
         // expansion happening around it.
         assert_eq!(map["SANE"], "plain");
@@ -683,6 +837,79 @@ mod tests {
         chain.insert("B".to_string(), "${A}_world".to_string());
         expand_env_map(&mut chain);
         assert_eq!(chain["B"], "hello_world", "normal chains still expand");
+    }
+
+    /// A reference that leads back to the variable it sits in expands to
+    /// nothing, whether it names the variable itself or reaches it through
+    /// others. Everything else in those values still expands, and a variable
+    /// outside the cycle that references one inside it gets that one's value.
+    #[test]
+    fn a_reference_back_to_its_own_variable_expands_to_nothing() {
+        let mut map = HashMap::new();
+        for (key, value) in [
+            ("SELF", "$SELF"),
+            ("WRAPPED", "pre-${WRAPPED}-post"),
+            ("PAIR_A", "a$PAIR_B"),
+            ("PAIR_B", "b${PAIR_A}"),
+            ("RING_A", "$RING_B"),
+            ("RING_B", "$RING_C"),
+            ("RING_C", "$RING_A"),
+            ("PLAIN", "plain"),
+            ("MIXED", "${PLAIN}/$MIXED/${PLAIN}"),
+            ("OUTSIDE", "<$PAIR_A|$SELF|$PLAIN>"),
+            ("ESCAPED", r"\$ESCAPED"),
+            ("NEAR", "$PLAIN${NEAR}suffix"),
+            ("NEAR_A", "$PLAIN${NEAR_B}_x"),
+            ("NEAR_B", "<$NEAR_A>"),
+            ("BARE", "$${BARE}PLAIN"),
+            ("OPEN", "${PLAIN$OPEN$PLAIN"),
+        ] {
+            map.insert(key.to_string(), value.to_string());
+        }
+
+        expand_env_map(&mut map);
+
+        assert_eq!(map["SELF"], "");
+        assert_eq!(map["WRAPPED"], "pre--post");
+        assert_eq!(map["PAIR_A"], "a");
+        assert_eq!(map["PAIR_B"], "b");
+        assert_eq!(map["RING_A"], "");
+        assert_eq!(map["RING_B"], "");
+        assert_eq!(map["RING_C"], "");
+        assert_eq!(map["MIXED"], "plain//plain");
+        assert_eq!(map["OUTSIDE"], "<a||plain>");
+        assert_eq!(
+            map["ESCAPED"], "$ESCAPED",
+            "an escaped dollar is no reference"
+        );
+        // The reference on one side and the text on the other stay apart.
+        assert_eq!(map["NEAR"], "plainsuffix");
+        assert_eq!(map["NEAR_A"], "plain_x");
+        assert_eq!(map["NEAR_B"], "<>");
+        assert_eq!(map["BARE"], "$PLAIN", "a bare dollar stays a dollar");
+        assert_eq!(map["OPEN"], "${PLAINplain", "an unclosed brace stays text");
+    }
+
+    /// Finding the references that lead back is one pass over the variables,
+    /// however long a chain or a ring of them is. A walk per reference takes
+    /// minutes on these, and a recursive one overflows the stack.
+    #[test]
+    fn a_long_chain_and_a_long_ring_of_references_are_one_pass() {
+        const LINKS: usize = 20_000;
+        let mut map: HashMap<String, String> = (0..LINKS)
+            .flat_map(|at| {
+                [
+                    (format!("CHAIN_{at}"), format!("${{CHAIN_{}}}", at + 1)),
+                    (format!("RING_{at}"), format!("$RING_{}", (at + 1) % LINKS)),
+                ]
+            })
+            .collect();
+        map.insert(format!("CHAIN_{LINKS}"), "end".to_string());
+
+        expand_env_map(&mut map);
+
+        assert_eq!(map[&format!("CHAIN_{}", LINKS - 10)], "end");
+        assert!((0..LINKS).all(|at| map[&format!("RING_{at}")].is_empty()));
     }
 
     #[test]
@@ -715,14 +942,34 @@ mod tests {
 
         assert_eq!(
             expand_vars(&map["ESCAPED"], &map),
-            Some("$SMALL::resolved".to_string()),
-            "one pass keeps an escaped dollar literal and drops a missing variable"
+            Some(r"\$SMALL::resolved".to_string()),
+            "one pass keeps an escaped dollar escaped and drops a missing variable"
         );
 
         expand_env_map(&mut map);
 
         assert_eq!(map["AT_LIMIT"].len(), MAX_EXPANDED_VALUE);
-        assert_eq!(map["ESCAPED"], "resolved::resolved");
+        assert_eq!(map["ESCAPED"], "$SMALL::resolved");
+    }
+
+    /// The documented `.env` example: `PASSWORD="foo\$bar"` is the literal
+    /// `foo$bar`, and a value that references it gets the same literal. The
+    /// escape has to survive the later rounds, which would otherwise expand the
+    /// now-bare `$bar` to nothing and leave `foo`.
+    #[test]
+    fn an_escaped_dollar_stays_literal_across_expansion_rounds() {
+        let unset = "NUB_TEST_ESCAPE_TARGET_NEVER_SET";
+        assert!(std::env::var_os(unset).is_none());
+        let mut map = HashMap::new();
+        map.insert("PASSWORD".to_string(), format!(r"foo\${unset}"));
+        map.insert("COPY".to_string(), "${PASSWORD}".to_string());
+        map.insert("BRACED".to_string(), r"\${PASSWORD}".to_string());
+
+        expand_env_map(&mut map);
+
+        assert_eq!(map["PASSWORD"], format!("foo${unset}"));
+        assert_eq!(map["COPY"], format!("foo${unset}"));
+        assert_eq!(map["BRACED"], "${PASSWORD}");
     }
 
     #[test]
@@ -873,8 +1120,7 @@ mod tests {
 
     /// Node's `--env-file` treats backticks as a third quote style alongside
     /// `'` and `"` (`src/node_dotenv.cc`): the surrounding backticks are
-    /// stripped and the content is taken verbatim. dotenvy alone leaves the
-    /// backticks in the value, so [`parse_env`] must close the gap. Covers all
+    /// stripped and the content is taken verbatim. Covers all
     /// three quote styles plus the empty-backtick case the regression flagged
     /// (`parallel/test-dotenv.js` BACKTICKS / EMPTY_BACKTICKS). Reference
     /// values were captured from node-v25.8.1's `--env-file` on this fixture.
@@ -1022,11 +1268,10 @@ mod tests {
 
     #[test]
     fn expand_escaped_dollar() {
-        let env = HashMap::new();
-        assert_eq!(
-            expand_vars("price=\\$5", &env),
-            Some("price=$5".to_string())
-        );
+        let mut map = HashMap::new();
+        map.insert("PRICE".to_string(), "price=\\$5".to_string());
+        expand_env_map(&mut map);
+        assert_eq!(map["PRICE"], "price=$5");
     }
 
     // `discover_env_files` underpins `nub watch`'s `--env-file` precedence: it
@@ -1160,6 +1405,28 @@ mod tests {
             Some("secret"),
             "sibling keys must still load after NODE_ENV is stripped; got {vars:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows environment keys ignore ASCII case, so a `.env` `node_env` IS
+    /// `NODE_ENV` there and must be dropped like it. On Unix it is a separate,
+    /// ordinary variable and loads.
+    #[test]
+    fn dotenv_node_env_is_matched_with_the_platforms_key_case_rule() {
+        let dir = std::env::temp_dir().join(format!("nub-nodeenv-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".env"), "node_env=development\nAPP_KEY=secret\n").unwrap();
+
+        let vars = load_env_files(&dir);
+
+        assert_eq!(
+            vars.contains_key("node_env"),
+            !cfg!(windows),
+            "`node_env` is NODE_ENV on Windows only; got {vars:?}"
+        );
+        assert_eq!(vars.get("APP_KEY").map(String::as_str), Some("secret"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

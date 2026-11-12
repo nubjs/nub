@@ -228,8 +228,8 @@ pub struct Manifest {
     /// and one plain line from the terminal.
     #[serde(default)]
     pub install_message: Option<String>,
-    /// Node CLI flags baked in by `--node-flag`, prepended to the launcher's own
-    /// injected flags so a later user flag wins where Node takes the last
+    /// Node CLI flags baked in by `--node-options`, placed AFTER the launcher's own
+    /// injected flags so a publisher's flag wins where Node takes the last
     /// occurrence.
     ///
     /// The equivalent of Bun's `compile.execArgv`. Some libraries only work
@@ -289,7 +289,7 @@ pub struct Manifest {
     ///
     /// Set only for a payload that reduces to generated JavaScript chunks and the
     /// bootstrap — no `--external` shim, no verbatim file, no worker chunk, and an
-    /// acyclic chunk graph (see `nub compile`'s `inline_launch_plan`). A payload
+    /// acyclic chunk graph (see `nub compile`'s `inline::classify`). A payload
     /// that misses any of those extracts exactly as it always has.
     ///
     /// Two container conventions follow from it, and they are the reason this is a
@@ -1087,7 +1087,8 @@ mod tests {
         );
         assert!(
             view.manifest.hide_console,
-            "the hidden-console flag decides whether the launcher passes              CREATE_NO_WINDOW, so losing it in the payload un-hides the artifact"
+            "the hidden-console flag decides whether the launcher passes \
+             CREATE_NO_WINDOW, so losing it in the payload un-hides the artifact"
         );
         assert_eq!(view.app_files.len(), 2);
         assert_eq!(view.app_files[0].name, "main.js");

@@ -16,11 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 /// A unique temp project dir under the system temp root (never under $HOME,
@@ -1233,8 +1229,7 @@ fn prefer_offline_does_not_trip_the_yarn_offline_mirror_fatal() {
 /// No network: every dep is a local member, the yarn.lock is empty, and the
 /// install is a frozen read (yarn.lock left byte-identical). Before the fix
 /// nub printed "✓ Already up to date" and linked nothing, so `@x/app` could not
-/// resolve `@x/utils`. The differential reference (real yarn 1.x links both)
-/// lives in `.fray/yarn-workspace-member-linking.md`; this guards the nub side.
+/// resolve `@x/utils`. Real yarn 1.x links both; this guards the nub side.
 #[test]
 fn install_links_yarn_workspace_member_into_consumer() {
     let dir = pm_tmpdir("yarn-ws-link");
@@ -1531,8 +1526,7 @@ fn lockfile_false_does_not_demand_the_pnpm_pin() {
 /// provenance attestation `10.3.1` carried — and `trustPolicy=no-downgrade`
 /// aborts during resolution, before anything is linked. (Depends on
 /// `node-gyp@10.3.0`'s live registry provenance metadata staying a downgrade vs
-/// `10.3.1`; the canonical case is recorded in
-/// `.fray/install-warm-fastpath-trust-gate.md`.)
+/// `10.3.1`.)
 #[test]
 #[ignore = "network: resolves node-gyp@10.3.0 from the npm registry to assert the trust-downgrade abort"]
 fn cold_install_with_trust_downgrade_still_aborts() {

@@ -394,18 +394,21 @@ pub fn pm_version_cached(pm: super::Pm, version: &str, store_root: &Path) -> boo
 /// counterpart of [`registry::resolve_dist`]'s range arm: same node-semver→Cargo
 /// bridge, same highest-match rule, but over the store's version-named dirs
 /// instead of the packument. Non-version dirs (`.tmp-…` work dirs) parse-fail
-/// out of the scan.
+/// out of the scan, and an incomplete version dir is passed over for the next
+/// highest runnable one.
 fn best_cached_match(pm_store: &Path, spec: &str) -> Option<(String, PathBuf)> {
     let req = semver::VersionReq::parse(&registry::normalize_range(spec)).ok()?;
     let versions = std::fs::read_dir(pm_store).ok()?;
-    let best = versions
+    let (best, bin) = versions
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter_map(|name| semver::Version::parse(&name).ok())
         .filter(|v| req.matches(v))
-        .max()?
-        .to_string();
-    let bin = cached_bin(pm_store, &best)?;
-    Some((best, bin))
+        .filter_map(|v| {
+            let bin = cached_bin(pm_store, &v.to_string())?;
+            Some((v, bin))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))?;
+    Some((best.to_string(), bin))
 }
 
 /// The download/verify/extract/place body — factored out so [`provision_pm`]'s
@@ -449,27 +452,15 @@ fn install(
     // shows two lines. Non-TTY (CI logs, pipes) keeps all three. `quiet_using`
     // drops the `Using…` line for the PM shim, whose own `<pm>@<version> (via nub
     // shim)` header (printed before this) already states the resolved version.
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     if !quiet_using {
         match resolved_from {
             Some(p) => eprintln!("Using {pm} {} (resolved from {p})", dist.version),
             None => eprintln!("Using {pm} {}", dist.version),
         }
     }
-    let mut announced = false;
+    let mut line = download::InstallLine::new("Installing...");
     download::download_to_file_auth(&dist.tarball, &tarball, auth, |_done, total| {
-        if !announced {
-            announced = true;
-            let size = match total {
-                Some(t) => format!(" ({} MB)", t / 1_000_000),
-                None => String::new(),
-            };
-            if tty {
-                eprint!("Installing...{size}");
-            } else {
-                eprintln!("Installing...{size}");
-            }
-        }
+        line.progress(total)
     })
     .with_context(|| format!("downloading {pm} {}", dist.version))?;
 
@@ -493,13 +484,10 @@ fn install(
 
     extract_and_place(pm, dist, pm_store, final_dir, &tarball)?;
 
-    // \r + clear-to-EOL rewrites the Installing line on a TTY (it was printed
-    // without a newline there); non-TTY just gets a third line.
-    let rewrite = if tty { "\r\x1b[K" } else { "" };
-    eprintln!(
-        "{rewrite}Installed in {:.1}s",
+    line.finish(format_args!(
+        "Installed in {:.1}s",
         started.elapsed().as_secs_f64()
-    );
+    ));
     Ok(())
 }
 
@@ -1344,6 +1332,20 @@ mod tests {
             "staging validation fails before moving an incomplete incumbent"
         );
         assert_no_placement_debris(&pm_store);
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn offline_range_match_passes_over_an_incomplete_newer_version() {
+        // A higher version dir with no runnable install must not hide an older
+        // complete one that satisfies the same range.
+        let store = offline_store_with("range-incomplete", "9.5.0");
+        let pm_store = store.join("pm").join("pnpm");
+        std::fs::create_dir_all(pm_store.join("9.6.0").join("package")).unwrap();
+        let (version, bin) =
+            best_cached_match(&pm_store, "^9").expect("the complete 9.5.0 satisfies ^9");
+        assert_eq!(version, "9.5.0");
+        assert!(bin.ends_with("9.5.0/package/bin/pnpm.cjs"));
         let _ = std::fs::remove_dir_all(&store);
     }
 

@@ -22,16 +22,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::node_index;
-use super::{HostTarget, provision_node, resolve_mirror_base};
+use super::{HostTarget, provision_node, resolve_mirror_base, version_dir_has_node};
 use crate::node::discovery;
 use crate::node::version::{NodeVersion, VersionPin};
-
-/// True when `<dir>` holds an installed Node (`bin/node` unix, `node.exe`
-/// windows) — the cache-hit / install-complete signal, matching the store
-/// layout `provision_node` writes.
-fn version_dir_has_node(dir: &Path) -> bool {
-    dir.join("bin").join("node").is_file() || dir.join("node.exe").is_file()
-}
 
 /// The concrete versions currently in `store` (`<store>/<version>/`), each dir
 /// name parsed as a version and confirmed to carry a Node binary. Newest first.
@@ -160,27 +153,23 @@ fn store_root_of(store: &Path) -> &Path {
     store.parent().unwrap_or(store)
 }
 
-/// The version of whatever `node` is on PATH, if any (skipping nub's own shim
-/// dirs is `which_node`'s job; here a plain probe is enough for the PATH-reuse
-/// skip check). `None` if no node is found or it doesn't report a version.
+/// The version of the `node` on PATH, with nub's own shims stepped over. A shim
+/// answers `--version` with the working directory's pin, and downloads that
+/// version first when it is not installed. `None` if no node is found or it
+/// doesn't report a version.
 fn path_node_version() -> Option<NodeVersion> {
-    let out = std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    discovery::discover_shell_node()
+        .ok()
+        .map(|node| node.version)
 }
 
 /// Bare `nub node install`: resolve the project pin through the FULL chain —
 /// `devEngines.runtime` (#1) → `.node-version` (#2) → `.nvmrc` (#3) →
-/// `engines.node` (#4), the same `resolve_pin_chain` the run path uses, so the
-/// version installed is the version a run would resolve (never the pin-file
-/// version when `devEngines.runtime` outranks it). Errors clearly when there's
-/// no pin to install; chain warnings (onFail:warn, unusable specs) land on
-/// stderr here since this entry point resolves the chain itself.
+/// `.tool-versions` (#4) → `engines.node` (#5), the same `resolve_pin_chain` the
+/// run path uses, so the version installed is the version a run would resolve
+/// (never the pin-file version when `devEngines.runtime` outranks it). Errors
+/// clearly when there's no pin to install; chain warnings (onFail:warn, unusable
+/// specs) land on stderr here since this entry point resolves the chain itself.
 pub fn install_from_pin(store: &Path, cwd: &Path) -> Result<InstallOutcome> {
     let chain = discovery::resolve_pin_chain(cwd)?;
     for warning in &chain.warnings {

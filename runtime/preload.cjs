@@ -114,7 +114,8 @@ const { installSyncPolyfills } = __require("./polyfills.cjs");
 
 // Force the async loader-worker tier when this process will host a FOREIGN async
 // `module.register` loader (tsx/ts-node) on a Node whose sync/async hook composition
-// is broken (22.15.0–24.11.0, fixed in Node 24.11.1; nodejs/node#59666). There, nub's
+// is broken (22.15.0–24.11.1 and 25.0–25.1, fixed in Node 24.12.0 and 25.2.0;
+// nodejs/node#59666). There, nub's
 // sync `module.registerHooks` forces resolution synchronous and reaches the foreign
 // loader's unimplemented `resolveSync` stub → ERR_METHOD_NOT_IMPLEMENTED. Registering
 // nub's hooks via the async path instead keeps BOTH loaders async, so Node's all-async
@@ -255,7 +256,7 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   // Also loaded on THIS tier. The chainer is carried by nub's own preload on both
   // tiers, so skipping it here silently dropped every entry whenever the async tier
   // was selected — which an inherited `--import` triggers on the broken-compose band
-  // (22.15–24.11) via shouldAutoAsyncTierAtPreload.
+  // (22.15–24.11, 25.0–25.1) via shouldAutoAsyncTierAtPreload.
   common.requireUserPreloadChain();
 }
 
@@ -295,7 +296,7 @@ common.installServeEntry(true);
 // ── Lazy ESM-side-effect polyfills (R7) ─────────────────────────────
 // The two ESM side-effect polyfills — the browser-shape Worker global
 // (worker-polyfill.mjs) and Web Locks (navigator-locks.mjs) — were previously
-// installed EAGERLY at preload (polyfills.cjs:installEsmPolyfillsSync). That drags
+// installed EAGERLY at preload. That drags
 // ~50 builtins into bootstrap on EVERY startup: worker-polyfill.mjs imports
 // node:worker_threads, which pulls internal/streams/* (readable/writable/duplex/
 // transform/pipeline/…), internal/worker, internal/worker/io,

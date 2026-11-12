@@ -9,11 +9,7 @@
 use std::path::PathBuf;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 /// `nub run serve` (a plain `sleep`, which `sh -c` execs so the sleeper IS the

@@ -211,7 +211,6 @@ clx = "3"
 # one copy and the prompt aesthetic matches the engine's own pickers.
 demand = "2"
 dirs-next.workspace = true
-dotenvy = "0.15"
 # The string form of `nub.jsonc#prefix` splits like a POSIX shell word list.
 shlex = "2"
 # `preserve_order` keeps serde_json::Map in INSERTION order (IndexMap-backed) so

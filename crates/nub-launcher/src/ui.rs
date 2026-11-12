@@ -7,7 +7,7 @@
 //!
 //! Three presentations, chosen once at startup and never revisited:
 //!   - **Silent** — stderr is not a terminal, or the artifact was built with
-//!     `--no-install-message`. Not one byte is written, so piped output and CI
+//!     `--install-message ""`. Not one byte is written, so piped output and CI
 //!     logs are byte-identical to a run with no UI at all.
 //!   - **Line** — a terminal we can't safely place a box in (size unknown, too
 //!     small, `TERM=dumb`, Windows where we can't query the console). One plain

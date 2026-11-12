@@ -11,11 +11,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // profile dir
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 /// The release-artifact target for this host — the subset of `platform_target()`

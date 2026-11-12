@@ -915,8 +915,8 @@ mod tests {
 
     #[test]
     fn an_ancestors_rival_does_not_disclaim_a_member_schema() {
-        // The other side of the chain scan, and a regression this PR shipped
-        // before review caught it. `dotenv-extended` hoisted at the workspace root
+        // The other side of the chain scan, and a regression a whole-chain read
+        // once introduced. `dotenv-extended` hoisted at the workspace root
         // for some sibling's benefit says nothing about a schema a member ships,
         // declares the loader for, and has installed — but reading it flipped
         // `is_ours`, which drops the hand-over AND silences the diagnostic gated on

@@ -5,15 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    // `nub` on unix, `nub.exe` on Windows. `Command::new` auto-appends `.exe`
-    // on Windows so the bare name spawns fine, but a literal `std::fs::copy` of
-    // this path (the nubx argv0 test) does NOT — it needs the real filename or
-    // the source doesn't exist and the copy panics. EXE_SUFFIX is "" off Windows.
-    path.push(format!("nub{}", std::env::consts::EXE_SUFFIX));
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 fn fixtures_dir() -> PathBuf {
@@ -13387,6 +13379,44 @@ fn phantom_dependency_miss_points_at_the_hoisted_opt_out() {
     assert!(
         !typo.contains("phantom dependency"),
         "a package absent from .store is a genuine miss, not a phantom dep — no hint: {typo}"
+    );
+}
+
+/// The hint is spliced into the printed stack in place of the original message.
+/// That message names the requiring file, and a `$` in its path is text, not a
+/// replacement pattern. The entry is CommonJS because `require` gets the hint on
+/// every Node tier.
+#[test]
+fn phantom_dependency_hint_keeps_a_dollar_sign_in_the_requiring_path() {
+    let dir = unique_test_cache().join("a$$b");
+    let mk = |rel: &str, body: &str| {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    mk("package.json", r#"{"name":"app","version":"1.0.0"}"#);
+    mk(
+        "node_modules/.store/ghost@1.0.0/node_modules/ghost/package.json",
+        r#"{"name":"ghost","version":"1.0.0"}"#,
+    );
+    mk("app.cjs", "require('ghost');\n");
+
+    let out = Command::new(nub_binary())
+        .arg("app.cjs")
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("phantom dependency"), "{stderr}");
+    // The `Require stack` entry is the part of the message that carries the path.
+    let line = stderr
+        .lines()
+        .find(|line| line.starts_with("- ") && line.ends_with("app.cjs"))
+        .unwrap_or_else(|| panic!("no require-stack line: {stderr}"));
+    assert!(
+        line.contains("a$$b"),
+        "the requiring path must print verbatim: {line}"
     );
 }
 

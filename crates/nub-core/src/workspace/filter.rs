@@ -323,16 +323,38 @@ fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
     let content = fs::read_to_string(&path).ok()?;
     let mut patterns = Vec::new();
     let mut in_packages = false;
-    for line in content.lines() {
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
         let trimmed = line.trim();
-        if trimmed == "packages:" {
+        // The key alone, or with a comment after it, opens a block list.
+        if trimmed
+            .strip_prefix("packages:")
+            .is_some_and(|rest| rest.is_empty() || rest.trim_start().starts_with('#'))
+        {
             in_packages = true;
             continue;
         }
+        if !in_packages
+            && let Some(flow) = trimmed
+                .strip_prefix("packages:")
+                .and_then(|rest| rest.trim_start().strip_prefix('['))
+        {
+            // A flow sequence may wrap, so it reads on through the following lines.
+            let rest = std::iter::once(flow)
+                .chain(lines.by_ref())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for item in yaml_flow_sequence_items(&rest).unwrap_or_default() {
+                let item = yaml_list_item(&item);
+                if !item.is_empty() {
+                    patterns.push(item.to_string());
+                }
+            }
+            break;
+        }
         if in_packages {
             if let Some(rest) = trimmed.strip_prefix("- ") {
-                let pattern = rest.trim().trim_matches('\'').trim_matches('"');
-                patterns.push(pattern.to_string());
+                patterns.push(yaml_list_item(rest).to_string());
             } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
                 break;
             }
@@ -342,6 +364,70 @@ fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
         None
     } else {
         Some(patterns)
+    }
+}
+
+/// The raw items of a YAML flow sequence, `text` starting just after its `[`, for
+/// [`yaml_list_item`] to unquote. Commas and `]` inside quotes, and comments, do
+/// not end an item. `None` when the sequence never closes.
+fn yaml_flow_sequence_items(text: &str) -> Option<Vec<String>> {
+    let mut items = Vec::new();
+    let mut item = String::new();
+    let mut quote = None;
+    let mut after_space = true;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            item.push(c);
+            if c == q {
+                quote = None;
+            }
+            after_space = false;
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                item.push(c);
+            }
+            '#' if after_space => {
+                chars.by_ref().find(|&c| c == '\n');
+                item.push(' ');
+                after_space = true;
+                continue;
+            }
+            ',' => items.push(std::mem::take(&mut item)),
+            ']' => {
+                items.push(item);
+                return Some(items);
+            }
+            _ => item.push(c),
+        }
+        after_space = c.is_whitespace();
+    }
+    None
+}
+
+/// The scalar of one `pnpm-workspace.yaml` sequence item, without its quotes
+/// or a trailing `# comment`. A quoted item ends at its closing quote. In a
+/// plain item YAML starts a comment only at a `#` preceded by whitespace, so
+/// `pkgs/a#b` keeps its `#`.
+fn yaml_list_item(item: &str) -> &str {
+    let item = item.trim();
+    match item.chars().next() {
+        Some(quote @ ('\'' | '"')) => {
+            let body = &item[1..];
+            body.find(quote).map_or(body, |end| &body[..end])
+        }
+        _ => {
+            let end = item
+                .match_indices(" #")
+                .chain(item.match_indices("\t#"))
+                .map(|(at, _)| at)
+                .min()
+                .unwrap_or(item.len());
+            item[..end].trim_end()
+        }
     }
 }
 
@@ -800,6 +886,100 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "@x/a"),
             "pnpm-workspace.yaml member must be discovered when pnpm-lock.yaml is present; got {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `# comment` after a sequence item is YAML, not part of the pattern, for
+    /// quoted and plain items alike; a `#` inside a plain scalar is not a comment.
+    #[test]
+    fn pnpm_workspace_yaml_items_may_carry_trailing_comments() {
+        let dir = ws_fixture("comments");
+        std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
+        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages:\n  - 'pkgs/*' # app packages\n  - tools/*\t# tooling\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("tools/t")).unwrap();
+        std::fs::write(dir.join("tools/t/package.json"), r#"{"name":"@x/t"}"#).unwrap();
+
+        let names: HashSet<String> = discover_members(&dir).into_iter().map(|m| m.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["@x/a".to_string(), "@x/t".to_string()]),
+            "commented items must still select their members"
+        );
+        assert_eq!(yaml_list_item("pkgs/a#b"), "pkgs/a#b");
+        assert_eq!(yaml_list_item("\"pkgs/*\"  # c"), "pkgs/*");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flow_sequence_packages_are_workspace_members() {
+        let dir = ws_fixture("flow");
+        std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
+        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        for (rel, name) in [("tools/t", "@x/t"), ("pkgs/b", "@x/b")] {
+            std::fs::create_dir_all(dir.join(rel)).unwrap();
+            std::fs::write(
+                dir.join(rel).join("package.json"),
+                format!(r#"{{"name":"{name}"}}"#),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages: ['pkgs/*', \"tools/*\", '!pkgs/b']\n",
+        )
+        .unwrap();
+
+        let names: HashSet<String> = discover_members(&dir).into_iter().map(|m| m.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["@x/a".to_string(), "@x/t".to_string()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The flow shapes pnpm's YAML parser accepts: plain and quoted items, a list
+    /// wrapped over several lines with comments and a trailing comma, and an empty
+    /// list, which selects no members.
+    #[test]
+    fn flow_sequence_packages_read_like_a_yaml_parser() {
+        let dir = ws_fixture("flow-shapes");
+        let read = |yaml: &str| {
+            std::fs::write(dir.join("pnpm-workspace.yaml"), yaml).unwrap();
+            read_pnpm_workspace(&dir)
+        };
+        let owned = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+
+        assert_eq!(
+            read("packages: ['a/*', \"b/*\", c/*] # members\n"),
+            owned(&["a/*", "b/*", "c/*"])
+        );
+        assert_eq!(
+            read(
+                "packages: [\n  'a/*', # apps\n  \"b,c/*\",\n  # tools\n  c/*\n  , '!**/test/**',\n]\nonlyBuiltDependencies: [esbuild]\n"
+            ),
+            owned(&["a/*", "b,c/*", "c/*", "!**/test/**"])
+        );
+        assert_eq!(read("packages: []\n"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_comment_after_the_packages_key_still_opens_the_block_list() {
+        let dir = ws_fixture("block-comment");
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages: # every app\n  - 'apps/*'\n  # and the tools\n  - tools/*\ncatalog:\n  - not-a-member\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_pnpm_workspace(&dir),
+            Some(vec!["apps/*".to_string(), "tools/*".to_string()])
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1189,7 +1189,7 @@ fn read_jsonc(path: &str) -> Result<Value, String> {
     // `extends` chain — is re-opened here, so the same one marker has to be
     // stripped again or a valid configuration silently falls back to no matcher.
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH)
+    nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH, nub_json_guard::Dialect::Jsonc)
         .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
     // The `Option` is the deserialization target, not a wrapper the parser adds.
     // It collapses an empty document and a literal `null` into `None`; a tsconfig
@@ -1521,12 +1521,15 @@ impl PathsMatcher {
                 Pattern::Wildcard { .. } => wildcards.push(entry),
             }
         }
-        // Longest matching prefix wins (ties favor the earlier entry).
+        // Longest matching prefix wins (ties favor the earlier entry). The length
+        // test is TypeScript's: a prefix and suffix that overlap inside the
+        // specifier (`ab*b` against `ab`) do not match.
         let mut best: Option<&(Pattern, Vec<String>)> = None;
         let mut best_len: isize = -1;
         for entry in &wildcards {
             if let Pattern::Wildcard { prefix, suffix } = &entry.0 {
-                if specifier.starts_with(prefix.as_str())
+                if specifier.len() >= prefix.len() + suffix.len()
+                    && specifier.starts_with(prefix.as_str())
                     && specifier.ends_with(suffix.as_str())
                     && prefix.len() as isize > best_len
                 {
@@ -1686,6 +1689,22 @@ mod tests {
                 Some(&explicit.to_string_lossy())
             ),
             vec!["explicit"]
+        );
+    }
+
+    /// A `paths` pattern whose prefix and suffix would overlap inside the specifier
+    /// (`ab*b` against `ab`) is not a match, as in TypeScript, so the next-longest
+    /// pattern answers instead.
+    #[test]
+    fn a_paths_pattern_whose_prefix_and_suffix_overlap_does_not_match() {
+        let dir = project(&[(
+            "tsconfig.json",
+            r#"{ "compilerOptions": { "paths": { "ab*b": ["./nope/*"], "a*": ["./lib/*"] } } }"#,
+        )]);
+        let matched = super::match_paths(&dir.path().to_string_lossy(), "ab", None);
+        assert!(
+            matched.len() == 1 && matched[0].ends_with("/lib/b"),
+            "expected only the `a*` substitution; got {matched:?}",
         );
     }
 

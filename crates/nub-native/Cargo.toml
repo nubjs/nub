@@ -14,16 +14,17 @@
 # package.json) and the blake3 transpile-cache-key contract. Any oxc/napi bump
 # must move in BOTH workspaces together.
 #
-# It depends on `crates/nub-cache-key`, `crates/nub-data-formats`,
-# `crates/nub-json-guard`, and `crates/nub-tsconfig` (all of which stay members of
-# the MAIN workspace) via the `../…` path deps below — path deps crossing the
-# workspace boundary. Their own `workspace = true` inheritance resolves against
-# the main workspace (where they are members); here they are just path dependencies
-# that this workspace recompiles under its own unwind profile.
+# It depends on `crates/nub-cache-key`, `crates/nub-data-formats` and
+# `crates/nub-tsconfig` (all of which stay members of the MAIN workspace) via the
+# `../…` path deps below — path deps crossing the workspace boundary. Their
+# manifests inherit nothing from a workspace, so they parse standalone wherever this
+# workspace is built; here they are just path dependencies that this workspace
+# recompiles under its own unwind profile.
 #
-# Built directly (e.g. `cargo build -p nub-native --manifest-path
-# crates/nub-native/Cargo.toml`); `.cargo/config.toml` next to this file routes
-# output into the repo-root `target/` so the addon-copy paths in the Makefile and
+# Built from inside this directory (`cd crates/nub-native && cargo build`), never
+# with `--manifest-path` from elsewhere: cargo finds `.cargo/config.toml` by walking
+# up from the working directory, and the one next to this file is what routes
+# output into the repo-root `target/`, so the addon-copy paths in the Makefile and
 # CI (`target/<profile>/libnub_native.*`) are unchanged.
 [workspace]
 members = ["."]
@@ -39,15 +40,14 @@ repository = "https://github.com/nubjs/nub"
 # Pins MUST match the main workspace's [workspace.dependencies] exactly (see the
 # header comment). Only the subset nub-native actually uses is duplicated here.
 [workspace.dependencies]
-jsonc-parser = { version = "0.32.4", features = ["serde"] }
 # napi 3 (not 2): oxc_napi 0.140.0 and oxc_sourcemap[napi] are built against
 # napi 3, and a single cdylib cannot mix napi-2 and napi-3 `#[napi]` derives
 # (the OxcError / SourceMap return types would fail to bridge). napi 3 is the
 # version oxc itself ships on. The `napi8` feature pins the NAPI-version FLOOR to
 # 8 (node_api_version 8 — available since Node 12.22/14.12/15.0, comfortably below
 # the 18.19 floor) so any accidental higher-API use fails at compile-time rather
-# than at load on 18.19. serde-json preserves the bridge the data parsers rely on.
-napi = { version = "3", features = ["serde-json", "napi8"] }
+# than at load on 18.19.
+napi = { version = "3", features = ["napi8"] }
 napi-derive = "3"
 # oxc transpiler — pinned EXACT and lockstepped with the main workspace's pin,
 # crates/nub-phantom-core's parser subset, and the npm `@oxc-project/runtime`
@@ -62,7 +62,6 @@ oxc = { version = "=0.140.0", features = ["full"] }
 oxc_napi = "=0.140.0"
 oxc_sourcemap = { version = "=8.1.0", features = ["napi"] }
 rustc-hash = "2"
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # blake3 content hash for the transpile-cache key + integrity prefix (SIMD,
 # replaced SHA-256 on the warm path; schema v4). Lockstep with the main workspace.
@@ -128,43 +127,29 @@ doctest = false
 [dependencies]
 napi.workspace = true
 napi-derive.workspace = true
-# `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed)
-# rather than sorting keys. This is load-bearing for `tsconfig_hash` byte-parity:
-# the old JS computed the cache-key component as `JSON.stringify(compilerOptions)`
-# over the get-tsconfig-normalized object, whose key order is the JSONC-parse +
-# extends-merge + normalize INSERTION order. Re-serializing here must reproduce
-# that order exactly, or every transpile-cache key shifts.
-serde_json = { workspace = true, features = ["preserve_order"] }
-jsonc-parser.workspace = true
+# Reads `package.json` `main`/`exports` in the resolver. The `preserve_order`
+# feature that `tsconfig_hash` depends on is enabled by `nub-tsconfig` itself.
+serde_json.workspace = true
 # Transpiler (TS/JSX/non-erasable syntax) — moved in-process from the oxc-transform
 # npm package. Mirrors oxc-transform@0.140.0's transformSync for byte parity.
 oxc.workspace = true
 oxc_napi.workspace = true
 oxc_sourcemap.workspace = true
 rustc-hash.workspace = true
-# tsconfig discovery/parse/extends + the transpile cache (moved in-process from
-# the get-tsconfig npm package and the JS cache). serde drives the RawTsconfig /
-# CompilerOptions deserialization; blake3 computes the integrity prefix (SIMD
-# content hash, replaced SHA-256 on the warm path).
-serde.workspace = true
+# The transpile cache's integrity prefix (SIMD content hash, replaced SHA-256 on
+# the warm path).
 blake3.workspace = true
 # Transpile cache-key derivation (the blake3 preimage), factored out so its
 # invalidation contract can be unit-tested off the un-testable cdylib. A path dep
 # that crosses into the MAIN workspace (where nub-cache-key is a member).
 nub-cache-key = { path = "../nub-cache-key" }
-# The raw-text nesting bound the JSON-family parsers above are called behind.
-# Shared with nub-cli rather than copied: `test = false` on this crate means a
-# local copy could never be unit tested. A second path dep into the MAIN workspace.
-nub-json-guard = { path = "../nub-json-guard" }
 # The YAML/TOML/JSON5/JSONC parsers, shared with nub-cli so a data import cannot
 # mean one thing at run time and another when compiled.
 nub-data-formats = { path = "../nub-data-formats" }
 # tsconfig discovery / parse / `extends` / `paths` (the get-tsconfig@4.14.0 port),
 # moved OUT of this crate so the CLI can read the same tsconfig before it spawns Node
 # and turn `compilerOptions.customConditions` into `--conditions=`. `src/tsconfig.rs`
-# is now only the `#[napi]` wrapper. That crate also owns the pinned JSONC dialect and
-# the nesting bound this crate's data-format parsers use, so the two readers cannot
-# drift apart. These are the third and fourth path deps into the MAIN workspace.
+# is now only the `#[napi]` wrapper.
 nub-tsconfig = { path = "../nub-tsconfig" }
 # Host-symbol lookup for libuv (threadpool.rs); the version napi-sys already pins.
 libloading = "0.9"

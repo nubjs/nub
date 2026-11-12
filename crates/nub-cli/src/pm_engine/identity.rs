@@ -10,7 +10,7 @@
 //! `apply_config_scope` / `apply_lifecycle_augmentation`).
 //!
 //! This const carries only the values that are *fixed for the life of the
-//! nub binary*: branding plus the five embedder-fixed behavior toggles. It
+//! nub binary*: branding plus the embedder-fixed behavior toggles. It
 //! replaces the old scatter of `aube::set_user_agent_product` /
 //! `aube_lockfile::set_aube_lock_base_filename` /
 //! `set_detection_self_names` / `set_canonical_lockfile_always_wins` /
@@ -90,12 +90,12 @@
 ///   aube cannot make nub silently inherit its `/etc/aube` policy: the brand
 ///   boundary holds on the system path the same way it already held on the env
 ///   override (`NUB_MANAGED_CONFIG_PATH`, via `config_env_prefix`).
-/// - `config_namespace` = `None` — nub has NO branded user/project config file.
-///   The engine never reads `~/.config/aube/config.toml` or
-///   `<cwd>/.config/aube/config.toml` (the leak this profile closes), and nub
-///   does NOT substitute a `~/.config/nub/` home of its own: a nub project's
-///   config surface is the neutral `.npmrc` + the sanctioned `NUB_*` env knobs,
-///   so there is no bespoke nub config file to author or read. Mirrors how
+/// - `config_namespace` = `None` — the engine reads NO branded user/project
+///   config file. It never reads `~/.config/aube/config.toml` or
+///   `<cwd>/.config/aube/config.toml` (the leak this profile closes), and no
+///   nub-named substitute takes that slot: nub's own `nub.jsonc` (project and
+///   `~/.config/nub/`) is read by nub, which lowers its `install` block into the
+///   engine's project-config settings tier. Mirrors how
 ///   `managed_config_system_dir = None` would skip the system read — here the
 ///   user/project branded-file read/write is skipped entirely. Standalone aube
 ///   keeps `Some("aube")`, so its `~/.config/aube/config.toml` path is unchanged.
@@ -178,9 +178,9 @@ pub(crate) const NUB: aube_util::Embedder = aube_util::Embedder {
     // Cosmetic: the shared-store behavior is identical.
     virtual_store_subdir: "store",
     managed_config_system_dir: Some("nub"),
-    // No branded user/project config file: nub never reads `~/.config/aube/`
-    // (or `<cwd>/.config/aube/`) and authors no `~/.config/nub/` of its own —
-    // a nub project's config surface is `.npmrc` + the `NUB_*` env knobs.
+    // No branded engine config file: the engine never reads `~/.config/aube/`
+    // (or `<cwd>/.config/aube/`). nub's own `nub.jsonc` reaches the engine
+    // through the project-config settings tier nub fills, not this field.
     config_namespace: None,
     canonical_lockfile_always_wins: false,
     runtime_switching: false,
@@ -388,9 +388,10 @@ pub(crate) fn register() {
 // The profile reproduces nub's identity: generic unbranded lockfile,
 // `nub/<v>` UA, jdx credit kept, the engines-self check OFF (an `engines.nub`
 // pin is never validated — the decided default), and every other
-// embedder-fixed toggle OFF. Compile-time assertions: the const is fixed, so a
-// drift is a build break, not a test-run failure (and runtime `assert!` on a
-// const trips clippy's `assertions_on_constants`).
+// embedder-fixed toggle at the value documented on `NUB`. Compile-time
+// assertions: the const is fixed, so a drift is a build break, not a test-run
+// failure (and runtime `assert!` on a const trips clippy's
+// `assertions_on_constants`).
 const _: () = {
     assert!(matches!(NUB.lockfile_basename.as_bytes(), b"nub.lock"));
     assert!(matches!(NUB.lockfile_legacy_basenames, [b] if matches!(b.as_bytes(), b"lock.yaml")));

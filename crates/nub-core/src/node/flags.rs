@@ -481,8 +481,9 @@ pub(crate) fn test_coverage_default_exclusion_applied(node_version: &NodeVersion
 ///
 /// ## Verified conflict semantics (probed on real Node 18.19 / 22.15 / 25.8 / 26.2)
 ///
-/// nub injects its positive flags into BOTH the child argv (in `spawn.rs`, AHEAD
-/// of the user's argv) and the inherited NODE_OPTIONS. Node's resolution is
+/// nub injects its positive flags into the child argv (in `spawn.rs`, AHEAD of the
+/// user's argv); only [`node_options_safe_inject_flags`] also rides the inherited
+/// NODE_OPTIONS. Node's resolution is
 /// **argv last-wins, and argv beats NODE_OPTIONS**. That asymmetry is exactly why
 /// a plain "is it a crash?" check is not enough — a user's *disable* can be
 /// silently OVERRIDDEN even when nothing crashes. The Stage-2/3 subtraction below
@@ -541,10 +542,7 @@ pub fn compute_inject_flags(
     // `Unflag(flag)`, the flag is injected. Tuned per band so the flag is present
     // exactly where it both EXISTS (else "bad option" / "not allowed in
     // NODE_OPTIONS" startup abort) and is still REQUIRED (not yet default-on). See
-    // `feature_matrix::FEATURES` for the bands + changelog evidence. (webstorage's
-    // flag is injected separately in spawn.rs, since it pairs with a
-    // runtime-computed `--localstorage-file` path — but its bands live in the same
-    // matrix, read via `webstorage_flag_needed` / `webstorage_supported`.)
+    // `feature_matrix::FEATURES` for the bands + changelog evidence.
     for flag in feature_matrix::unflag_flags_for(&node_version) {
         // Skip the webstorage flag here: argv-bearing callers own its injection
         // through `should_inject_experimental_webstorage`, gated on the same
@@ -689,9 +687,9 @@ fn collect_negations(user_argv: &[String], node_options: Option<&str>) -> Vec<St
     }
 
     if let Some(opts) = node_options {
-        for token in opts.split_whitespace() {
+        for token in split_node_options(opts) {
             if token.starts_with("--no-experimental-") || token.starts_with("--no-enable-") {
-                negations.push(token.to_string());
+                negations.push(token);
             }
         }
     }
@@ -889,12 +887,20 @@ mod tests {
 
     #[test]
     fn accepted_env_flags_none_preserves_version_band() {
-        // `None` (probe unavailable) is a pure pass-through: identical to the
-        // pre-guard version-band behavior, so a failed probe never regresses.
+        // `None` (probe unavailable) is a pure pass-through: the version band's
+        // flags all survive, so a failed probe never regresses. It must not read as
+        // a binary that accepts nothing, which drops every flag.
+        let accepts_nothing = std::collections::BTreeSet::new();
         for ver in [v(22, 15, 0), v(26, 5, 0), v(27, 0, 0)] {
-            assert_eq!(
-                compute_inject_flags(ver.clone(), &[], None, false, None),
-                compute_inject_flags(ver.clone(), &[], None, false, None),
+            let unprobed = compute_inject_flags(ver.clone(), &[], None, false, None);
+            for flag in feature_matrix::unflag_flags_for(&ver) {
+                if flag != "--experimental-webstorage" {
+                    assert!(unprobed.contains(&flag), "{flag} on {ver:?}");
+                }
+            }
+            assert!(
+                compute_inject_flags(ver.clone(), &[], None, false, Some(&accepts_nothing))
+                    .is_empty()
             );
         }
     }
@@ -1033,6 +1039,20 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_negation_in_node_options_still_opts_out() {
+        // Node unquotes a NODE_OPTIONS token, so this disables vm modules for plain
+        // node; an injected positive on argv would override it.
+        let flags = compute_inject_flags(
+            v(22, 15, 0),
+            &[],
+            Some(r#"--max-old-space-size=4096 "--no-experimental-vm-modules""#),
+            false,
+            None,
+        );
+        assert!(!flags.contains(&"--experimental-vm-modules"));
+    }
+
+    #[test]
     fn no_enable_source_maps_wins_over_always_inject() {
         // `--enable-source-maps` is in ALWAYS_INJECT, but a user's explicit
         // `--no-enable-source-maps` must clobber it — nub never re-enables over a
@@ -1131,10 +1151,10 @@ mod tests {
 
     #[test]
     fn webstorage_supported_floor_is_22_4() {
-        // Below 22.4 the webstorage flags don't exist ("bad option") — so the
-        // --localstorage-file injection (and webstorage entirely) is skipped. At/above
-        // 22.4 it's supported on EVERY version, including the native 25/26 (the file is
-        // still required there for the global to materialize).
+        // Below 22.4 the webstorage flags don't exist ("bad option") — so webstorage
+        // is skipped entirely. At/above 22.4 it's supported on EVERY version,
+        // including the native 25/26 (a user-supplied file is still required there
+        // for localStorage to materialize).
         assert!(!webstorage_supported(&v(18, 19, 0)));
         assert!(!webstorage_supported(&v(20, 11, 0)));
         assert!(!webstorage_supported(&v(22, 3, 0)));

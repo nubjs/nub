@@ -80,10 +80,9 @@
 //!   strings, several of which name engine paths nub's embedder tier
 //!   replaces, so substituting them wholesale here would lie). On non-unix
 //!   the substitution is inert (it rides the fd capture, a documented
-//!   no-op there) and `undefined` still prints. Note the scope asymmetry
-//!   Delete follows set's scope contract, including the protected-credential
-//!   user default, so an unqualified delete reaches the file an unqualified set
-//!   populated.
+//!   no-op there) and `undefined` still prints. Delete follows set's scope
+//!   contract, including the protected-credential user default, so an
+//!   unqualified delete reaches the file an unqualified set populated.
 //! - A key naming a `nub.jsonc` field (`nodeCompat`, `install.linker`,
 //!   `dlx.consent`, …) is claimed by [`try_nub_field`] before any of the
 //!   `.npmrc` routing above and handled by [`crate::config_fields`]. The two
@@ -620,7 +619,7 @@ fn try_nub_config(parsed: &ConfigArgs, global: bool) -> Option<i32> {
 fn try_nub_field(parsed: &ConfigArgs, global: bool) -> Option<i32> {
     use crate::config_fields::{self, Scope};
 
-    let write_scope = |local: bool| {
+    let scope = |local: bool| {
         if global {
             Scope::Global
         } else if local {
@@ -632,22 +631,15 @@ fn try_nub_field(parsed: &ConfigArgs, global: bool) -> Option<i32> {
     let outcome = match &parsed.command {
         Some(ConfigCommand::Get(get)) => {
             let field = config_fields::field(&get.key)?;
-            let scope = if global {
-                Scope::Global
-            } else if get.local {
-                Scope::Project
-            } else {
-                Scope::Auto
-            };
-            config_fields::get(field, scope, get.json)
+            config_fields::get(field, scope(get.local), get.json)
         }
         Some(ConfigCommand::Set(set)) => {
             let field = config_fields::field(&set.key)?;
-            config_fields::set(field, &set.value, write_scope(set.local))
+            config_fields::set(field, &set.value, scope(set.local))
         }
         Some(ConfigCommand::Delete(del)) => {
             let field = config_fields::field(&del.key)?;
-            config_fields::delete(field, write_scope(del.local))
+            config_fields::delete(field, scope(del.local))
         }
         _ => return None,
     };
@@ -934,7 +926,7 @@ mod npmrc_first {
     ///
     /// `scalar_to_yaml` is true ONLY for a pnpm-**v11+** incumbent — the one
     /// version whose config home for non-layout scalar settings is
-    /// `pnpm-workspace.yaml` (see `pnpm_uses_yaml_scalar_home`). It decides ONLY
+    /// `pnpm-workspace.yaml` (see `config_model::pnpm_scalar_home`). It decides ONLY
     /// where a non-shared, non-layout scalar lands: `pnpm-workspace.yaml` under v11, the neutral project
     /// `.npmrc` for pnpm v10/v9, the unknown-version default, and every
     /// non-pnpm / nub-identity surface. npm-shared keys (`.npmrc`) and map
@@ -1157,7 +1149,15 @@ mod npmrc_first {
     /// a missing key appends. (The engine's `NpmrcEdit` is crate-private
     /// at the pinned API.)
     fn npmrc_set(path: &Path, sweep: &[String], write_key: &str, value: &str) -> Result<()> {
-        let original = std::fs::read_to_string(path).unwrap_or_default();
+        // Only a missing file is empty, as in the engine's `NpmrcEdit::load`:
+        // reading an unreadable file (UTF-16, say) as empty would replace it.
+        let original = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to read {}", path.display()));
+            }
+        };
         let mut out: Vec<String> = Vec::new();
         let mut written = false;
         for line in original.lines() {
@@ -1364,9 +1364,9 @@ mod npmrc_first {
                 SetRoute::ProjectNpmrc
             ));
 
-            // A known scalar `some-custom-key` is unknown to the registry, so
-            // it's free-form → `.npmrc` even in the yaml-home (v11) case (no
-            // workspace-yaml schema for an arbitrary key).
+            // `some-custom-key` is unknown to the registry, so it's free-form →
+            // `.npmrc` even in the yaml-home (v11) case (no workspace-yaml
+            // schema for an arbitrary key).
             assert!(matches!(
                 classify_set("some-custom-key", true),
                 SetRoute::ProjectNpmrc
@@ -1492,6 +1492,24 @@ mod npmrc_first {
                 std::fs::read_to_string(&path)
                     .unwrap()
                     .ends_with("store-dir=/tmp/s\n")
+            );
+        }
+
+        /// A `.npmrc` that exists but is not UTF-8 (a Windows shell redirect
+        /// writes UTF-16) must stop the write; reading it as empty would
+        /// replace the file with the one line being set.
+        #[test]
+        fn npmrc_set_refuses_an_unreadable_npmrc_rather_than_replacing_it() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(".npmrc");
+            let utf16 = b"\xff\xfer\x00e\x00g\x00=\x00x\x00\n\x00";
+            std::fs::write(&path, utf16).unwrap();
+            let result = npmrc_set(&path, &["store-dir".to_string()], "store-dir", "/tmp/s");
+            assert!(result.is_err(), "an unreadable .npmrc must be an error");
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                utf16,
+                "the existing .npmrc must be left byte-for-byte untouched"
             );
         }
 

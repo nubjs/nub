@@ -41,8 +41,9 @@
 //! - **R2 — verify the loaded code against a baked-in hash (integrity backstop).**
 //!   `build.rs` bakes the BLAKE3 digest of the directly-loaded entrypoints
 //!   (`preload.mjs`, `preload.cjs`, `gc-startup.cjs`, `watch-env-guard.cjs`,
-//!   `compile-preamble.mjs`, and `addons/nub-native.node`) into the binary. On
-//!   the load path (once per process, inside the OnceLock init, ~6 ms for the ~9 MB
+//!   `threadpool-snapshot.cjs`, `compile-preamble.mjs`, and
+//!   `addons/nub-native.node`) into the binary. On the load path (once per
+//!   process, inside the OnceLock init, ~6 ms for the ~9 MB
 //!   addon on aarch64 — BLAKE3 over software SHA-256's ~28 ms there) the EXTRACTED
 //!   entrypoints are re-hashed against those consts. On mismatch we
 //!   SELF-HEAL: re-extract the trusted in-binary blob over the dir and re-verify —
@@ -60,8 +61,9 @@
 //! - **Age-based GC.** After a fresh extract, sibling `runtime-*` dirs older than
 //!   30 days are removed (best-effort). Age-based, not "delete all non-current",
 //!   so two versions in active use (a global install + an `npx nub@<old>`) don't
-//!   evict each other. In-progress `.tmp` dirs and the current dir are never
-//!   touched.
+//!   evict each other. The age is the dir's mtime, which a run refreshes when it
+//!   is over a day old, so it counts from the last use and not from the
+//!   extraction. In-progress `.tmp` dirs and the current dir are never collected.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -94,7 +96,8 @@ const RUNTIME_TREE_BLAKE3: &str = env!("NUB_RUNTIME_TREE_BLAKE3");
 /// preamble (loaded from the extracted runtime) are the actual code-load surface; the vendored `node_modules` polyfills are intentionally OUT of the
 /// per-load hash (R1's 0700 owner-only base already closes their planted-file
 /// vector, and hashing the whole ~13 MB tree every run would be a real regression
-/// for a fast script runner — the entrypoints keep the cost ~1-2 ms).
+/// for a fast script runner — the entrypoints keep it to the ~6 ms the module
+/// doc gives, nearly all of it the addon).
 const VERIFIED_ENTRYPOINTS: [(&str, &str); 7] = [
     ("preload.mjs", HASH_PRELOAD_MJS),
     ("preload.cjs", HASH_PRELOAD_CJS),
@@ -117,6 +120,9 @@ const INTEGRITY_ENFORCE: bool = false;
 
 /// Stale-version eviction threshold.
 const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// How old the current runtime dir's mtime may get before a run refreshes it.
+const USE_REFRESH: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Memoized result of the (at most once) extraction for this process.
 static EXTRACTED: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -174,6 +180,7 @@ fn extract_with(candidates: &[PathBuf]) -> Option<PathBuf> {
                 // The cache base and canonical target were both validated before
                 // adoption. Reclaim only our aged crash leftovers now that warm use
                 // has proved a complete current tree exists too.
+                mark_used(&dir);
                 gc_stale(&safe_base, &target);
                 return Some(dir);
             }
@@ -701,11 +708,11 @@ fn walk_windows_base_under(
     if crate::windows_security::directory_is_stable(base, true, false)? {
         return Ok(());
     }
-    // The base is NOT necessarily created by this walk: node discovery writes
-    // `node-discovery.json` there through a plain `create_dir_all` long before
-    // spawn reaches `ensure_runtime`, so it usually already exists carrying its
-    // parent's inherited ACEs. Harden the directory instead of declining it;
-    // ownership is checked there, so a foreign-owned base is still refused. Only on
+    // The base is NOT necessarily created by this walk: the Node release index
+    // and the Node version store create it through a plain `create_dir_all`, so
+    // it may already exist carrying its parent's inherited ACEs. Harden the
+    // directory instead of declining it; ownership is checked there, so a
+    // foreign-owned base is still refused. Only on
     // the creating walk — `is_safe_dir` validates an existing target and must
     // never mutate.
     let unsafe_dir = "the cache directory is owned or writable by another account";
@@ -1070,6 +1077,43 @@ fn unpack_blob(dest: &Path) -> std::io::Result<()> {
     // The extracted runtime has no executables (the `.node` is dlopen'd, not
     // exec'd), so preserving the tar-recorded modes (read perms) is sufficient.
     archive.unpack(dest)
+}
+
+/// Record that the runtime in `dir` was used, as the dir's mtime, which is the
+/// age [`gc_stale`] judges a sibling version by. Without it a version extracted
+/// over [`MAX_AGE`] ago and run every day is collected by the first run of
+/// another version, under any process still loading from it. One `stat` a run and
+/// at most one write a day; best-effort.
+fn mark_used(dir: &Path) {
+    let now = SystemTime::now();
+    let fresh = fs::metadata(dir)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|mtime| now.duration_since(mtime).ok())
+        .is_some_and(|age| age < USE_REFRESH);
+    if !fresh && let Ok(handle) = open_dir_for_times(dir) {
+        let _ = handle.set_modified(now);
+    }
+}
+
+/// A handle to `dir` that its timestamps can be set through.
+#[cfg(not(windows))]
+fn open_dir_for_times(dir: &Path) -> std::io::Result<fs::File> {
+    fs::File::open(dir)
+}
+
+/// A handle to `dir` that its timestamps can be set through. Windows opens a
+/// directory only with `FILE_FLAG_BACKUP_SEMANTICS`, and setting times needs
+/// `FILE_WRITE_ATTRIBUTES`.
+#[cfg(windows)]
+fn open_dir_for_times(dir: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
 }
 
 /// Remove stale siblings older than [`MAX_AGE`]: superseded `runtime-*` versions AND
@@ -2193,6 +2237,34 @@ mod tests {
             "a >30d .stale.* orphan must be evicted"
         );
         assert!(!old_tmp.is_dir(), "a >30d .tmp orphan must be evicted");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_runtime_in_use_is_not_stale_to_another_versions_gc() {
+        let base = std::env::temp_dir().join(format!("nub-rtc-used-{}", rand_suffix()));
+        let _ = fs::remove_dir_all(&base);
+        let in_use = base.join("runtime-in-use");
+        let unused = base.join("runtime-unused");
+        let current = base.join(CACHE_KEY);
+        for dir in [&in_use, &unused, &current] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        // Both were extracted 40 days ago.
+        let old = SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60);
+        for dir in [&in_use, &unused] {
+            open_dir_for_times(dir).unwrap().set_modified(old).unwrap();
+        }
+
+        // One of them runs, then another version collects.
+        mark_used(&in_use);
+        gc_stale(&base, &current);
+
+        assert!(in_use.is_dir(), "a version that ran today is kept");
+        assert!(
+            !unused.is_dir(),
+            "a version unused for 40 days is collected"
+        );
         fs::remove_dir_all(&base).unwrap();
     }
 

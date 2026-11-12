@@ -234,27 +234,42 @@ impl VersionPin {
 /// grammar Cargo's `semver` crate parses:
 ///   - hyphen ranges: `20.0.0 - 22.1.0` → `>=20.0.0, <=22.1.0`;
 ///   - space-separated AND-comparators: `>=20 <23` → `>=20, <23`;
-///   - operator-space form (legal node-semver): `>= 20` → `>=20`.
+///   - operator-space form (legal node-semver): `>= 20` → `>=20`;
+///   - bare versions: `20.11` → `=20.11`. The `semver` crate reads an
+///     operator-less version as a caret requirement, node-semver as an X-range,
+///     so `20.11.0 || 22` would otherwise admit 20.18.0;
+///   - a `v` before a version, which node-semver allows in every comparator:
+///     `>=v20.0.0` → `>=20.0.0`.
 ///
-/// Single comparators, bare versions, and already-comma'd specs pass through
+/// Other operator-prefixed comparators and already-comma'd specs pass through
 /// untouched. A dangling trailing operator is kept verbatim so the parse fails
 /// (better an honest error than a silently dropped comparator).
 fn normalize_node_range(spec: &str) -> String {
     if spec.contains(',') {
         return spec.to_string();
     }
+    let bare = |version: &'_ str| version.strip_prefix('v').unwrap_or(version).to_string();
     if let Some((lo, hi)) = spec.split_once(" - ") {
-        return format!(">={}, <={}", lo.trim(), hi.trim());
+        return format!(">={}, <={}", bare(lo.trim()), bare(hi.trim()));
     }
     let mut comparators: Vec<String> = Vec::new();
     let mut pending_op: Option<&str> = None;
     for token in spec.split_whitespace() {
         if matches!(token, ">" | "<" | ">=" | "<=" | "=" | "^" | "~") {
             pending_op = Some(token);
-        } else if let Some(op) = pending_op.take() {
-            comparators.push(format!("{op}{token}"));
+            continue;
+        }
+        let version_at = token
+            .find(|c: char| !matches!(c, '>' | '<' | '=' | '^' | '~'))
+            .unwrap_or(token.len());
+        let (op, version) = token.split_at(version_at);
+        let version = bare(version);
+        if let Some(pending) = pending_op.take() {
+            comparators.push(format!("{pending}{op}{version}"));
+        } else if op.is_empty() && version.starts_with(|c: char| c.is_ascii_digit()) {
+            comparators.push(format!("={version}"));
         } else {
-            comparators.push(token.to_string());
+            comparators.push(format!("{op}{version}"));
         }
     }
     if let Some(op) = pending_op {
@@ -438,6 +453,33 @@ mod tests {
     }
 
     #[test]
+    fn a_range_comparator_may_spell_its_version_with_a_v() {
+        let p = |s: &str| VersionPin::parse_allowing_ranges(s).unwrap();
+        let admits = |spec: &str, version: (u32, u32, u32)| {
+            NodeVersion::new(version.0, version.1, version.2).satisfies(&p(spec))
+        };
+        // Each row is what node-semver answers for the same range.
+        for (spec, in_range, out_of_range) in [
+            (">=v20.0.0", (22, 3, 0), (18, 19, 0)),
+            ("^v20", (20, 5, 0), (22, 3, 0)),
+            ("~v20.1", (20, 1, 4), (20, 5, 0)),
+            (">= v20", (22, 3, 0), (18, 19, 0)),
+            (">=v20.0.0 <v23", (22, 3, 0), (23, 0, 0)),
+            ("v20 - v22", (22, 3, 0), (23, 0, 0)),
+            ("^v20 || >=v22.1", (22, 3, 0), (21, 0, 0)),
+            ("v20.1 || 22", (20, 1, 4), (20, 5, 0)),
+        ] {
+            assert!(admits(spec, in_range), "{spec} admits {in_range:?}");
+            assert!(
+                !admits(spec, out_of_range),
+                "{spec} excludes {out_of_range:?}"
+            );
+        }
+        // node-semver takes a lowercase `v` only.
+        assert!(VersionPin::parse_allowing_ranges(">=V20.0.0").is_err());
+    }
+
+    #[test]
     fn parse_allowing_ranges_handles_operator_space_or_alternatives_and_hyphen() {
         let p = |s: &str| VersionPin::parse_allowing_ranges(s).unwrap();
         // Operator-space form is legal node-semver (`>= 20`), not a parse failure.
@@ -460,6 +502,28 @@ mod tests {
         // One bad alternative poisons the whole spec — never half-honor a range.
         assert!(VersionPin::parse_allowing_ranges(">=20 || nonsense").is_err());
         assert!(VersionPin::parse_allowing_ranges(">=").is_err());
+    }
+
+    #[test]
+    fn bare_versions_inside_a_range_are_x_ranges_not_carets() {
+        let p = |s: &str| VersionPin::parse_allowing_ranges(s).unwrap();
+        let exact_or = p("20.11.0 || 22.1.0");
+        assert!(NodeVersion::new(20, 11, 0).satisfies(&exact_or));
+        assert!(NodeVersion::new(22, 1, 0).satisfies(&exact_or));
+        assert!(
+            !NodeVersion::new(20, 18, 0).satisfies(&exact_or),
+            "node-semver reads a bare full version as exact"
+        );
+        let partial_or = p("20.11 || 22");
+        assert!(NodeVersion::new(20, 11, 5).satisfies(&partial_or));
+        assert!(NodeVersion::new(22, 5, 0).satisfies(&partial_or));
+        assert!(
+            !NodeVersion::new(20, 12, 0).satisfies(&partial_or),
+            "node-semver reads `20.11` as 20.11.x"
+        );
+        let wild = p("20.11.x || 22");
+        assert!(NodeVersion::new(20, 11, 5).satisfies(&wild));
+        assert!(!NodeVersion::new(20, 12, 0).satisfies(&wild));
     }
 
     #[test]

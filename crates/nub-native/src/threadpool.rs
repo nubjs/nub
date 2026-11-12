@@ -157,7 +157,7 @@ unsafe extern "C" fn after_work(_req: *mut c_void, _status: c_int) {}
 /// so the pool exists (sized from the environment at that moment) with no request
 /// or callback left behind on Node's loop. `false` when the host exports no libuv;
 /// the JS caller then submits through `fs` instead.
-#[napi]
+#[napi(catch_unwind)]
 pub fn warm_threadpool() -> bool {
     let Some(uv) = uv() else {
         return false;
@@ -202,7 +202,7 @@ thread_local! {
 /// back), and it is closed inside the turn that runs it, so no extra turn follows.
 /// `false` when the host exports no libuv or a callback is already armed; the
 /// caller then does the work at once.
-#[napi]
+#[napi(catch_unwind)]
 pub fn on_first_loop_turn(env: Env, callback: Function<'_>) -> bool {
     let Some(uv) = uv() else {
         return false;
@@ -268,6 +268,8 @@ unsafe fn call_and_release(env: sys::napi_env, reference: sys::napi_ref) {
     unsafe {
         let mut scope = ptr::null_mut();
         if sys::napi_open_handle_scope(env, &mut scope) != sys::Status::napi_ok {
+            // Nothing can be called without a scope, and the reference still has to go.
+            sys::napi_delete_reference(env, reference);
             return;
         }
         let mut function = ptr::null_mut();

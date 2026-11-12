@@ -213,11 +213,7 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
     let shape = if opts.smol { Shape::Smol } else { Shape::Embed };
     let cache_root = discovery::cache_dir()
         .context("no writable cache dir for compile-time Node provisioning")?;
-    let pin_cwd = entry_abs
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let (pin, raw, source) = determine_target(opts.target.as_deref(), &pin_cwd)?;
+    let (pin, raw, source) = determine_target(opts.target.as_deref(), entry_dir)?;
     let (os, arch, musl) = dist_platform(&target);
     // Smol gates on the FLOOR, the oldest runtime it will accept, so a polyfill is
     // dropped only when every Node the artifact can run on already has the global.
@@ -485,7 +481,6 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         // 26.0.0 — so resolve the newest satisfying one here, where the dist
         // index is already reachable, and leave acceptance on the floor alone.
         // A resolution failure is not fatal: the launcher still has the floor.
-        let (os, arch, musl) = dist_platform(&target);
         let newest =
             version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)
                 .ok()
@@ -508,13 +503,12 @@ pub fn run(mut opts: CompileOptions) -> Result<i32> {
         };
         (floor, newest, EmbeddedNode::default(), summary)
     } else {
-        // Embed bakes ONE exact version — a range/major/alias collapses to the
-        // newest satisfying release at compile time. (`build_node_blob` →
+        // Embed bakes ONE exact version: the gate, where a range/major/alias
+        // already collapsed to the newest satisfying release, so the Node embedded
+        // is the one the bundle was stripped against. (`build_node_blob` →
         // provisioning prints the `Using Node.js … (resolved from …)` line, the
         // same surface nub run uses.)
-        let (os, arch, musl) = dist_platform(&target);
-        let exact =
-            version_management::resolve_pin_for_platform(&pin, os, arch, musl, &cache_root)?;
+        let exact = gate_version;
         external::check_node_support(&exact, &source, &shim_plan)?;
         let node = build_node_blob(
             &exact,
@@ -1010,8 +1004,8 @@ fn stderr_cols() -> usize {
 /// That holds only while the labels stay close in length: the ragged margin is
 /// exactly as wide as the spread between the shortest and longest, so a label far
 /// longer than the rest turns the margin into something that reads as broken
-/// indentation. Keep them short and near-uniform — the current spread is two
-/// columns, `output` to `platform`.
+/// indentation. Keep them short and near-uniform — the current spread is five
+/// columns, `app` to `platform`.
 /// Wraps at the terminal's width, with every continuation line hung at the value
 /// column. Without that a long row — the `--smol` runtime row is 112 columns on a
 /// real build — wraps wherever the terminal happens to break it, and the
@@ -1660,11 +1654,6 @@ impl Drop for LiveLine {
     }
 }
 
-/// What the build produced, gathered where it is known rather than recomputed.
-///
-/// Every field is already in hand at the point the artifact is finished. Deriving
-/// one again at report time — re-reading the blob, re-stat'ing a payload — is how
-/// a report starts describing something other than the file that was written.
 /// How a finished artifact hands its app to Node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppDelivery {
@@ -1680,6 +1669,11 @@ enum AppDelivery {
     Sea,
 }
 
+/// What the build produced, gathered where it is known rather than recomputed.
+///
+/// Every field is already in hand at the point the artifact is finished. Deriving
+/// one again at report time — re-reading the blob, re-stat'ing a payload — is how
+/// a report starts describing something other than the file that was written.
 struct BuildFacts {
     /// The finished file, from `metadata` on what was published.
     size: u64,
@@ -1929,8 +1923,10 @@ fn load_version_info(
     if let Some(name) = out_path.file_name().and_then(|n| n.to_str()) {
         strings.insert("OriginalFilename".to_string(), name.to_string());
     }
+    let mut explicit = std::collections::HashSet::new();
     for assignment in metadata {
         let (key, value) = version_info::parse_assignment(assignment)?;
+        explicit.insert(key);
         if value.is_empty() {
             strings.remove(key);
         } else {
@@ -1941,14 +1937,36 @@ fn load_version_info(
     // The numeric block is derived from the strings so the two can never
     // disagree; a prerelease tag survives in the string and is truncated only in
     // the four-u16 block, which has nowhere to put it.
-    let file_version =
-        version_info::parse_version(strings.get("FileVersion").map(String::as_str).unwrap_or(""))?;
-    let product_version = version_info::parse_version(
-        strings
-            .get("ProductVersion")
-            .map(String::as_str)
-            .unwrap_or(""),
-    )?;
+    let numeric_version = |key: &str| -> Result<[u16; 4]> {
+        let text = strings.get(key).map(String::as_str).unwrap_or("");
+        let parsed = version_info::parse_version(text);
+        if explicit.contains(key) {
+            return parsed;
+        }
+        // Not set with --metadata, so it is package.json's `version`, and the
+        // user did not necessarily know that field reaches this one. Both
+        // version fields default to it, so the message names each one still
+        // to override rather than failing once per field.
+        let defaulted: Vec<&str> = ["FileVersion", "ProductVersion"]
+            .into_iter()
+            .filter(|field| !explicit.contains(field))
+            .collect();
+        let overrides: Vec<String> = defaulted
+            .iter()
+            .map(|field| format!("--metadata {field}=<major.minor.patch>"))
+            .collect();
+        parsed.map_err(|err| {
+            anyhow!(
+                "{err}.\n\
+                 \x20\x20It comes from \"version\" in package.json, the default for {}.\n\
+                 \x20\x20Override it with {}, or drop a field with --metadata <field>=",
+                defaulted.join(" and "),
+                overrides.join(" ")
+            )
+        })
+    };
+    let file_version = numeric_version("FileVersion")?;
+    let product_version = numeric_version("ProductVersion")?;
     let info = version_info::VersionInfo {
         file_version,
         product_version,
@@ -1956,7 +1974,10 @@ fn load_version_info(
     };
     // OriginalFilename alone is not worth a resource: it would put an otherwise
     // blank Details tab on every Windows build that never asked for one.
-    if info.strings.len() <= 1 && info.file_version == [0; 4] && info.product_version == [0; 4] {
+    if info.strings.keys().all(|key| key == "OriginalFilename")
+        && info.file_version == [0; 4]
+        && info.product_version == [0; 4]
+    {
         return Ok(None);
     }
     Ok(Some(info.encode()?))
@@ -2696,17 +2717,6 @@ struct StagedDetachedMap {
 
 // ---- Node blob (default/embed shape) ------------------------------------------
 
-/// Provision the official Node for `target`, strip it per the target's policy,
-/// and zstd-19 compress. Returns the compressed Node blob, the hash of the
-/// DECOMPRESSED (runnable) bytes, and the compressed aggregate root `LICENSE`
-/// from that exact official distribution.
-/// The embedded Node, compressed, alongside every field the manifest carries about
-/// it. A struct rather than a tuple because these five travel together and three of
-/// them are derived from the same decompressed bytes — `sha256` keys the extraction
-/// directory, `blake3` is retained as manifest format headroom, and `size` is what
-/// the launcher checks on a warm start.
-///
-/// `Default` is the `smol` shape: no embedded Node, so no blob, no digests, no size.
 /// How the target's Node travels inside the artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeDelivery {
@@ -2718,6 +2728,13 @@ enum NodeDelivery {
     Verbatim,
 }
 
+/// The embedded Node, as it goes into the artifact, alongside every field the
+/// manifest carries about it. A struct rather than a tuple because these travel
+/// together and three of them are derived from the same decompressed bytes —
+/// `sha256` keys the extraction directory, `blake3` is retained as manifest format
+/// headroom, and `size` is what the launcher checks on a warm start.
+///
+/// `Default` is the `smol` shape: no embedded Node, so no blob, no digests, no size.
 #[derive(Default)]
 struct EmbeddedNode {
     /// The provisioned executable, used only by native-target build helpers.
@@ -2739,6 +2756,10 @@ struct EmbeddedNode {
     icu: String,
 }
 
+/// Provision the official Node for `target`, strip it per the target's policy,
+/// and package it per `delivery`, together with the aggregate root `LICENSE` from
+/// that exact official distribution. The digests are always of the DECOMPRESSED
+/// (runnable) bytes.
 fn build_node_blob(
     version: &NodeVersion,
     target: &TargetPlatform,
@@ -2809,7 +2830,7 @@ fn build_node_blob(
             if let Some(dir) = cached.parent() {
                 let _ = std::fs::create_dir_all(dir);
                 let tmp = cached.with_extension(format!("zst.{}.tmp", std::process::id()));
-                if std::fs::write(&tmp, &blob).is_ok() && std::fs::rename(&tmp, &cached).is_err() {
+                if std::fs::write(&tmp, &blob).is_err() || std::fs::rename(&tmp, &cached).is_err() {
                     let _ = std::fs::remove_file(&tmp);
                 }
             }
@@ -2942,13 +2963,18 @@ fn prepare_node_bytes(
         None => original.clone(),
     };
 
-    let tmp = std::env::temp_dir().join(format!("nub-compile-node-{}", std::process::id()));
-    let _ = fs::remove_file(&tmp);
+    // A private directory under an unpredictable name, removed with everything in
+    // it when this returns. The staged file is executed below, so it must not sit
+    // at a path another account could create first in a shared temp directory.
+    let stage = tempfile::Builder::new()
+        .prefix("nub-compile-node-")
+        .tempdir()
+        .context("creating a staging directory for Node")?;
+    let tmp = stage.path().join("node");
     fs::write(&tmp, &staged).with_context(|| format!("staging Node at {}", tmp.display()))?;
     // fs::write lands 0644; the post-strip `--version` verification must be able to
     // EXEC the staged binary, so restore the executable bit before strip/verify.
     set_executable(&tmp)?;
-    let _guard = FileGuard(tmp.clone());
 
     // Capture the entitlements BEFORE stripping, because the stripper may destroy
     // them and `--preserve-metadata` would then have nothing to read. Measured:
@@ -2969,7 +2995,6 @@ fn prepare_node_bytes(
             ],
         )
         && fs::metadata(&entitlements).is_ok_and(|m| m.len() > 0);
-    let _ent_guard = FileGuard(entitlements.clone());
 
     let mut ok = match &strip {
         Some(strip) => {
@@ -2983,10 +3008,11 @@ fn prepare_node_bytes(
     };
     if ok && needs_resign {
         // `-i node` is load-bearing, not cosmetic. Without it `codesign` derives the
-        // CodeDirectory identifier from the file's BASENAME, and this file is staged
-        // as `nub-compile-node-<pid>` — so the same Node signed by two compiles gets
-        // two identifiers, two signatures, and two `node_sha256` values. That keys a
-        // different `compile-node/<version>-<hash>` extraction dir every time, so a
+        // CodeDirectory identifier from the file's BASENAME, which is whatever this
+        // function staged the file as. When that carried the process id, the same
+        // Node signed by two compiles got two identifiers, two signatures, and two
+        // `node_sha256` values. That keys a different
+        // `compile-node/<version>-<hash>` extraction dir every time, so a
         // compile-and-run loop leaves a fresh ~107 MB tree behind on each pass and
         // nothing collects them. It also makes a byte-identical rebuild impossible.
         // `node` is what the official distribution signs with.
@@ -3283,13 +3309,6 @@ fn verify_windows_dressing(
     version_info: Option<&[u8]>,
     hide_console: bool,
 ) -> Result<()> {
-    // The version resource is re-read here for the same reason the payload is,
-    // and it needs it more. A cross-compiled Windows binary cannot be executed
-    // on this host, so this parse is the only evidence the resource is REACHABLE
-    // rather than merely written — and an unreachable one fails silently, with
-    // Explorer showing nothing and no error anywhere. The concrete way to lose it
-    // is the resource directory's ascending-id rule (see `set_version_info` in
-    // vendor/libsui), which takes the icon down with it.
     // Same argument as the version resource below, and the same failure shape: a
     // Windows artifact built on macOS is never executed here, so reading the
     // subsystem back is the only thing standing between a silently un-hidden
@@ -3308,6 +3327,13 @@ fn verify_windows_dressing(
         }
     }
 
+    // The version resource is re-read here for the same reason the payload is,
+    // and it needs it more. A cross-compiled Windows binary cannot be executed
+    // on this host, so this parse is the only evidence the resource is REACHABLE
+    // rather than merely written — and an unreachable one fails silently, with
+    // Explorer showing nothing and no error anywhere. The concrete way to lose it
+    // is the resource directory's ascending-id rule (see `set_version_info` in
+    // vendor/libsui), which takes the icon down with it.
     if let Some(encoded) = version_info {
         let found = inject::find_version_resource(bytes)
             .context("scanning the produced executable for its version resource")?
@@ -3637,40 +3663,19 @@ fn atomic_replace(staged: &Path, destination: &Path) -> std::io::Result<()> {
     let destination = windows_verbatim_path(destination)?;
     let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
 
-    // Windows releases an executable's image section ASYNCHRONOUSLY, so the move
-    // can lose a race with a process that has already exited. The build's own
-    // self-probe RUNS the staged artifact immediately before this call, and
-    // `Command::output` returning means the child was reaped — not that the
-    // section is gone. Measured on the win32-arm64 CI leg: `a-env-strict` failed
-    // with `The process cannot access the file because it is being used by another
-    // process. (os error 32)`, intermittently, while every other fixture in the
-    // same run published fine.
+    // A single attempt. The image-section lock the self-probe leaves behind
+    // (`os error 32`, intermittently, on the win32-arm64 CI leg; anti-malware
+    // scanning a freshly written binary produces the same code) is retried by the
+    // caller under one budget — see `publish_rename_is_transient`. A second loop
+    // here would multiply that budget rather than add to it.
     //
-    // A bounded retry is the fix rather than a workaround: there is no handle to
-    // wait on, because the holder is the kernel finishing with a process that no
-    // longer exists. Anti-malware scanning a freshly written binary produces the
-    // same code, and the same answer. ~1.3s total, which is invisible next to a
-    // build and far short of hanging a broken publish.
-    //
-    // The retry is deliberately NOT extended to other errors. A denied or missing
-    // path fails on the first attempt, where the message still describes what went
-    // wrong.
-    const SHARING_VIOLATION: i32 = 32;
-    let mut delay = std::time::Duration::from_millis(10);
-    for attempt in 0..8 {
-        // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. No destination
-        // is removed first, so an API failure leaves the previous artifact intact.
-        if unsafe { MoveFileExW(staged.as_ptr(), destination.as_ptr(), flags) } != 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() != Some(SHARING_VIOLATION) || attempt == 7 {
-            return Err(error);
-        }
-        std::thread::sleep(delay);
-        delay *= 2;
+    // SAFETY: both buffers are live, NUL-terminated UTF-16 paths. No destination
+    // is removed first, so an API failure leaves the previous artifact intact.
+    if unsafe { MoveFileExW(staged.as_ptr(), destination.as_ptr(), flags) } == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
-    unreachable!("the loop returns on its last attempt")
 }
 
 #[cfg(windows)]
@@ -3914,11 +3919,6 @@ fn run_ok(program: impl AsRef<std::ffi::OsStr>, args: &[&std::ffi::OsStr]) -> bo
         .unwrap_or(false)
 }
 
-/// Content hash of the app payload — name, length, bytes, and executable bit of
-/// each file, in order.
-///
-/// This is the extraction cache key, so the mode belongs in it: two artifacts
-/// whose files differ only in executability must not share one extracted tree.
 /// Brotli at the maximum quality, for an inline payload's chunks.
 ///
 /// Quality 11 with a 24-bit window, matching what the zstd-19 it replaces is
@@ -3931,6 +3931,11 @@ fn brotli_encode(bytes: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Content hash of the app payload — name, length, bytes, and executable bit of
+/// each file, in order.
+///
+/// This is the extraction cache key, so the mode belongs in it: two artifacts
+/// whose files differ only in executability must not share one extracted tree.
 fn sha256_of_app(files: &[AppFile<Vec<u8>>]) -> String {
     let mut h = Sha256::new();
     for file in files {
@@ -4194,6 +4199,97 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// A version Windows cannot store fails the build either way, but only the
+    /// defaulted one needs to say where it came from: the user typed the explicit
+    /// one, and may never have connected package.json's `version` to this field.
+    #[test]
+    fn an_unstorable_manifest_version_names_package_json_and_the_override() {
+        let dir = fresh_dir("versioninfo-wide");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"acme-tool","version":"1.70000.0"}"#,
+        )
+        .unwrap();
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let out = dir.join("acme.exe");
+
+        let err = load_version_info(&[], &dir, &out, &win)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with(r#"version component 70000 in "1.70000.0" does not fit in 16 bits."#)
+                && err.contains(
+                    r#""version" in package.json, the default for FileVersion and ProductVersion."#
+                )
+                && err.contains(
+                    "--metadata FileVersion=<major.minor.patch> \
+                     --metadata ProductVersion=<major.minor.patch>"
+                ),
+            "got: {err}"
+        );
+
+        // FileVersion overridden, so ProductVersion is the defaulted field left.
+        let err = load_version_info(&["FileVersion=1.0.0".to_string()], &dir, &out, &win)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("the default for ProductVersion.")
+                && !err.contains("--metadata FileVersion"),
+            "got: {err}"
+        );
+
+        let err = load_version_info(
+            &[
+                "FileVersion=1.70000.0".to_string(),
+                "ProductVersion=1.0.0".to_string(),
+            ],
+            &dir,
+            &out,
+            &win,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            r#"version component 70000 in "1.70000.0" does not fit in 16 bits"#
+        );
+    }
+
+    /// Only a resource holding NOTHING but the derived `OriginalFilename` is
+    /// skipped. A field the publisher set explicitly is written even when they
+    /// also dropped `OriginalFilename`, which leaves it the table's only entry.
+    #[test]
+    fn an_explicit_metadata_field_earns_a_resource_without_original_filename() {
+        let bare = fresh_dir("versioninfo-explicit");
+        fs::write(bare.join("package.json"), "{}").unwrap();
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let bytes = load_version_info(
+            &[
+                "OriginalFilename=".to_string(),
+                "CompanyName=Acme Inc.".to_string(),
+            ],
+            &bare,
+            &bare.join("acme.exe"),
+            &win,
+        )
+        .unwrap()
+        .expect("an explicitly set field must not be dropped");
+        let parsed = version_info::parse(&bytes).unwrap();
+        assert_eq!(
+            parsed.strings.get("CompanyName").map(String::as_str),
+            Some("Acme Inc.")
+        );
+        assert!(!parsed.strings.contains_key("OriginalFilename"));
     }
 
     /// The parent guard above passes when `--out` names a directory whose parent

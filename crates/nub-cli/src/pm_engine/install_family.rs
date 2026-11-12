@@ -71,14 +71,14 @@
 //! - **`dlx` with no command / leading `--help`** renders nub-side help: the
 //!   engine's internal help path prints aube's own CLI help (the trailing
 //!   var-arg swallows `--help` before the parser can settle it).
-//! - **`approve-builds`/`patch` stdout, `unlink`/`prune` stderr are
-//!   fd-captured** ([`super::with_fd_captured`]) and re-emitted through the
-//!   rewrite: those verbs print branded hint lines (`` Run `aube
-//!   install`… ``, `…from .aube,…`, `` run "aube patch-commit …" ``) via
-//!   raw `println!`/`eprintln!` that bypass the report path. Capture is
-//!   safe exactly there: no child processes, no progress UI, and the
-//!   interactive picker prompts on the *other* stream. On non-unix the
-//!   capture is a documented no-op (see the cfg fallback).
+//! - **`patch` stdout, `unlink`/`prune` stderr are fd-captured**
+//!   ([`super::with_fd_captured`]) and re-emitted through the rewrite: those
+//!   verbs print branded hint lines (`` Run `aube install`… ``,
+//!   `…from .aube,…`, `` run "aube patch-commit …" ``) via raw
+//!   `println!`/`eprintln!` that bypass the report path. Capture is safe
+//!   exactly there: no child processes and no progress UI. `approve-builds`
+//!   is not captured: it runs build scripts in-process (see
+//!   `run_approve_builds`).
 //! - **`patch` defaults its edit dir at the nub layer** (`nub-patch-…`
 //!   under the system tmpdir): unlike `dlx`'s never-printed scratch dir,
 //!   the engine's `aube-patch-…` fallback path is *printed* in the success
@@ -88,11 +88,6 @@
 //!
 //! # KNOWN GAPS / residuals (documented, deliberate)
 //!
-//! - On **Windows** the fd capture is a no-op, so `approve-builds`' final
-//!   hint line still reads `aube install` and `prune`'s summary still says
-//!   `.aube` there. Root fix is fork-side (derive the printed tool name /
-//!   store label from the embedder identity — upstreamable as multicall
-//!   correctness), tracked with the brand-toggle fork items.
 //! - `link`/`unlink -g` use the engine's global-links registry under
 //!   `<XDG_CACHE_HOME>/nub/pm/global-links`. `global_links_dir()` derives from
 //!   `aube_store::dirs::cache_dir()`, so it follows the identity's
@@ -281,21 +276,17 @@ struct EngineGlobals {
 }
 
 impl EngineGlobals {
-    /// Mirror of aube's `compute_effective_filter`: `-r` is sugar for
-    /// `--filter=*` and a no-op when an explicit selector is present.
+    /// The same desugaring `install`/`ci` use
+    /// ([`WorkspaceFilterFlags::effective_filter`]).
     fn effective_filter(&self) -> EffectiveFilter {
-        let mut filters = self.filter.clone();
-        let recursive = self.recursive && filters.is_empty() && self.filter_prod.is_empty();
-        if recursive {
-            filters.push("*".to_string());
-        }
-        EffectiveFilter {
-            filters,
-            filter_prods: self.filter_prod.clone(),
+        WorkspaceFilterFlags {
+            filter: self.filter.clone(),
+            filter_prod: self.filter_prod.clone(),
+            recursive: self.recursive,
             fail_if_no_match: self.fail_if_no_match,
             include_workspace_root: self.include_workspace_root,
-            recursive,
         }
+        .effective_filter()
     }
 }
 
@@ -1225,10 +1216,6 @@ fn import_to_pnpm_lock(force: bool) -> miette::Result<String> {
     }
 }
 
-/// Nearest ancestor (inclusive) carrying a `package.json`, bounded like
-/// `super::detect_lockfile_walk_up`. Approximation of aube's
-/// `dirs::project_root` (which is crate-private); the home-dir boundary is
-/// not enforced here.
 /// Run the Vite symlink-GVS compat post-step ([`super::vite_compat::apply`]) for
 /// a successful engine verb (`install`/`add`/`update`). Resolves the root where
 /// the install's `node_modules` actually lives: the identity walk-up dir
@@ -1252,6 +1239,10 @@ fn apply_vite_compat(session: &EngineSession, code: i32) {
     super::vite_compat::apply(&root);
 }
 
+/// Nearest ancestor (inclusive) carrying a `package.json`, bounded to 16
+/// levels like `super::resolve_identity_walk_up`. Approximation of aube's
+/// `dirs::project_root` (which is crate-private); the home-dir boundary is
+/// not enforced here.
 fn find_manifest_root(cwd: &Path) -> Option<PathBuf> {
     let mut dir = cwd.to_path_buf();
     for _ in 0..16 {
@@ -1375,9 +1366,8 @@ pub struct WorkspaceFilterFlags {
 }
 
 impl WorkspaceFilterFlags {
-    /// Mirror of aube's `compute_effective_filter` (and [`EngineGlobals`]):
-    /// `-r` is sugar for `--filter=*`, a no-op when an explicit selector is
-    /// already present.
+    /// Mirror of aube's `compute_effective_filter`: `-r` is sugar for
+    /// `--filter=*`, a no-op when an explicit selector is already present.
     fn effective_filter(&self) -> EffectiveFilter {
         let mut filters = self.filter.clone();
         let recursive = self.recursive && filters.is_empty() && self.filter_prod.is_empty();
@@ -1438,7 +1428,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // flags on top.
     let mut args = default_install_args();
     args.prod = flags.prod || config.dep_selection.prod;
-    args.dev = flags.dev || config.dep_selection.dev;
+    args.dev = flags.dev;
     args.ignore_scripts = flags.ignore_scripts;
     // An explicitly named pnpmfile loads whatever the project's incumbent is
     // — `detect`'s `pnpmfile_default_enabled` gate only ever suppresses the
@@ -1555,7 +1545,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     }
 
     super::min_release_age::arm();
-    let exit = run_engine(&session, opts, yarn, &flags.output)?;
+    let exit = run_engine(&session, opts, "install", yarn, &flags.output)?;
     let code = exit.tree_code();
     super::min_release_age::persist(&session.cwd, code == 0, &flags.output);
     // Vite symlink-GVS serving compat (#315): after a successful install, write
@@ -1758,7 +1748,7 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         // contract as `run_install`.
         dep_selection: DepSelection::from_flags(
             dep.prod || flags.prod,
-            dep.dev || flags.dev,
+            flags.dev,
             dep.no_optional || flags.no_optional,
         ),
         ignore_scripts: flags.ignore_scripts,
@@ -1810,7 +1800,7 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
             ));
         }
     }
-    let exit = run_engine(&session, opts, yarn, &flags.output)?;
+    let exit = run_engine(&session, opts, "ci", yarn, &flags.output)?;
     crate::install_engine::record(&session.cwd, exit.tree_code());
     Ok(exit.code)
 }
@@ -1977,10 +1967,11 @@ fn pnpm_era_for_lockfile_version(version: &str) -> &'static str {
 
 /// Run the install on the session runtime, route failures through the
 /// presentation layer. `yarn_gated` switches the frozen-drift failure to the
-/// yarn write-gate message.
+/// yarn write-gate message, which names `verb` (`install` or `ci`).
 fn run_engine(
     session: &EngineSession,
     opts: InstallOptions,
+    verb: &str,
     yarn_gated: bool,
     output: &super::output::OutputFlags,
 ) -> Result<Exit> {
@@ -2014,7 +2005,7 @@ fn run_engine(
                 }) =>
         {
             Err(yarn_gate_error(
-                "install",
+                verb,
                 &format!("yarn.lock is out of date ({report})"),
                 "yarn install",
             ))
@@ -2559,13 +2550,9 @@ mod tests {
         );
     }
 
-    /// The virgin stamp writes the `devEngines.packageManager` caret range
-    /// object, appended at the manifest tail (the `preserve_order` editor never
-    /// reflows the user's existing keys), and NEVER the hard `packageManager`
-    /// pin. Gating on virginity is the caller's job; this asserts the write
-    /// itself. Seed nub's OWN canonical lockfile in `dir` so the stamp's
-    /// "nub wrote its neutral format" gate passes deterministically, whichever
-    /// embedder profile the test binary happens to have registered.
+    /// Seed nub's OWN canonical lockfile in `dir` so the stamp's "nub wrote its
+    /// neutral format" gate passes deterministically, whichever embedder
+    /// profile the test binary happens to have registered.
     fn seed_nub_lockfile(dir: &Path) {
         std::fs::write(
             dir.join(aube_lockfile::aube_lock_filename(dir)),
@@ -2574,6 +2561,11 @@ mod tests {
         .unwrap();
     }
 
+    /// The virgin stamp writes the `devEngines.packageManager` caret range
+    /// object, appended at the manifest tail (the `preserve_order` editor never
+    /// reflows the user's existing keys), and NEVER the hard `packageManager`
+    /// pin. Gating on virginity is the caller's job; this asserts the write
+    /// itself.
     #[test]
     fn virgin_stamp_writes_dev_engines_range_at_tail() {
         let dir = tempfile::tempdir().unwrap();

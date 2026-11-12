@@ -133,4 +133,42 @@ void describe("native Worker handoff", { concurrency: true }, () => {
     });
   });
 
+  void test("fallback ErrorEvent exposes its fields as read-only prototype accessors", { concurrency: true }, async () => {
+    await run(runtime => {
+      const assert: typeof import("node:assert/strict") = require("node:assert/strict");
+      const g = globalThis as unknown as Record<string, unknown>;
+      const native = g.ErrorEvent as { prototype: object } | undefined;
+      delete g.Worker; delete g.ErrorEvent;
+      require(runtime + "worker-polyfill.mjs");
+      const fields = ["message", "filename", "lineno", "colno", "error"];
+      const shape = (proto: object) => fields.map(key => [key, Object.entries(Object.getOwnPropertyDescriptor(proto, key) ?? {})
+        .map(([name, value]) => [name, typeof value === "function" ? "function" : value])]);
+      const accessor = [["get", "function"], ["set", undefined], ["enumerable", true], ["configurable", true]];
+      const expected = fields.map(key => [key, accessor]);
+      if (native) assert.deepEqual(shape(native.prototype), expected);
+      const WorkerCtor = g.Worker as new (src: string, opts: object) => EventTarget & { terminate(): Promise<number> };
+      const worker = new WorkerCtor("throw new Error('shape failure')", { eval: true, execArgv: [] });
+      worker.addEventListener("error", (raw: Event) => {
+        const event = raw as Event & Record<string, unknown>;
+        event.preventDefault();
+        assert.equal(event instanceof Event, true);
+        assert.equal(event.type, "error");
+        assert.deepEqual(shape(Object.getPrototypeOf(event)), expected);
+        assert.deepEqual(Reflect.ownKeys(event), Reflect.ownKeys(new Event("error")));
+        assert.match(event.message as string, /shape failure/);
+        assert.equal((event.error as Error).message, "shape failure");
+        assert.equal(typeof event.filename, "string");
+        assert.equal(typeof event.lineno, "number");
+        assert.equal(typeof event.colno, "number");
+        assert.throws(() => { "use strict"; event.message = "changed"; }, TypeError);
+        const Ctor = event.constructor as new (type: string, init?: object) => Record<string, unknown>;
+        const blank = new Ctor("error");
+        assert.deepEqual(fields.map(key => blank[key]), ["", "", 0, 0, undefined]);
+        assert.equal(new Ctor("error", { error: null }).error, null);
+        assert.equal(Object.prototype.toString.call(event), "[object ErrorEvent]");
+        void worker.terminate();
+      }, { once: true });
+    });
+  });
+
 });

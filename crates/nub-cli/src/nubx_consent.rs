@@ -31,8 +31,8 @@
 //!
 //! Scope note: this ledger records *consent*, not the fetched bytes. The
 //! per-resolution tree cache (skip the re-fetch on a hit) is the separate,
-//! locked-but-deferred follow-up (see `.fray/universal-nubx.md`); it keys off the
-//! same entries, so it layers on without changing this contract.
+//! locked-but-deferred follow-up; it keys off the same entries, so it layers on
+//! without changing this contract.
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -394,11 +394,13 @@ fn prompt_consent(specs: &[String]) -> Consent {
             Key::Char('n') | Key::Char('N') => break Consent::No,
             Key::Escape | Key::CtrlC => break Consent::No,
             // A stray key on a terminal that isn't delivering arrows (Unknown)
-            // shouldn't spin: fall back to the line reader.
+            // shouldn't spin: fall back to the line reader. Only the question
+            // line is cleared and re-asked; it is the fixed short one, so a long
+            // spec list wrapping the first header line cannot skew the clear.
             Key::Unknown => {
-                let _ = term.clear_last_lines(OPTIONS.len());
+                let _ = term.clear_last_lines(OPTIONS.len() + 1);
                 let _ = term.show_cursor();
-                return prompt_line(specs, &term);
+                return ask_line(&term);
             }
             _ => continue,
         }
@@ -426,9 +428,16 @@ fn option_at(sel: usize) -> Consent {
 fn prompt_line(specs: &[String], term: &console::Term) -> Consent {
     let bin = specs.join(" ");
     let _ = term.write_str(&format!(
-        "The {} bin is not installed locally.\nInstall and run from the remote registry? [Y/n] ",
+        "The {} bin is not installed locally.\n",
         console::style(&bin).cyan()
     ));
+    ask_line(term)
+}
+
+/// The question half of [`prompt_line`], for a caller whose header is already
+/// on screen.
+fn ask_line(term: &console::Term) -> Consent {
+    let _ = term.write_str("Install and run from the remote registry? [y/N] ");
     let _ = term.flush();
     match term.read_line() {
         Ok(line) if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") => {
@@ -454,17 +463,43 @@ mod tests {
     /// hermetic. Holds the process-wide [`crate::config::test_env_lock`] (SHARED
     /// with `config`'s test helper) so the two env-mutating suites serialize
     /// against each other under the multi-thread runner.
+    ///
+    /// Restoration rides a drop guard, as in `config::with_config_home`: a
+    /// failing assertion inside `f` unwinds, and a tail restore would leave every
+    /// later test pointed at deleted temp dirs with `CI` cleared.
     fn with_isolated_env(never: bool, f: impl FnOnce()) {
-        let _guard = crate::config::test_env_lock()
+        struct Restore {
+            saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+            _lock: std::sync::MutexGuard<'static, ()>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in self.saved.drain(..) {
+                    // SAFETY: `_lock` is still held while the fields restore.
+                    unsafe {
+                        match value {
+                            Some(v) => std::env::set_var(key, v),
+                            None => std::env::remove_var(key),
+                        }
+                    }
+                }
+            }
+        }
+
+        let lock = crate::config::test_env_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let _restore = Restore {
+            saved: ["XDG_CONFIG_HOME", "XDG_CACHE_HOME", "CI"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+            _lock: lock,
+        };
 
         let cfg = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let prev_cfg = std::env::var_os("XDG_CONFIG_HOME");
-        let prev_cache = std::env::var_os("XDG_CACHE_HOME");
-        let prev_ci = std::env::var_os("CI");
-        // SAFETY: guarded by test_env_lock; every var restored before the guard drops.
+        // SAFETY: guarded by test_env_lock; `Restore` puts every var back.
         unsafe {
             std::env::set_var("XDG_CONFIG_HOME", cfg.path());
             std::env::set_var("XDG_CACHE_HOME", cache.path());
@@ -475,21 +510,6 @@ mod tests {
         }
 
         f();
-
-        unsafe {
-            match prev_cfg {
-                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-                None => std::env::remove_var("XDG_CONFIG_HOME"),
-            }
-            match prev_cache {
-                Some(v) => std::env::set_var("XDG_CACHE_HOME", v),
-                None => std::env::remove_var("XDG_CACHE_HOME"),
-            }
-            match prev_ci {
-                Some(v) => std::env::set_var("CI", v),
-                None => std::env::remove_var("CI"),
-            }
-        }
     }
 
     #[test]
@@ -580,8 +600,6 @@ mod tests {
 
     #[test]
     fn ledger_roundtrips_and_honors_pinned_and_ttl() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("consent.json");
         let mut ledger = BTreeMap::new();
         ledger.insert(
             "pinned".to_string(),
@@ -607,20 +625,26 @@ mod tests {
                 pinned: false,
             },
         );
-        write_ledger(&path, &ledger).unwrap();
-        let back = read_ledger(&path);
-        assert_eq!(back.len(), 3);
+        // Through the real ledger path, so the assertions exercise the gate's own
+        // lookup rather than a restatement of its rule.
+        with_isolated_env(false, || {
+            let path = ledger_path().expect("an isolated cache dir resolves");
+            write_ledger(&path, &ledger).unwrap();
+            assert_eq!(read_ledger(&path).len(), 3);
 
-        // Validity is computed against the entry's own nature.
-        let valid = |key: &str, pinned: bool| -> bool {
-            let entry = back.get(key).unwrap();
-            if entry.pinned || pinned {
-                return true;
-            }
-            now_unix().saturating_sub(entry.recorded_at) < FLOATING_TTL_SECS
-        };
-        assert!(valid("pinned", true), "ancient pinned consent stays valid");
-        assert!(valid("fresh", false), "fresh floating consent is valid");
-        assert!(!valid("stale", false), "stale floating consent expires");
+            assert!(
+                ledger_has_valid("pinned", true),
+                "ancient pinned consent stays valid"
+            );
+            assert!(
+                ledger_has_valid("fresh", false),
+                "fresh floating consent is valid"
+            );
+            assert!(
+                !ledger_has_valid("stale", false),
+                "stale floating consent expires"
+            );
+            assert!(!ledger_has_valid("absent", false), "no entry, no consent");
+        });
     }
 }

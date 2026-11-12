@@ -1,6 +1,6 @@
 // Nub transform core — the single source of truth shared by both hook tiers.
 //
-// runtime/preload.mjs (fast path, Node 22.15+, sync `module.registerHooks`) and
+// runtime/preload.cjs (fast path, Node 22.15+, sync `module.registerHooks`) and
 // the compat-tier loader worker (Node 18.19–22.14, async `module.register` →
 // runtime/preload-async-hooks.mjs) both import every resolution + transpile
 // primitive from here. The tier files own only the parts that genuinely differ:
@@ -130,7 +130,8 @@ let nubNative = null;
 
 // Idempotent. Acquires the node: builtins + the native addon. Runs eagerly at module
 // eval on the fast tier (getBuiltinModule present); on the floor it is invoked at the
-// top of every exported entry point, where the threaded createRequire is ready.
+// top of each exported entry point that needs them, where the threaded createRequire
+// is ready.
 let __builtinsReady = false;
 function __ensureBuiltins() {
   if (__builtinsReady) return;
@@ -239,7 +240,6 @@ for (const [ext, loader] of Object.entries(RUNTIME_LOADER)) {
     PROJECT_DATA_EXTS[ext] = loader === "text" ? "txt" : loader;
   }
 }
-export const TS_PARENT_EXTS = new Set([".ts", ".tsx", ".mts", ".cts"]);
 
 // Node's "Unknown file extension" says nothing about why a file the type checker
 // accepted will not load. `tsc` is satisfied by a mapper alone and never emits for
@@ -261,7 +261,7 @@ export function explainMappedExtension(err, url) {
     pnp: `which Nub does not discover under Yarn Plug'n'Play; add "${entry.package}/register" to \`preload\` in nub.jsonc`,
   }[entry.reason] ?? `which has no "./register" export to load it at runtime`;
   const message = `${err.message}\n"${entry.extension}" is mapped in ${entry.tsconfig} by "${entry.package}", ${why}.`;
-  if (typeof err.stack === "string") err.stack = err.stack.replace(err.message, message);
+  if (typeof err.stack === "string") err.stack = err.stack.replace(err.message, () => message);
   err.message = message;
 }
 
@@ -279,10 +279,6 @@ export function dataExtsFor(url) {
 
 // Packages resolved from Nub's distribution, not the user's.
 export const VENDORED_PACKAGES = new Set(["@oxc-project/runtime"]);
-
-// Built-in modules provided by Nub (resolved to files in this distribution).
-// connect() sockets deferred per design decision — "sockets" specifier not clobbered.
-export const BUILTIN_MODULES = new Map();
 
 // Package clobbering: specifiers that resolve to a synthetic module re-exporting
 // the native global instead of the userland package.
@@ -516,13 +512,12 @@ let resolvingInternal = false;
 // `parentURL` is the importer (a file: URL string), or "" for the entry.
 // `fromRequire` is true when the fast tier's hook is resolving a `require()`.
 export function resolveSpec(specifier, parentURL, fromRequire = false) {
-  // nub's own internal graph (importer inside nub's runtime dir OR a nub
-  // dependency package): resolve natively and SHORT-CIRCUIT so nextResolve (the
-  // user's loader chain) never observes nub's internals. This MUST run before the
-  // node:/data:/builtin early-returns below, because those `return null` =
-  // DELEGATE to the user loader — and a nub-internal `import "node:module"` (e.g.
-  // from a nub-dependency ESM entry) delegated to a strict user loader is exactly
-  // the R11 leak. See isNubInternalParent.
+  // nub's own internal graph (importer inside nub's runtime dir): resolve natively
+  // and SHORT-CIRCUIT so nextResolve (the user's loader chain) never observes nub's
+  // internals. This MUST run before the node:/data:/builtin early-returns below,
+  // because those `return null` = DELEGATE to the user loader — and a nub-internal
+  // `import "node:module"` delegated to a strict user loader is exactly the R11
+  // leak. See isNubInternalParent.
   if (isNubInternalParent(parentURL)) {
     if (specifier.startsWith("node:") || module.isBuiltin(specifier)) {
       const url = specifier.startsWith("node:") ? specifier : `node:${specifier}`;
@@ -549,8 +544,8 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
       const resolved = parentReq.resolve(specifier);
       return { url: pathToFileURL(resolved).href, shortCircuit: true };
     } catch {
-      // Couldn't resolve from the parent (e.g. a non-file: parent): still short-
-      // circuit by handing the specifier back as-is, so the user chain is bypassed.
+      // Couldn't resolve from the parent (e.g. a non-file: parent): fall through to
+      // the next resolver, which reports the failure as Node would.
       return null;
     } finally {
       resolvingInternal = false;
@@ -561,12 +556,7 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
   if (specifier.startsWith("node:") || specifier.startsWith("data:")) return null;
   if (module.isBuiltin(specifier)) return null;
 
-  // 1. Built-in modules provided by Nub.
-  if (BUILTIN_MODULES.has(specifier)) {
-    return { url: BUILTIN_MODULES.get(specifier), shortCircuit: true };
-  }
-
-  // 2. Vendored packages (e.g. @oxc-project/runtime).
+  // 1. Vendored packages (e.g. @oxc-project/runtime).
   const bare = barePkg(specifier);
   if (VENDORED_PACKAGES.has(bare)) {
     let url = vendoredResolutions.get(specifier);
@@ -578,7 +568,7 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
     if (url) return { url, shortCircuit: true };
   }
 
-  // 3. Package clobbering, for `import` only. A `require()` loads the installed
+  // 2. Package clobbering, for `import` only. A `require()` loads the installed
   // package as it would on plain Node: CommonJS reads a data: URL as a file path
   // and fails with ENOENT, and a CommonJS caller expects the package's own export
   // shape (`require("abort-controller")` is the constructor, not a namespace).
@@ -588,7 +578,7 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
 
   const parent = String(parentURL || "");
 
-  // 4. The ADDITIVE TS resolution (tsconfig `paths`, extension probing, `.js`→`.ts`
+  // 3. The ADDITIVE TS resolution (tsconfig `paths`, extension probing, `.js`→`.ts`
   // swap, directory index/`main`) — native. `resolveTs` is handed the parent's
   // absolute FS path (or "" for a non-file: parent / the entry, where it falls back
   // to cwd, matching the old `process.cwd()` parentDir). A non-null result is an
@@ -604,7 +594,7 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
 // CommonJS `require()` resolution for the compat-tier Module._resolveFilename
 // patch. Returns an absolute file path for a require specifier nub should
 // redirect (tsconfig `paths`, extensionless `.ts`, `.js`→`.ts` swap), or null to
-// defer to Node's resolver. Mirrors resolveSpec steps 4–5 but returns a path (not
+// defer to Node's resolver. Mirrors resolveSpec step 3 but returns a path (not
 // a URL) and never handles clobber/vendored/builtin — those are import-only, and
 // a clobber's data: URL can't be a require target. `parentPath` is the requiring
 // file's absolute path (from the CJS parent Module), or null for the entry.
@@ -756,7 +746,7 @@ const CACHE_DISABLED =
   process.permission?.has !== undefined || process.env.NODE_COMPILE_CACHE === "0";
 // Resolved lazily (memoized) rather than at module eval, because on the floor the
 // node:path builtins it needs aren't bound until __ensureBuiltins() runs on first
-// hook use. `null` = disabled / no writable dir; `undefined` cacheDirResolved means
+// hook use. `null` = disabled / no writable dir; a false `cacheDirResolved` means
 // "not yet computed".
 let cacheDir = null;
 let cacheDirResolved = false;

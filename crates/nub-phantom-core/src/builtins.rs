@@ -1,10 +1,14 @@
 //! Node builtin-module recognition.
 //!
 //! A `node:`-prefixed specifier is UNCONDITIONALLY a builtin (the prefix is
-//! reserved). A bare specifier is a builtin only if it names one of Node's
-//! built-in modules — the list below is the union across supported Node lines
-//! (18.19 floor → current), so we never mistake a real dependency for a builtin
-//! nor vice-versa.
+//! reserved). A bare specifier is a builtin only if it EXACTLY names one of
+//! Node's built-in modules — the lists below are the union across supported Node
+//! lines (18.19 floor → current), taken from `require('node:module')
+//! .builtinModules`, so we never mistake a real dependency for a builtin nor
+//! vice-versa. The match is on the whole specifier, as Node's is: `buffer/`
+//! (the polyfill idiom), `process/` and `fs/anything` resolve from
+//! `node_modules`, and the `node:`-only modules (`node:test`, `node:sqlite`,
+//! `node:sea`) are not builtins without the prefix.
 
 /// Bare names that resolve to a Node builtin. Kept as a sorted `&[&str]` for a
 /// binary-search membership test; the set changes only when Node adds a module.
@@ -53,20 +57,32 @@ const BARE_BUILTINS: &[&str] = &[
     "zlib",
 ];
 
-/// Is `spec` (the full import specifier) a Node builtin?
+/// The bare builtin SUBPATHS. Any other `<builtin>/<x>` is an npm request.
+/// Sorted for binary search.
+const BUILTIN_SUBPATHS: &[&str] = &[
+    "assert/strict",
+    "dns/promises",
+    "fs/promises",
+    "inspector/promises",
+    "path/posix",
+    "path/win32",
+    "readline/promises",
+    "stream/consumers",
+    "stream/promises",
+    "stream/web",
+    "timers/promises",
+    "util/types",
+];
+
+/// Is `spec` (the full import specifier, not a package name) a Node builtin?
 ///
 /// Handles the `node:` prefix (always builtin, incl. `node:test`, `node:sea`,
-/// and any subpath like `node:stream/promises`), and bare builtins with an
-/// optional subpath (`fs/promises`, `stream/web`, `dns/promises`, `util/types`,
-/// `assert/strict`, `path/posix`, `timers/promises`, `inspector/promises`).
+/// and any subpath like `node:stream/promises`), a bare builtin name, and the
+/// exact bare builtin subpaths in [`BUILTIN_SUBPATHS`].
 pub fn is_builtin(spec: &str) -> bool {
-    if spec.strip_prefix("node:").is_some() {
-        return true;
-    }
-    // A bare builtin may carry a first-party subpath (`fs/promises`); match the
-    // head segment only.
-    let head = spec.split('/').next().unwrap_or(spec);
-    BARE_BUILTINS.binary_search(&head).is_ok()
+    spec.starts_with("node:")
+        || BARE_BUILTINS.binary_search(&spec).is_ok()
+        || BUILTIN_SUBPATHS.binary_search(&spec).is_ok()
 }
 
 /// Bare names a HOST process injects at runtime, which no install can supply.
@@ -105,6 +121,46 @@ mod tests {
     #[test]
     fn builtin_list_is_sorted_for_binary_search() {
         assert!(super::BARE_BUILTINS.is_sorted());
+        assert!(super::BUILTIN_SUBPATHS.is_sorted());
+    }
+
+    #[test]
+    fn only_the_exact_specifier_node_resolves_internally_is_a_builtin() {
+        // Each case checked against Node's own `require('node:module').isBuiltin`.
+        // A trailing slash is the documented way to reach the npm package of a
+        // builtin's name (`require('buffer/')`), and an unknown subpath is an npm
+        // request too: both resolve from node_modules, so either can be a phantom.
+        for spec in [
+            "buffer/",
+            "process/",
+            "punycode/",
+            "fs/",
+            "fs/whatever",
+            "util/x",
+        ] {
+            assert!(!is_builtin(spec), "{spec} resolves from node_modules");
+        }
+        // `node:`-only modules are builtins only WITH the prefix.
+        for spec in ["test", "sqlite", "sea", "test/reporters"] {
+            assert!(!is_builtin(spec), "bare {spec} is an npm package");
+        }
+        for spec in [
+            "node:test",
+            "node:sqlite",
+            "node:sea",
+            "node:test/reporters",
+        ] {
+            assert!(is_builtin(spec), "{spec} is a builtin");
+        }
+        for spec in [
+            "path/posix",
+            "path/win32",
+            "util/types",
+            "stream/web",
+            "timers/promises",
+        ] {
+            assert!(is_builtin(spec), "{spec} is a builtin subpath");
+        }
     }
 
     #[test]

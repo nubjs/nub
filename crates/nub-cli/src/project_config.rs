@@ -4,7 +4,7 @@
 //! durable-settings home and is read best-effort (a malformed file degrades to
 //! the default); the PROJECT file is authored by the user for one project and is
 //! read FAIL-LOUD (an unknown key or malformed value is an error, per the bunfig
-//! silent-no-op lesson — [`.fray/nub-config-spec.md`]).
+//! silent-no-op lesson).
 //!
 //! Dialect: JSONC (JSON + comments + trailing commas), the tsconfig dialect,
 //! parsed through [`crate::jsonc`] — the same depth-guarded reader the global
@@ -622,9 +622,16 @@ fn parse_global_config(text: &str) -> Result<ProjectConfig> {
     // both of those tests; the asymmetry is the feature.
     obj.retain(|key, _| ROOT_KEYS.contains(&key.as_str()));
     let mut config = validate_root(&obj, ConfigScope::Global)?;
-    if config.dlx.consent.is_none() {
-        config.dlx.consent = legacy_consent;
-    }
+    // Both spellings can sit in one file, and a `never` in either is the
+    // kill-switch. The consent prompt's **Never** and `nub config set
+    // exec.implicitDlx never` write the legacy key beside whatever `dlx` block
+    // the author already has, so a `dlx.consent: "prompt"` outranking it would
+    // ask again right after the user chose never to be asked.
+    config.dlx.consent = match (config.dlx.consent, legacy_consent) {
+        (_, Some(ImplicitDlx::Never)) => Some(ImplicitDlx::Never),
+        (None, legacy) => legacy,
+        (typed, _) => typed,
+    };
     Ok(config)
 }
 
@@ -1316,9 +1323,7 @@ enum ConfigScope {
 /// describes the field surface of `nub.jsonc` as a format — both files use that
 /// name and `$schema` points at the same document — so it carries `dlx` too,
 /// and `published_schema_exposes_every_parser_key` requires it to. Scope is
-/// enforced by the parser at read time, not by omission from the schema; an
-/// earlier revision of this comment claimed the opposite and contradicted the
-/// test directly below it.
+/// enforced by the parser at read time, not by omission from the schema.
 pub(crate) const GLOBAL_ONLY_KEYS: &[&str] = &["dlx"];
 
 /// Validate a whole document object exactly as the file readers do.
@@ -2370,8 +2375,39 @@ mod tests {
         );
     }
 
+    /// Answering **Never** writes `exec.implicitDlx` beside an existing `dlx`
+    /// block, so the two spellings meet in one file and must not let a `prompt`
+    /// in either one undo the user's `never`.
+    #[test]
+    fn a_never_in_either_consent_spelling_is_the_kill_switch() {
+        for body in [
+            r#"{ "dlx": { "consent": "prompt" }, "exec": { "implicitDlx": "never" } }"#,
+            r#"{ "dlx": { "consent": "never" }, "exec": { "implicitDlx": "prompt" } }"#,
+        ] {
+            assert_eq!(
+                parse_global(body).dlx.consent,
+                Some(ImplicitDlx::Never),
+                "{body}"
+            );
+        }
+        assert_eq!(
+            parse_global(
+                r#"{ "dlx": { "consent": "prompt" }, "exec": { "implicitDlx": "prompt" } }"#
+            )
+            .dlx
+            .consent,
+            Some(ImplicitDlx::Prompt),
+        );
+    }
+
     #[test]
     fn global_only_key_error_names_the_source_and_destination_files() {
+        // The message resolves the destination from `XDG_CONFIG_HOME` when it is
+        // rendered, and the assertion resolves it again: both must see the same
+        // value, so no other test may repoint the variable in between.
+        let _env = crate::config::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let project_path = dir.path().join(FILE_NAME);
         std::fs::write(&project_path, r#"{ "dlx": { "consent": "prompt" } }"#).unwrap();

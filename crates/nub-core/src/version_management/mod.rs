@@ -111,18 +111,23 @@ impl HostTarget {
             NodeOs::Linux => "linux",
             NodeOs::Windows => "win",
         };
-        let arch = match self.arch {
+        let arch = self.arch_token();
+        if self.musl {
+            format!("{os}-{arch}-musl")
+        } else {
+            format!("{os}-{arch}")
+        }
+    }
+
+    /// The arch token shared by dist filenames and index `files` keys.
+    fn arch_token(&self) -> &'static str {
+        match self.arch {
             NodeArch::X64 => "x64",
             NodeArch::Arm64 => "arm64",
             NodeArch::Armv7l => "armv7l",
             NodeArch::Ppc64le => "ppc64le",
             NodeArch::S390x => "s390x",
             NodeArch::X86 => "x86",
-        };
-        if self.musl {
-            format!("{os}-{arch}-musl")
-        } else {
-            format!("{os}-{arch}")
         }
     }
 
@@ -141,14 +146,7 @@ impl HostTarget {
     /// `darwin`), marks Darwin tarballs and Windows zip files explicitly, and
     /// carries musl in the Linux key.
     fn index_artifact_key(&self) -> String {
-        let arch = match self.arch {
-            NodeArch::X64 => "x64",
-            NodeArch::Arm64 => "arm64",
-            NodeArch::Armv7l => "armv7l",
-            NodeArch::Ppc64le => "ppc64le",
-            NodeArch::S390x => "s390x",
-            NodeArch::X86 => "x86",
-        };
+        let arch = self.arch_token();
         match self.os {
             NodeOs::Darwin => format!("osx-{arch}-tar"),
             NodeOs::Linux if self.musl => format!("linux-{arch}-musl"),
@@ -572,21 +570,27 @@ fn ensure_node_license_from(
         let url = art.shasums_url.clone();
         std::thread::spawn(move || download::fetch_text(&url))
     };
-    let (sha, extracted) = if art.tarball_filename.ends_with(".tar.xz") {
-        download::download_and_extract_tar_xz(&art.tarball_url, &work, |_, _| {})
-            .with_context(|| format!("downloading Node {version} to repair its LICENSE"))?
+    // Same shape as `provision_node_from`: only the `.tar.xz` stream extracts
+    // before the checksum is known; a `.zip` is verified before it is opened.
+    let (sha, streamed_top) = if art.tarball_filename.ends_with(".tar.xz") {
+        let (sha, top) = download::download_and_extract_tar_xz(&art.tarball_url, &work, |_, _| {})
+            .with_context(|| format!("downloading Node {version} to repair its LICENSE"))?;
+        (sha, Some(top))
     } else {
         let archive = work.join(&art.tarball_filename);
         let sha = download::download_to_file(&art.tarball_url, &archive, |_, _| {})
             .with_context(|| format!("downloading Node {version} to repair its LICENSE"))?;
-        let extracted = extract::extract_archive(&archive, &work)?;
-        (sha, extracted)
+        (sha, None)
     };
     let shasums = shasums_thread
         .join()
         .map_err(|_| anyhow::anyhow!("checksum fetch thread panicked"))?
         .with_context(|| format!("fetching checksums for Node {version}"))?;
     download::verify_checksum(&sha, &shasums, &art.tarball_filename)?;
+    let extracted = match streamed_top {
+        Some(top) => top,
+        None => extract::extract_archive(&work.join(&art.tarball_filename), &work)?,
+    };
 
     let license = node_license(&extracted)?;
     let node = node_binary(&extracted, target)?;
@@ -1143,26 +1147,12 @@ pub fn provision_node_from(
     let _guard = WorkGuard(work.clone());
 
     let started = Instant::now();
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     match resolved_from {
         Some(p) => eprintln!("Using Node.js {version} (resolved from {p})"),
         None => eprintln!("Using Node.js {version}"),
     }
-    let mut announced = false;
-    let mut on_progress = |_done: u64, total: Option<u64>| {
-        if !announced {
-            announced = true;
-            let size = match total {
-                Some(t) => format!(" ({} MB)", t / 1_000_000),
-                None => String::new(),
-            };
-            if tty {
-                eprint!("Installing from nodejs.org...{size}");
-            } else {
-                eprintln!("Installing from nodejs.org...{size}");
-            }
-        }
-    };
+    let mut line = download::InstallLine::new("Installing from nodejs.org...");
+    let mut on_progress = |_done: u64, total: Option<u64>| line.progress(total);
 
     // `.tar.xz` streams straight into the extractor; `.zip` (Windows) downloads
     // to disk first (central directory needs random access).
@@ -1212,13 +1202,10 @@ pub fn provision_node_from(
         }
     }
 
-    // \r + clear-to-EOL rewrites the Installing line on a TTY (it was printed
-    // without a newline there); non-TTY just gets a third line.
-    let rewrite = if tty { "\r\x1b[K" } else { "" };
-    eprintln!(
-        "{rewrite}Installed in {:.1}s",
+    line.finish(format_args!(
+        "Installed in {:.1}s",
         started.elapsed().as_secs_f64()
-    );
+    ));
     Ok(final_dir)
 }
 
@@ -1803,6 +1790,38 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "work dir leaked: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&store);
+    }
+
+    /// A Windows `.zip` repair download is checksum-verified before the archive
+    /// is opened at all: unverified bytes never reach the zip extractor.
+    #[test]
+    fn license_repair_verifies_a_zip_before_extracting_it() {
+        let h = host(NodeOs::Windows, NodeArch::X64, false);
+        let version = ver("99.99.91");
+        let name = "node-v99.99.91-win-x64.zip";
+        let wrong = "0".repeat(64);
+        let (base, hits) = serve_dist(
+            format!("{wrong}  {name}\n"),
+            name.to_string(),
+            b"not a zip archive".to_vec(),
+        );
+        let store = std::env::temp_dir().join(format!(
+            "nub-license-zip-verify-{}-{}",
+            std::process::id(),
+            LICENSE_REPAIR_NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&store);
+        let dir = store.join("node").join(version.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err =
+            ensure_node_license_from(&version, &h, &dir, &store.join("node"), &base).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("checksum mismatch"),
+            "the checksum gate must reject the archive before the zip reader sees it: {err:#}"
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(&store);
     }
 

@@ -152,7 +152,7 @@ export function arm({ esm = true, cjs = true } = {}) {
   const watchReporting = common.installWatchReporting(core);
 
   const hasSyncHooks = typeof module_.registerHooks === "function";
-  // On 22.15.0–24.11.0 an async `module.register` loader's resolveSync/loadSync
+  // On 22.15.0–24.11.1 and 25.0–25.1 an async `module.register` loader's resolveSync/loadSync
   // are unimplemented stubs, so nub's sync hooks composing with a foreign async
   // loader (tsx, ts-node, an OTel ESM attach) would crash resolution. Register
   // via the async path there instead so both loaders compose all-async — the same

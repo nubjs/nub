@@ -20,6 +20,19 @@
 //! recursion can still be stopped: none of these parsers exposes a depth option,
 //! and by the time one returns, the stack has already been spent.
 
+/// Which parser the text is headed for. The two end a `//` comment at different
+/// bytes, and the scan has to end it where the parser does: ending one early can
+/// open a string or a block comment the parser never sees, and every delimiter
+/// inside that phantom span goes uncounted.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// `jsonc_parser`: a line comment runs to the next `\n`.
+    Jsonc,
+    /// JSON5: a line comment ends at any ECMAScript line terminator — `\n`, `\r`,
+    /// U+2028 or U+2029.
+    Json5,
+}
+
 /// Byte-scan for the deepest `{`/`[` nesting, ignoring delimiters inside strings
 /// and comments. Bytes are safe to scan directly: every delimiter is ASCII and
 /// UTF-8 continuation bytes are all >= 0x80, so no multi-byte character can be
@@ -28,7 +41,7 @@
 /// `max_depth` is the caller's, not a constant here, because the two callers
 /// bound different things — nub's own config schema versus arbitrary user data
 /// reaching the runtime's data-format loaders.
-pub fn check_nesting_depth(text: &str, max_depth: usize) -> Result<(), String> {
+pub fn check_nesting_depth(text: &str, max_depth: usize, dialect: Dialect) -> Result<(), String> {
     #[derive(Clone, Copy)]
     enum State {
         Code,
@@ -76,7 +89,12 @@ pub fn check_nesting_depth(text: &str, max_depth: usize) -> Result<(), String> {
                 _ => {}
             },
             State::LineComment => {
-                if b == b'\n' {
+                let ends = b == b'\n'
+                    || dialect == Dialect::Json5
+                        && (b == b'\r'
+                            || bytes[i..].starts_with("\u{2028}".as_bytes())
+                            || bytes[i..].starts_with("\u{2029}".as_bytes()));
+                if ends {
                     state = State::Code;
                 }
             }
@@ -103,27 +121,69 @@ mod tests {
 
     #[test]
     fn accepts_up_to_the_limit_and_rejects_past_it() {
-        assert!(check_nesting_depth(&nest(64), 64).is_ok());
-        let over = check_nesting_depth(&nest(65), 64).unwrap_err();
-        assert!(over.contains("deeper than the 64-level"), "{over}");
+        for dialect in [Dialect::Jsonc, Dialect::Json5] {
+            assert!(check_nesting_depth(&nest(64), 64, dialect).is_ok());
+            let over = check_nesting_depth(&nest(65), 64, dialect).unwrap_err();
+            assert!(over.contains("deeper than the 64-level"), "{over}");
 
-        // The depths that abort the process unguarded, at both stack budgets.
-        assert!(check_nesting_depth(&nest(400), 128).is_err());
-        assert!(check_nesting_depth(&nest(3000), 128).is_err());
+            // The depths that abort the process unguarded, at both stack budgets.
+            assert!(check_nesting_depth(&nest(400), 128, dialect).is_err());
+            assert!(check_nesting_depth(&nest(3000), 128, dialect).is_err());
+        }
     }
 
     #[test]
     fn depth_counts_only_real_delimiters() {
         // Brackets inside strings, escapes, and both comment forms are not nesting.
-        let ok = |t: &str| check_nesting_depth(t, 64).is_ok();
-        assert!(ok(&format!(r#"{{ "a": "{}" }}"#, "[".repeat(500))));
-        assert!(ok(&format!(r#"{{ "a": '{}' }}"#, "{".repeat(500))));
-        assert!(ok(r#"{ "a": "he said \"[[[\"" }"#));
-        assert!(ok(&format!("// {}\n{{}}", "[".repeat(500))));
-        assert!(ok(&format!("/* {} */ {{}}", "[".repeat(500))));
+        for dialect in [Dialect::Jsonc, Dialect::Json5] {
+            let ok = |t: &str| check_nesting_depth(t, 64, dialect).is_ok();
+            assert!(ok(&format!(r#"{{ "a": "{}" }}"#, "[".repeat(500))));
+            assert!(ok(&format!(r#"{{ "a": '{}' }}"#, "{".repeat(500))));
+            assert!(ok(r#"{ "a": "he said \"[[[\"" }"#));
+            assert!(ok(&format!("// {}\n{{}}", "[".repeat(500))));
+            assert!(ok(&format!("/* {} */ {{}}", "[".repeat(500))));
 
-        // Sibling blocks nest independently — depth is a maximum, not a total.
-        assert!(ok(&format!("[{}]", "[1],".repeat(500))));
+            // Sibling blocks nest independently — depth is a maximum, not a total.
+            assert!(ok(&format!("[{}]", "[1],".repeat(500))));
+        }
+    }
+
+    /// JSON5 ends a `//` comment at `\r`, U+2028 and U+2029 as well as `\n`, so
+    /// nesting after any of them is code the parser descends into and must count.
+    #[test]
+    fn a_json5_line_comment_ends_at_every_line_terminator() {
+        for terminator in ["\n", "\r", "\u{2028}", "\u{2029}"] {
+            let text = format!("// c{terminator}{}", nest(65));
+            assert!(
+                check_nesting_depth(&text, 64, Dialect::Json5).is_err(),
+                "nesting after a comment ended by {terminator:?} was not counted"
+            );
+        }
+    }
+
+    /// `jsonc_parser` keeps a `//` comment open past `\r`, U+2028 and U+2029, so a
+    /// quote or a `/*` after one of them is still comment text. Ending the comment
+    /// there would open a string or a block comment that hides the nesting on the
+    /// next line, which the parser does descend into.
+    #[test]
+    fn a_jsonc_line_comment_runs_to_the_newline() {
+        for separator in ["\r", "\u{2028}", "\u{2029}"] {
+            for opener in ["\"", "'", "/*"] {
+                let text = format!("// c{separator}{opener}\n{}", nest(65));
+                assert!(
+                    check_nesting_depth(&text, 64, Dialect::Jsonc).is_err(),
+                    "{opener:?} after {separator:?} in a comment hid the nesting below it"
+                );
+            }
+            // The same bytes hold no nesting of their own: it is all comment text.
+            let text = format!("// c{separator}{}\n{{}}", "[".repeat(65));
+            assert!(check_nesting_depth(&text, 64, Dialect::Jsonc).is_ok());
+        }
+        // `\r\n` is one line ending, in either dialect.
+        for dialect in [Dialect::Jsonc, Dialect::Json5] {
+            let text = format!("// c\r\n{}", nest(65));
+            assert!(check_nesting_depth(&text, 64, dialect).is_err());
+        }
     }
 
     /// A file truncated mid-string or mid-comment leaves the scanner in a
@@ -131,8 +191,9 @@ mod tests {
     /// violation, so the parser — not this guard — decides the outcome.
     #[test]
     fn truncated_input_ends_the_scan_rather_than_failing_it() {
-        assert!(check_nesting_depth("{ \"a\": \"unterminated", 64).is_ok());
-        assert!(check_nesting_depth("/* unterminated", 64).is_ok());
-        assert!(check_nesting_depth("// unterminated", 64).is_ok());
+        let ok = |t: &str| check_nesting_depth(t, 64, Dialect::Jsonc).is_ok();
+        assert!(ok("{ \"a\": \"unterminated"));
+        assert!(ok("/* unterminated"));
+        assert!(ok("// unterminated"));
     }
 }

@@ -27,7 +27,19 @@ const PLATFORMS = {
 function isMusl() {
   if (process.platform !== "linux") return false;
   try {
-    const report = process.report.getReport();
+    // Collecting network interfaces can take seconds on some hosts and the header
+    // check never reads them. `excludeNetwork` exists from Node 20.13 and 22.0;
+    // where it is absent it is left absent. The caller's setting is restored.
+    const pr = process.report;
+    const canExclude = "excludeNetwork" in pr;
+    const prior = canExclude ? pr.excludeNetwork : undefined;
+    let report;
+    if (canExclude) pr.excludeNetwork = true;
+    try {
+      report = pr.getReport();
+    } finally {
+      if (canExclude) pr.excludeNetwork = prior;
+    }
     const header = (typeof report === "string" ? JSON.parse(report) : report).header;
     if (header && "glibcVersionRuntime" in header) {
       return !header.glibcVersionRuntime;
