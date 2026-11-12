@@ -188,10 +188,11 @@ fn the_permission_model_starts_with_nubs_runtime_readable() {
     .unwrap();
     let grant = format!("--allow-fs-read={}", dir.display());
     // Node 22 reads the entry through its real path, and macOS keeps the temp
-    // directory behind a symlink, so the grant names that spelling as well.
+    // directory behind a symlink, so the grant names that spelling as well. Only
+    // where it differs: Node 20 and 22 abort on the same grant given twice.
     let real_grant = format!("--allow-fs-read={}", dir.canonicalize().unwrap().display());
     let mut args = vec!["--permission", "--allow-addons", grant.as_str()];
-    if cfg!(unix) {
+    if cfg!(unix) && real_grant != grant {
         args.push(real_grant.as_str());
     }
     // Before 22.15 Nub's hooks run on a loader worker thread, which the
@@ -204,6 +205,40 @@ fn the_permission_model_starts_with_nubs_runtime_readable() {
     let (stdout, stderr, code) = run_nub(&dir, &args);
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout.trim(), r#"["x"]"#, "stderr: {stderr}");
+}
+
+/// Nub grants read access to its install directory for its own runtime. Node 20
+/// and 22 abort on a read grant for a directory they already hold one for, so
+/// when the user grants that directory Nub must not grant it again.
+#[test]
+fn nub_does_not_repeat_a_read_grant_the_user_made() {
+    let dir = probe_dir("permission-repeat");
+    let version = node_version(&probe(&dir, &["probe.js"]));
+    if !has_stable_permission(version) {
+        eprintln!("skipping: Node {version:?} has no --permission");
+        return;
+    }
+    // The directory Nub grants: the one above the binary's own.
+    let install = nub_binary();
+    let install = install.parent().and_then(|bin| bin.parent()).unwrap();
+    let grant = format!("--allow-fs-read={}", dir.display());
+    let real_grant = format!("--allow-fs-read={}", dir.canonicalize().unwrap().display());
+    for nubs_own in [
+        format!("--allow-fs-read={}", install.display()),
+        format!("--allow-fs-read={}/*", install.display()),
+    ] {
+        let mut args = vec!["--permission", "--allow-addons", grant.as_str()];
+        if cfg!(unix) && real_grant != grant {
+            args.push(real_grant.as_str());
+        }
+        args.push(nubs_own.as_str());
+        if version < (22, 15) {
+            args.push("--allow-worker");
+        }
+        args.push("probe.js");
+        let (stdout, stderr, code) = run_nub(&dir, &args);
+        assert_eq!(code, 0, "{nubs_own}\nstdout: {stdout}\nstderr: {stderr}");
+    }
 }
 
 const PROBE: &str = r#"console.log(JSON.stringify({

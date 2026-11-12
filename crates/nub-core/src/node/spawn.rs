@@ -972,9 +972,16 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
             .parent()
             .and_then(|p| p.parent())
             .unwrap_or(config.nub_binary);
-        cmd.arg(format!("--allow-fs-read={}", install_dir.display()));
-        if let Some(runtime_dir) = preload.as_deref().and_then(|p| Path::new(p).parent()) {
-            cmd.arg(format!("--allow-fs-read={}", runtime_dir.display()));
+        let runtime_dir = preload.as_deref().and_then(|p| Path::new(p).parent());
+        // Node 20 and 22 abort on a read grant for a directory they already hold
+        // one for, so a directory the user granted is not granted again.
+        let mut granted = user_read_grants(&permission_flags, config.cwd);
+        for dir in [Some(install_dir), runtime_dir].into_iter().flatten() {
+            let key = read_grant_key(&dir.to_string_lossy(), config.cwd);
+            if !granted.contains(&key) {
+                cmd.arg(format!("--allow-fs-read={}", dir.display()));
+                granted.push(key);
+            }
         }
     }
 
@@ -2551,6 +2558,54 @@ fn boolean_option(flags: &[String], name: &str) -> bool {
             }
         })
         .unwrap_or(false)
+}
+
+/// The directories the user's `--allow-fs-read` flags name, as
+/// [`read_grant_key`]s. The value follows `=` or is the next argument. `*` alone
+/// grants everything and names no directory.
+fn user_read_grants(flags: &[String], cwd: &Path) -> Vec<PathBuf> {
+    let mut grants = Vec::new();
+    let mut flags = flags.iter();
+    while let Some(flag) = flags.next() {
+        let (name, value) = match flag.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (flag.as_str(), None),
+        };
+        if name.replace('_', "-") != "--allow-fs-read" {
+            continue;
+        }
+        let value = match value {
+            Some(value) => value,
+            None => match flags.next() {
+                Some(next) => next.as_str(),
+                None => break,
+            },
+        };
+        if value != "*" {
+            grants.push(read_grant_key(value, cwd));
+        }
+    }
+    grants
+}
+
+/// The directory a read grant names, as Node compares grants: resolved against
+/// the working directory, with `.` and `..` folded and a trailing `*` dropped.
+fn read_grant_key(grant: &str, cwd: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut key = PathBuf::new();
+    for part in cwd.join(grant).components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                key.pop();
+            }
+            part => key.push(part),
+        }
+    }
+    if key.file_name() == Some(OsStr::new("*")) {
+        key.pop();
+    }
+    key
 }
 
 /// The name Node reads a boolean option under. It takes `_` for `-` anywhere in
@@ -6539,6 +6594,40 @@ mod tests {
         assert!(addons(&["--allow-addons=false"]));
         assert!(!addons(&["--allow-addons", "--no_allow_addons"]));
         assert!(!addons(&["--allow-addons", "--no-allow_addons=1"]));
+    }
+
+    /// Each spelling is one Node 22.13 takes for the same grant as `/work/app`:
+    /// with a second grant of that directory it aborts.
+    #[test]
+    fn a_read_grant_is_keyed_as_node_compares_it() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let cwd = Path::new("/work");
+        let app = Path::new("/work/app");
+        for flags in [
+            &["--allow-fs-read=/work/app"][..],
+            &["--allow-fs-read=/work/app/"][..],
+            &["--allow-fs-read=/work/app/*"][..],
+            &["--allow-fs-read=app"][..],
+            &["--allow-fs-read=/work//app/sub/.."][..],
+            &["--allow-fs-read", "/work/app"][..],
+            &["--allow_fs_read=/work/app"][..],
+        ] {
+            assert_eq!(user_read_grants(&args(flags), cwd), [app], "{flags:?}");
+        }
+        // A parent or a child is a different grant, and other flags and `*` name none.
+        assert_eq!(
+            user_read_grants(
+                &args(&[
+                    "--permission",
+                    "--allow-fs-read=/work",
+                    "--allow-fs-write=/work/app",
+                    "--allow-fs-read=*",
+                    "--allow-fs-read=/work/app/sub",
+                ]),
+                cwd
+            ),
+            [Path::new("/work"), Path::new("/work/app/sub")]
+        );
     }
 
     #[test]
