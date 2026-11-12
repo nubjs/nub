@@ -114,6 +114,47 @@ fn recursive_run_skips_packages_without_the_script_and_exits_zero() {
     );
 }
 
+/// `--sequential` and `--parallel` reach across the workspace where there is one.
+/// In a package outside any workspace they schedule its own scripts, as pnpm 9,
+/// 10 and 11 do. That used to fail with "not in a workspace".
+#[test]
+fn sequential_and_parallel_schedule_a_lone_packages_own_scripts() {
+    let root = tmp_workspace("lone-scheduling");
+    write(
+        &root.join("package.json"),
+        r#"{"name":"lone","version":"1.0.0","private":true,"scripts":{"a:one":"echo RAN:one","a:two":"echo RAN:two","b":"echo RAN:b"}}"#,
+    );
+    for flag in ["--sequential", "--parallel"] {
+        let (stdout, stderr, code) = run_nub(&root, &["run", flag, "/^a:/"]);
+        let combined = format!("{stdout}{stderr}");
+        assert_eq!(code, 0, "{flag}\n{combined}");
+        assert!(
+            combined.contains("RAN:one") && combined.contains("RAN:two"),
+            "{flag}\n{combined}"
+        );
+        assert!(!combined.contains("RAN:b"), "{flag}\n{combined}");
+        if flag == "--sequential" {
+            assert!(
+                combined.find("RAN:one") < combined.find("RAN:two"),
+                "package.json order\n{combined}"
+            );
+        }
+    }
+    let (stdout, stderr, code) = run_nub(&root, &["run", "--sequential", "b"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert!(stdout.contains("RAN:b"), "{stdout}{stderr}");
+
+    // With a workspace around it, the same flag still selects every member.
+    let workspace = script_workspace("scheduling");
+    let (stdout, stderr, code) = run_nub(&workspace, &["run", "--parallel", "dev"]);
+    let combined = format!("{stdout}{stderr}");
+    assert_eq!(code, 0, "{combined}");
+    assert!(
+        combined.contains("DEV:api") && combined.contains("DEV:web"),
+        "{combined}"
+    );
+}
+
 #[test]
 fn recursive_run_discovers_object_form_workspace_packages() {
     let root = tmp_workspace("object-form");

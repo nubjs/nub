@@ -1857,6 +1857,9 @@ struct WorkspaceOpts {
     fail_if_no_match: bool,
     workspace_concurrency: Option<i32>,
     parallel: bool,
+    /// `--sequential`, which like `--parallel` reaches across the workspace when
+    /// there is one.
+    sequential: bool,
     bail: bool,
     reverse: bool,
     sort: bool,
@@ -3097,11 +3100,9 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
             // `--include-workspace-root` / `--resume-from` imply a workspace run
             // even without `-r`/`--filter` (they only mean anything across the
             // member set); promote to recursive so run_script routes correctly.
-            let recursive = recursive
-                || parallel
-                || sequential
-                || include_workspace_root
-                || resume_from.is_some();
+            // `--parallel` and `--sequential` are promoted there, once it knows
+            // whether there is a workspace to reach across.
+            let recursive = recursive || include_workspace_root || resume_from.is_some();
             let ws_opts = WorkspaceOpts {
                 recursive,
                 filter,
@@ -3116,6 +3117,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                     workspace_concurrency
                 },
                 parallel,
+                sequential,
                 bail: !no_bail,
                 reverse,
                 // `--sequential` also drops topological ordering (flat set).
@@ -3178,6 +3180,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                 fail_if_no_match,
                 workspace_concurrency,
                 parallel,
+                sequential: false,
                 bail: false,
                 reverse: false,
                 sort: !parallel,
@@ -3270,6 +3273,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
                     fail_if_no_match,
                     workspace_concurrency,
                     parallel,
+                    sequential: false,
                     bail: false,
                     reverse: false,
                     sort: !parallel,
@@ -5245,9 +5249,12 @@ fn run_script(
         return Ok(0);
     };
 
-    // Workspace-wide execution: -r, --filter, or --parallel. It gates itself,
-    // once it knows the selection is not empty.
-    if ws.recursive || !ws.filter.is_empty() || !ws.filter_prod.is_empty() || ws.parallel {
+    // Workspace-wide execution: -r, --filter, and, where there is a workspace,
+    // --parallel or --sequential. In a package outside any workspace those two
+    // schedule its own scripts (`nub run --sequential '/^build:/'`), as in pnpm.
+    // It gates itself, once it knows the selection is not empty.
+    let scheduled_across = (ws.parallel || ws.sequential) && project.workspace_root.is_some();
+    if ws.recursive || !ws.filter.is_empty() || !ws.filter_prod.is_empty() || scheduled_across {
         return run_workspace_target(WorkspaceTarget::Script(script, args), compat_mode, ws);
     }
 
@@ -12549,7 +12556,8 @@ mod tests {
 
     #[test]
     fn watch_env_file_arg_stays_absolute_for_windows_watchers() {
-        let root = std::env::temp_dir().join("nub-watch-env-arg-windows");
+        let root =
+            std::env::temp_dir().join(format!("nub-watch-env-arg-windows-{}", std::process::id()));
         let path = root.join(".env");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
@@ -14211,11 +14219,16 @@ mod tests {
         let _ctx = crate::pm_engine::ENGINE_GLOBAL_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let prev = env::current_dir().unwrap();
+        // Restored on unwind too, so a failing test does not move every later one.
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = env::set_current_dir(&self.0);
+            }
+        }
+        let _restore = Restore(env::current_dir().unwrap());
         env::set_current_dir(dir).unwrap();
-        let out = f();
-        env::set_current_dir(prev).unwrap();
-        out
+        f()
     }
 
     #[test]
