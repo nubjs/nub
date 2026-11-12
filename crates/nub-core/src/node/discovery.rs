@@ -605,7 +605,7 @@ fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
                     // silently dropping the pin. The serde_json path
                     // (packageManager/devEngines) handles BOMs already.
                     let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
-                    let trimmed = content.trim();
+                    let trimmed = pin_file_text(content);
                     if !trimmed.is_empty() {
                         if let Ok(pin) = trimmed.parse::<VersionPin>() {
                             tracing::debug!(path = %pin_path.display(), pin = trimmed, "found pin file");
@@ -635,6 +635,20 @@ fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
     }
 
     None
+}
+
+/// The pin text of a `.nvmrc` or `.node-version`, read as nvm reads a `.nvmrc`:
+/// `#` starts a comment and blank lines do not count. More than one line left is
+/// not a pin, so the content comes back whole and fails to parse.
+fn pin_file_text(content: &str) -> &str {
+    let mut lines = content
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .filter(|line| !line.is_empty());
+    match (lines.next(), lines.next()) {
+        (Some(line), None) => line,
+        _ => content.trim(),
+    }
 }
 
 /// Read the Node pin from an asdf/mise `.tool-versions` in `dir` (precedence #4).
@@ -2892,6 +2906,20 @@ mod tests {
         let (raw, _pin, source) = walk_up_for_pin(&dir).expect("a BOM-prefixed pin file");
         assert_eq!(raw, "20.11.0", "the BOM must be stripped before parsing");
         assert_eq!(source, ".nvmrc");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pin_file_may_carry_comments() {
+        let dir = resolution_tmpdir("pin-comments");
+        std::fs::write(dir.join(".nvmrc"), "# pinned for CI\n\n20.11.0 # LTS\n").unwrap();
+        let (raw, pin, source) = walk_up_for_pin(&dir).expect("a commented pin file");
+        assert_eq!((raw.as_str(), source.as_str()), ("20.11.0", ".nvmrc"));
+        assert_eq!(pin, "20.11.0".parse().unwrap());
+
+        // Two versions are not a pin, with or without comments.
+        let two = pin_file_text("20 # one\n22 # two\n");
+        assert!(two.parse::<VersionPin>().is_err(), "{two:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

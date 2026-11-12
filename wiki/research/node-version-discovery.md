@@ -277,3 +277,4 @@ Every revision to this document, with the date and what changed.
 - 2026-09-19 — Alias pins resolve against the cached release index on the offline discovery path; the codename table this section described was never the shipped mechanism.
 - 2026-11-03 — A PATH `node` that is a version manager's shim is no longer cached by `(path, mtime)`: its version is read on every launch, and the flag caches key on the version too.
 - 2026-11-04 — Recorded how discovery bounds a `node` that leads back to Nub: probes run at the recursion bound and skip such a candidate, every Nub process counts itself into a 64-level bound, and launching a known real Node clears the count.
+- 2026-11-11 — `.nvmrc` and `.node-version` are read with `#` comments and blank lines dropped, as the conventions matrix describes for nvm. A file left with more than one line is not a pin.
