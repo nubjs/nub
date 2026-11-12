@@ -571,7 +571,7 @@ version = "0.1.0"
 
 [[package]]
 name = "nub-native"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "libloading",
