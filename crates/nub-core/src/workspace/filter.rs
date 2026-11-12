@@ -237,11 +237,30 @@ fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
     let content = fs::read_to_string(&path).ok()?;
     let mut patterns = Vec::new();
     let mut in_packages = false;
-    for line in content.lines() {
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
         let trimmed = line.trim();
         if trimmed == "packages:" {
             in_packages = true;
             continue;
+        }
+        if !in_packages
+            && let Some(flow) = trimmed
+                .strip_prefix("packages:")
+                .and_then(|rest| rest.trim_start().strip_prefix('['))
+        {
+            // A flow sequence may wrap, so it reads on through the following lines.
+            let rest = std::iter::once(flow)
+                .chain(lines.by_ref())
+                .collect::<Vec<_>>()
+                .join("\n");
+            for item in yaml_flow_sequence_items(&rest).unwrap_or_default() {
+                let item = yaml_list_item(&item);
+                if !item.is_empty() {
+                    patterns.push(item.to_string());
+                }
+            }
+            break;
         }
         if in_packages {
             if let Some(rest) = trimmed.strip_prefix("- ") {
@@ -256,6 +275,47 @@ fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
     } else {
         Some(patterns)
     }
+}
+
+/// The raw items of a YAML flow sequence, `text` starting just after its `[`, for
+/// [`yaml_list_item`] to unquote. Commas and `]` inside quotes, and comments, do
+/// not end an item. `None` when the sequence never closes.
+fn yaml_flow_sequence_items(text: &str) -> Option<Vec<String>> {
+    let mut items = Vec::new();
+    let mut item = String::new();
+    let mut quote = None;
+    let mut after_space = true;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            item.push(c);
+            if c == q {
+                quote = None;
+            }
+            after_space = false;
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                item.push(c);
+            }
+            '#' if after_space => {
+                chars.by_ref().find(|&c| c == '\n');
+                item.push(' ');
+                after_space = true;
+                continue;
+            }
+            ',' => items.push(std::mem::take(&mut item)),
+            ']' => {
+                items.push(item);
+                return Some(items);
+            }
+            _ => item.push(c),
+        }
+        after_space = c.is_whitespace();
+    }
+    None
 }
 
 /// The scalar of one `pnpm-workspace.yaml` sequence item, without its quotes
@@ -708,6 +768,59 @@ mod tests {
         );
         assert_eq!(yaml_list_item("pkgs/a#b"), "pkgs/a#b");
         assert_eq!(yaml_list_item("\"pkgs/*\"  # c"), "pkgs/*");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flow_sequence_packages_are_workspace_members() {
+        let dir = ws_fixture("flow");
+        std::fs::write(dir.join("package.json"), r#"{"name":"root"}"#).unwrap();
+        std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+        for (rel, name) in [("tools/t", "@x/t"), ("pkgs/b", "@x/b")] {
+            std::fs::create_dir_all(dir.join(rel)).unwrap();
+            std::fs::write(
+                dir.join(rel).join("package.json"),
+                format!(r#"{{"name":"{name}"}}"#),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages: ['pkgs/*', \"tools/*\", '!pkgs/b']\n",
+        )
+        .unwrap();
+
+        let names: HashSet<String> = discover_members(&dir).into_iter().map(|m| m.name).collect();
+        assert_eq!(
+            names,
+            HashSet::from(["@x/a".to_string(), "@x/t".to_string()])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The flow shapes pnpm's YAML parser accepts: plain and quoted items, a list
+    /// wrapped over several lines with comments and a trailing comma, and an empty
+    /// list, which selects no members.
+    #[test]
+    fn flow_sequence_packages_read_like_a_yaml_parser() {
+        let dir = ws_fixture("flow-shapes");
+        let read = |yaml: &str| {
+            std::fs::write(dir.join("pnpm-workspace.yaml"), yaml).unwrap();
+            read_pnpm_workspace(&dir)
+        };
+        let owned = |v: &[&str]| Some(v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+
+        assert_eq!(
+            read("packages: ['a/*', \"b/*\", c/*] # members\n"),
+            owned(&["a/*", "b/*", "c/*"])
+        );
+        assert_eq!(
+            read(
+                "packages: [\n  'a/*', # apps\n  \"b,c/*\",\n  # tools\n  c/*\n  , '!**/test/**',\n]\nonlyBuiltDependencies: [esbuild]\n"
+            ),
+            owned(&["a/*", "b,c/*", "c/*", "!**/test/**"])
+        );
+        assert_eq!(read("packages: []\n"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
