@@ -767,6 +767,29 @@ pub fn resolve_pin_for_platform(
     let index = node_index::load_index(cache_root, &mirror)
         .context("loading the Node release index to resolve the compile target")?;
     resolve_pin_in_index_for_artifact(pin, &index, &target.index_artifact_key())
+        .map_err(|_| no_release_for_platform(pin, &target, &mirror))
+}
+
+/// The explicit-platform resolution failure, naming the pin, the platform and
+/// the mirror searched. musl is the case it exists for: unofficial-builds
+/// publishes a release hours to days after nodejs.org, so an exact pin that
+/// resolves for every glibc, macOS and Windows target can still miss here.
+fn no_release_for_platform(pin: &VersionPin, target: &HostTarget, mirror: &str) -> anyhow::Error {
+    let spec = match pin {
+        VersionPin::Exact(v) => v.to_string(),
+        VersionPin::MajorMinor(major, minor) => format!("{major}.{minor}"),
+        VersionPin::Major(major) => major.to_string(),
+        VersionPin::Alias(alias) => alias.clone(),
+        VersionPin::Range(alts) => alts
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" || "),
+    };
+    anyhow::anyhow!(
+        "no Node release matching {spec} is published for {} at {mirror}",
+        target.platform_token()
+    )
 }
 
 // ---- pin-based resolution for `nub compile` (reuses nub run's grammar) ---------
@@ -871,6 +894,7 @@ pub fn resolve_pin_floor_for_platform(
     let index = node_index::load_index(cache_root, &mirror)
         .context("loading the Node release index to resolve the compile target")?;
     resolve_pin_floor_in_index(pin, &index, &target.index_artifact_key())
+        .map_err(|_| no_release_for_platform(pin, &target, &mirror))
 }
 
 /// Whether `gate` — the version [`resolve_pin_floor_for_platform`] actually
