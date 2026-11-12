@@ -37,8 +37,8 @@ nub scripts/remote-build.ts --build-image                # re-bake the golden im
 SIGKILLed at the harness timeout — two minutes by default, ten at most — and SIGKILL cannot be
 caught, so layer 1 never runs and the VM leaks until its server-side TTL. Measured twice: a cold
 clippy killed at 2m13s, then again at 10m, each orphaning a builder. `--attach` polls in bounded
-windows and exits **75** for "still running, call again"; re-run it until it returns the job's own
-exit code.
+windows and exits **75** for "still running, call again"; re-run it until it returns anything else:
+the job's own exit code, or 1 for a job that itself exited 75.
 
 ## Credentials come from Keyward
 

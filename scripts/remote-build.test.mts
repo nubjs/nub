@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { parseArgs, jobScript as rawJobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand, sshArgs, sshCommand, vmKeyPath, bootReason } from "./remote-build.ts";
+import { parseArgs, jobScript as rawJobScript, instanceCreateArgs, filterSourceFiles, rsyncPushArgs, placementCandidates, isStray, remoteJobCommand, sshArgs, sshCommand, vmKeyPath, bootReason, finishedJobExitCode } from "./remote-build.ts";
 
 function jobScript(...args: Parameters<typeof rawJobScript>): string {
   const script = rawJobScript(...args);
@@ -374,4 +374,12 @@ void test("every ssh spawn uses sshArgs, and gcloud only ever runs through keywa
 void test("the boot reason names the provisioning model and the job", () => {
   assert.equal(bootReason({ job: "clippy", onDemand: false }), "boot a spot VM for the clippy job");
   assert.equal(bootReason({ job: "test", onDemand: true }), "boot an on-demand VM for the test job");
+});
+
+// `--attach` exits 75 to mean "still running, call again", and callers loop on it. A finished
+// job that exited 75 itself must not read that way, or its failure is never reported.
+void test("--attach reports a finished job with its own code, never the still-running 75", () => {
+  assert.equal(finishedJobExitCode("0"), 0);
+  assert.equal(finishedJobExitCode("101"), 101);
+  assert.equal(finishedJobExitCode("75"), 1, "a job's own 75 must not read as still running");
 });
