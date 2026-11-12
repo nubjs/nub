@@ -1996,7 +1996,7 @@ fn prod_install_leaves_dev_dependencies_out_of_the_store() {
     let marker = format!("prod-fetch-dev-marker-{}", std::process::id());
     std::fs::write(src.join("marker.txt"), &marker).unwrap();
     let status = Command::new("tar")
-        .args(["-czf", "../dev.tgz", "package"])
+        .args(["-czf", "dev.tgz", "package"])
         .current_dir(root.join("src"))
         .status()
         .expect("failed to spawn tar");
