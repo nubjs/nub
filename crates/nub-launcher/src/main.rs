@@ -2663,7 +2663,11 @@ fn create_staging_dir(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let result = fs::create_dir(path);
     result.with_context(|| format!("creating {}", path.display()))?;
-    normalize_staging_dir(path)
+    // Nothing is in it yet, and a directory that could not be made private is
+    // of no use to the caller.
+    normalize_staging_dir(path).inspect_err(|_| {
+        let _ = fs::remove_dir(path);
+    })
 }
 
 fn create_staging_subdirs(root: &Path, path: &Path) -> Result<()> {
