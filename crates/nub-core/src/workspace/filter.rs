@@ -240,7 +240,11 @@ fn read_pnpm_workspace(workspace_root: &Path) -> Option<Vec<String>> {
     let mut lines = content.lines();
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
-        if trimmed == "packages:" {
+        // The key alone, or with a comment after it, opens a block list.
+        if trimmed
+            .strip_prefix("packages:")
+            .is_some_and(|rest| rest.is_empty() || rest.trim_start().starts_with('#'))
+        {
             in_packages = true;
             continue;
         }
@@ -821,6 +825,21 @@ mod tests {
             owned(&["a/*", "b,c/*", "c/*", "!**/test/**"])
         );
         assert_eq!(read("packages: []\n"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_comment_after_the_packages_key_still_opens_the_block_list() {
+        let dir = ws_fixture("block-comment");
+        std::fs::write(
+            dir.join("pnpm-workspace.yaml"),
+            "packages: # every app\n  - 'apps/*'\n  # and the tools\n  - tools/*\ncatalog:\n  - not-a-member\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_pnpm_workspace(&dir),
+            Some(vec!["apps/*".to_string(), "tools/*".to_string()])
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
