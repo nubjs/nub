@@ -1123,39 +1123,12 @@ pub fn provision_node_from(
     let _guard = WorkGuard(work.clone());
 
     let started = Instant::now();
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     match resolved_from {
         Some(p) => eprintln!("Using Node.js {version} (resolved from {p})"),
         None => eprintln!("Using Node.js {version}"),
     }
-    // On a TTY the Installing line is left open for the success line to rewrite.
-    // Every other exit ends it, so an error the caller prints starts on its own line.
-    struct EndOpenLine<'a>(&'a std::cell::Cell<bool>);
-    impl Drop for EndOpenLine<'_> {
-        fn drop(&mut self) {
-            if self.0.get() {
-                eprintln!();
-            }
-        }
-    }
-    let line_open = std::cell::Cell::new(false);
-    let _end_open_line = EndOpenLine(&line_open);
-    let mut announced = false;
-    let mut on_progress = |_done: u64, total: Option<u64>| {
-        if !announced {
-            announced = true;
-            let size = match total {
-                Some(t) => format!(" ({} MB)", t / 1_000_000),
-                None => String::new(),
-            };
-            if tty {
-                eprint!("Installing from nodejs.org...{size}");
-                line_open.set(true);
-            } else {
-                eprintln!("Installing from nodejs.org...{size}");
-            }
-        }
-    };
+    let mut line = download::InstallLine::new("Installing from nodejs.org...");
+    let mut on_progress = |_done: u64, total: Option<u64>| line.progress(total);
 
     // `.tar.xz` streams straight into the extractor; `.zip` (Windows) downloads
     // to disk first (central directory needs random access).
@@ -1205,14 +1178,10 @@ pub fn provision_node_from(
         }
     }
 
-    // \r + clear-to-EOL rewrites the Installing line on a TTY (it was printed
-    // without a newline there); non-TTY just gets a third line.
-    let rewrite = if tty { "\r\x1b[K" } else { "" };
-    line_open.set(false);
-    eprintln!(
-        "{rewrite}Installed in {:.1}s",
+    line.finish(format_args!(
+        "Installed in {:.1}s",
         started.elapsed().as_secs_f64()
-    );
+    ));
     Ok(final_dir)
 }
 

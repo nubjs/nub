@@ -291,6 +291,65 @@ impl Attempt {
     }
 }
 
+/// The `Installing…` line an installer prints when its download starts. On a
+/// terminal the line is left open so the closing line overwrites it, and a
+/// finished install shows two lines; elsewhere (CI logs, pipes) each is its own
+/// line. Dropping it while open ends the line, so an error the caller prints
+/// starts on its own.
+pub(crate) struct InstallLine {
+    label: &'static str,
+    tty: bool,
+    announced: bool,
+    open: bool,
+}
+
+impl InstallLine {
+    pub(crate) fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            tty: std::io::IsTerminal::is_terminal(&std::io::stderr()),
+            announced: false,
+            open: false,
+        }
+    }
+
+    /// A download progress report. The first one announces the install, with
+    /// the size when the server gave one; a retried download reports again and
+    /// prints nothing.
+    pub(crate) fn progress(&mut self, total: Option<u64>) {
+        if self.announced {
+            return;
+        }
+        self.announced = true;
+        let size = match total {
+            Some(t) => format!(" ({} MB)", t / 1_000_000),
+            None => String::new(),
+        };
+        if self.tty {
+            eprint!("{}{size}", self.label);
+            self.open = true;
+        } else {
+            eprintln!("{}{size}", self.label);
+        }
+    }
+
+    /// Print the closing line. `\r` and clear-to-end-of-line put it over the
+    /// open line on a terminal.
+    pub(crate) fn finish(mut self, line: std::fmt::Arguments<'_>) {
+        let rewrite = if self.tty { "\r\x1b[K" } else { "" };
+        self.open = false;
+        eprintln!("{rewrite}{line}");
+    }
+}
+
+impl Drop for InstallLine {
+    fn drop(&mut self) {
+        if self.open {
+            eprintln!();
+        }
+    }
+}
+
 /// Stream `url` into `dest` (not buffered in memory — tarballs are tens of MB),
 /// returning the SHA-256 (lowercase hex) of the bytes written. `progress` is
 /// called as chunks arrive with `(bytes_so_far, total_len_if_known)` so callers
@@ -307,8 +366,8 @@ pub(crate) fn download_to_file(
 /// and bounded transient-failure retry. A mid-stream connection drop, a 5xx, or a
 /// timeout retries from scratch (the dest file is truncated on each attempt, so a
 /// partial body never corrupts the result); a 4xx fails fast. The `progress`
-/// callback may fire on a doomed attempt — callers gate their announce line on a
-/// latch (see `provision`), so a retried download announces at most once.
+/// callback may fire on a doomed attempt — [`InstallLine`] announces on the first
+/// report only, so a retried download announces at most once.
 pub fn download_to_file_auth(
     url: &str,
     dest: &Path,

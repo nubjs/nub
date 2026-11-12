@@ -452,27 +452,15 @@ fn install(
     // shows two lines. Non-TTY (CI logs, pipes) keeps all three. `quiet_using`
     // drops the `Using…` line for the PM shim, whose own `<pm>@<version> (via nub
     // shim)` header (printed before this) already states the resolved version.
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     if !quiet_using {
         match resolved_from {
             Some(p) => eprintln!("Using {pm} {} (resolved from {p})", dist.version),
             None => eprintln!("Using {pm} {}", dist.version),
         }
     }
-    let mut announced = false;
+    let mut line = download::InstallLine::new("Installing...");
     download::download_to_file_auth(&dist.tarball, &tarball, auth, |_done, total| {
-        if !announced {
-            announced = true;
-            let size = match total {
-                Some(t) => format!(" ({} MB)", t / 1_000_000),
-                None => String::new(),
-            };
-            if tty {
-                eprint!("Installing...{size}");
-            } else {
-                eprintln!("Installing...{size}");
-            }
-        }
+        line.progress(total)
     })
     .with_context(|| format!("downloading {pm} {}", dist.version))?;
 
@@ -496,13 +484,10 @@ fn install(
 
     extract_and_place(pm, dist, pm_store, final_dir, &tarball)?;
 
-    // \r + clear-to-EOL rewrites the Installing line on a TTY (it was printed
-    // without a newline there); non-TTY just gets a third line.
-    let rewrite = if tty { "\r\x1b[K" } else { "" };
-    eprintln!(
-        "{rewrite}Installed in {:.1}s",
+    line.finish(format_args!(
+        "Installed in {:.1}s",
         started.elapsed().as_secs_f64()
-    );
+    ));
     Ok(())
 }
 
