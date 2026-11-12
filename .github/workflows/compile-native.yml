@@ -361,6 +361,10 @@ jobs:
       # The fixture contract is the same as native-host's prebuilt mode. `bash`
       # is installed inside Alpine because the fixture is intentionally a shell
       # harness; all compile/install/run activity occurs in real musl userspace.
+      # `--target` is the image's major, not its exact version: the official
+      # Alpine image ships a Node release the day it lands, while the musl build
+      # nub embeds comes from unofficial-builds, which publishes it hours to days
+      # later. An exact target fails for that whole window (Node 22.23.5).
       - name: Compile and run native island in Alpine
         shell: bash
         run: |
@@ -372,7 +376,7 @@ jobs:
             --workdir /work \
             --env COMPILE_NATIVE_LOG_DIR=/logs \
             node:22-alpine \
-            sh -ec 'apk add --no-cache bash && target="$(node --version)" && bash tests/compile-native-islands/run.sh --nub /work/.native-ci/musl/nub --launcher /work/.native-ci/musl/nub-launcher --target "${target#v}" --platform linux-x64-musl --mode prebuilt'
+            sh -ec 'apk add --no-cache bash && bash tests/compile-native-islands/run.sh --nub /work/.native-ci/musl/nub --launcher /work/.native-ci/musl/nub-launcher --target "$(node -p process.versions.node | cut -d. -f1)" --platform linux-x64-musl --mode prebuilt'
       - name: Upload musl native-island failure logs
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
