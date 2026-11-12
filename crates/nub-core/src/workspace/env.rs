@@ -2,7 +2,7 @@
 //! The parser follows Node's `--env-file` grammar; expansion stays in Nub's
 //! intentional post-parse layer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -262,7 +262,7 @@ const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 /// Multi-pass (up to 10 rounds) to resolve nested chains like `A=hello`,
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
 /// (consistent with [`load_env_files`]), and so does a reference that leads back
-/// to the variable it sits in ([`drop_reference_cycles`]). Mutates `map`
+/// to the variable it sits in ([`remove_reference_cycles`]). Mutates `map`
 /// in-place and returns it for easy chaining.
 ///
 /// A `\$` escape stays escaped through every round and becomes a literal `$`
@@ -271,7 +271,7 @@ const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 /// would come out as `foo`, the exact result the escape exists to prevent.
 // @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#What Nub does#Expansion ruleset]]
 pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
-    drop_reference_cycles(map);
+    remove_reference_cycles(map);
     for _ in 0..10 {
         let snapshot = map.clone();
         let mut changed = false;
@@ -305,54 +305,111 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
 /// over into 1,024 copies of `x` and a literal `$A`. This runs before the
 /// rounds because a round copies raw text between variables, and a cycle copied
 /// into a variable outside it can no longer be told from an ordinary reference.
-fn drop_reference_cycles(map: &mut HashMap<String, String>) {
-    let references: HashMap<&str, Vec<&str>> = map
+///
+/// What stood on either side of a removed reference must not join up across
+/// the gap: `$B${A}suffix` would become `$Bsuffix`, another variable, and
+/// `$${A}B` would become `$B`. So a rewritten value spells every reference it
+/// keeps with braces and every other `$` as the `\$` escape, which leaves no
+/// piece of it able to absorb its neighbor.
+fn remove_reference_cycles(map: &mut HashMap<String, String>) {
+    let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+    let index: HashMap<&str, usize> = keys
         .iter()
-        .map(|(key, value)| {
-            let mut names = Vec::new();
-            scan_references(value, |_, name, _| {
-                names.extend(map.get_key_value(name).map(|(name, _)| name.as_str()));
+        .enumerate()
+        .map(|(at, &key)| (key, at))
+        .collect();
+    let references: Vec<Vec<usize>> = keys
+        .iter()
+        .map(|&key| {
+            let mut to = Vec::new();
+            scan_references(&map[key], "$", |_, name| {
+                to.extend(index.get(name));
                 Some(())
             });
-            (key.as_str(), names)
+            to
         })
         .collect();
-    let reaches = |from: &str, to: &str| {
-        let mut pending = vec![from];
-        let mut seen = HashSet::new();
-        while let Some(name) = pending.pop() {
-            if name == to {
-                return true;
-            }
-            if seen.insert(name) {
-                pending.extend(references.get(name).into_iter().flatten().copied());
-            }
-        }
-        false
-    };
-    let rewritten: Vec<(String, String)> = references
+    // A reference leads back to its own variable exactly when both ends sit in
+    // one strongly connected component, so one pass over the graph settles
+    // every reference. Asking per reference walks the rest of a chain each
+    // time, which is quadratic in the length of an ordinary acyclic chain.
+    let component = strongly_connected(&references);
+    let rewritten: Vec<(String, String)> = keys
         .iter()
-        .filter_map(|(&key, names)| {
-            let cyclic: HashSet<&str> = names
+        .enumerate()
+        .filter(|&(at, _)| {
+            references[at]
                 .iter()
-                .copied()
-                .filter(|&name| reaches(name, key))
-                .collect();
-            if cyclic.is_empty() {
-                return None;
-            }
-            let value = scan_references(&map[key], |result, name, written| {
-                if cyclic.contains(name) {
+                .any(|&to| component[to] == component[at])
+        })
+        .filter_map(|(at, &key)| {
+            let value = scan_references(&map[key], "\\$", |result, name| {
+                if index
+                    .get(name)
+                    .is_some_and(|&to| component[to] == component[at])
+                {
                     return Some(());
                 }
-                written
-                    .iter()
-                    .try_for_each(|&ch| push_char_bounded(result, ch))
+                push_bounded(result, "${")?;
+                push_bounded(result, name)?;
+                push_bounded(result, "}")
             })?;
             Some((key.to_string(), value))
         })
         .collect();
     map.extend(rewritten);
+}
+
+/// The strongly connected component of each node, as an id per node, where
+/// `edges[node]` lists the nodes it points at (Tarjan's algorithm). Iterative,
+/// because a chain of references is as deep as it is long.
+fn strongly_connected(edges: &[Vec<usize>]) -> Vec<usize> {
+    const UNSET: usize = usize::MAX;
+    let mut visited = vec![UNSET; edges.len()];
+    let mut lowest = vec![UNSET; edges.len()];
+    let mut component = vec![UNSET; edges.len()];
+    let mut open = Vec::new();
+    let mut visits = 0;
+    let mut components = 0;
+
+    for root in 0..edges.len() {
+        if visited[root] != UNSET {
+            continue;
+        }
+        // Each frame is a node and the next of its edges to follow.
+        let mut path = vec![(root, 0)];
+        while let Some(&mut (node, ref mut next)) = path.last_mut() {
+            if *next == 0 {
+                visited[node] = visits;
+                lowest[node] = visits;
+                visits += 1;
+                open.push(node);
+            }
+            if let Some(&to) = edges[node].get(*next) {
+                *next += 1;
+                if visited[to] == UNSET {
+                    path.push((to, 0));
+                } else if component[to] == UNSET {
+                    lowest[node] = lowest[node].min(visited[to]);
+                }
+                continue;
+            }
+            path.pop();
+            if let Some(&(parent, _)) = path.last() {
+                lowest[parent] = lowest[parent].min(lowest[node]);
+            }
+            if lowest[node] == visited[node] {
+                while let Some(member) = open.pop() {
+                    component[member] = components;
+                    if member == node {
+                        break;
+                    }
+                }
+                components += 1;
+            }
+        }
+    }
+    component
 }
 
 /// Load and merge `.env*` files WITHOUT `${VAR}` expansion — the *raw* values
@@ -683,17 +740,20 @@ fn push_var_bounded(result: &mut String, name: &str, env: &HashMap<String, Strin
 /// `None` means the expansion would exceed [`MAX_EXPANDED_VALUE`]. Callers keep
 /// the raw value in that case rather than publishing a truncated replacement.
 fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
-    scan_references(value, |result, name, _| push_var_bounded(result, name, env))
+    scan_references(value, "$", |result, name| {
+        push_var_bounded(result, name, env)
+    })
 }
 
 /// Copy `value`, handing each `${VAR}` and `$VAR` reference to `reference`
-/// with the output so far, the name, and the reference as written. A `\$`
-/// escape is copied through unchanged, so the `$` after it is never a
-/// reference. `None` means the copy would exceed [`MAX_EXPANDED_VALUE`], or
-/// `reference` gave up.
+/// with the output so far and the name, and writing `bare_dollar` for a `$`
+/// that starts no reference. A `\$` escape is copied through unchanged, so the
+/// `$` after it is never a reference. `None` means the copy would exceed
+/// [`MAX_EXPANDED_VALUE`], or `reference` gave up.
 fn scan_references(
     value: &str,
-    mut reference: impl FnMut(&mut String, &str, &[char]) -> Option<()>,
+    bare_dollar: &str,
+    mut reference: impl FnMut(&mut String, &str) -> Option<()>,
 ) -> Option<String> {
     let mut result = String::new();
     let chars: Vec<char> = value.chars().collect();
@@ -711,7 +771,7 @@ fn scan_references(
                 // ${VAR} form
                 if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
                     let var_name: String = chars[i + 2..i + 2 + close].iter().collect();
-                    reference(&mut result, &var_name, &chars[i..i + close + 3])?;
+                    reference(&mut result, &var_name)?;
                     i += close + 3;
                     continue;
                 }
@@ -724,10 +784,13 @@ fn scan_references(
                     end += 1;
                 }
                 let var_name: String = chars[start..end].iter().collect();
-                reference(&mut result, &var_name, &chars[i..end])?;
+                reference(&mut result, &var_name)?;
                 i = end;
                 continue;
             }
+            push_bounded(&mut result, bare_dollar)?;
+            i += 1;
+            continue;
         }
 
         push_char_bounded(&mut result, chars[i])?;
@@ -795,6 +858,11 @@ mod tests {
             ("MIXED", "${PLAIN}/$MIXED/${PLAIN}"),
             ("OUTSIDE", "<$PAIR_A|$SELF|$PLAIN>"),
             ("ESCAPED", r"\$ESCAPED"),
+            ("NEAR", "$PLAIN${NEAR}suffix"),
+            ("NEAR_A", "$PLAIN${NEAR_B}_x"),
+            ("NEAR_B", "<$NEAR_A>"),
+            ("BARE", "$${BARE}PLAIN"),
+            ("OPEN", "${PLAIN$OPEN$PLAIN"),
         ] {
             map.insert(key.to_string(), value.to_string());
         }
@@ -814,6 +882,34 @@ mod tests {
             map["ESCAPED"], "$ESCAPED",
             "an escaped dollar is no reference"
         );
+        // The reference on one side and the text on the other stay apart.
+        assert_eq!(map["NEAR"], "plainsuffix");
+        assert_eq!(map["NEAR_A"], "plain_x");
+        assert_eq!(map["NEAR_B"], "<>");
+        assert_eq!(map["BARE"], "$PLAIN", "a bare dollar stays a dollar");
+        assert_eq!(map["OPEN"], "${PLAINplain", "an unclosed brace stays text");
+    }
+
+    /// Finding the references that lead back is one pass over the variables,
+    /// however long a chain or a ring of them is. A walk per reference takes
+    /// minutes on these, and a recursive one overflows the stack.
+    #[test]
+    fn a_long_chain_and_a_long_ring_of_references_are_one_pass() {
+        const LINKS: usize = 20_000;
+        let mut map: HashMap<String, String> = (0..LINKS)
+            .flat_map(|at| {
+                [
+                    (format!("CHAIN_{at}"), format!("${{CHAIN_{}}}", at + 1)),
+                    (format!("RING_{at}"), format!("$RING_{}", (at + 1) % LINKS)),
+                ]
+            })
+            .collect();
+        map.insert(format!("CHAIN_{LINKS}"), "end".to_string());
+
+        expand_env_map(&mut map);
+
+        assert_eq!(map[&format!("CHAIN_{}", LINKS - 10)], "end");
+        assert!((0..LINKS).all(|at| map[&format!("RING_{at}")].is_empty()));
     }
 
     #[test]
