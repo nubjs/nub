@@ -91,7 +91,8 @@ fn elf_libc_is_musl(bytes: &[u8]) -> Option<bool> {
 /// silently is not in the artifact: the binary either loads the wrong version or
 /// fails outright.
 ///
-/// Matches `native_layout::install_anchor`, which has always taken the first.
+/// `native_layout::install_anchor` takes the first as well, after looking for a
+/// `.yarn` boundary.
 pub(super) fn install_tree_root(package: &Path) -> Option<PathBuf> {
     let mut parts: Vec<&std::ffi::OsStr> = package.components().map(|c| c.as_os_str()).collect();
     let index = parts.iter().position(|part| *part == "node_modules")?;

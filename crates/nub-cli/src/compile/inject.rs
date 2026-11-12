@@ -463,6 +463,9 @@ fn find_in_macho<'a>(image: &'a [u8], name: &str) -> Result<Option<&'a [u8]>> {
         }
         if cmd == LC_SEGMENT_64 {
             let nsects = u32le(image, cursor + 64).context("truncated Mach-O segment")? as usize;
+            // A section header lies inside its load command, so the command's size
+            // bounds whatever count the file claims.
+            let nsects = nsects.min(cmdsize.saturating_sub(72) / 80);
             for i in 0..nsects {
                 // section_64 entries follow the 72-byte segment_command_64.
                 let sect = cursor
