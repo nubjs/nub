@@ -64,13 +64,71 @@ shimTest("URLPattern and Float16 adapters delegate to their supplied packages", 
     getFloat16(...args) { calls.push(args); return 1.5; },
     setFloat16(...args) { calls.push(args); },
   } });
-  assert.equal(URLPattern, Pattern); assert.equal(Float16Array, F16); assert.equal(Math.f16round, round);
+  assert.equal(URLPattern, Pattern); assert.equal(Float16Array, F16); assert.equal(Math.f16round(3), 1.5);
+  // Defined as the engine defines them: non-enumerable, the functions as methods
+  // with the optional littleEndian left out of length.
+  const shapes = [[globalThis, "URLPattern"], [globalThis, "Float16Array"], [Math, "f16round", 1],
+    [DataView.prototype, "getFloat16", 1], [DataView.prototype, "setFloat16", 2]];
+  for (const [object, key, length] of shapes) {
+    const { value, enumerable } = Object.getOwnPropertyDescriptor(object, key);
+    assert.equal(enumerable, false, key);
+    if (length === undefined) continue;
+    assert.equal(value.length, length, key); assert.equal(value.name, key);
+    assert.equal(Object.hasOwn(value, "prototype"), false, key);
+  }
   const view = new DataView(new ArrayBuffer(8));
   assert.equal(view.getFloat16(2, true), 1.5);
   view.setFloat16(4, -1.5, false);
   assert.deepEqual(calls, [[view, 2, true], [view, 4, -1.5, false]]);
   const get = view.getFloat16; install({ float16: { Float16Array: class Replacement {} } });
   assert.equal(view.getFloat16, get); assert.equal(Float16Array, F16);
+`);
+
+shimTest("URLPattern assigned by its package's own entry is made non-enumerable", `
+  remove(globalThis, "URLPattern");
+  class Pattern {}
+  globalThis.URLPattern = Pattern;
+  install({ urlpattern: { URLPattern: Pattern } });
+  assert.equal(URLPattern, Pattern);
+  assert.equal(Object.getOwnPropertyDescriptor(globalThis, "URLPattern").enumerable, false);
+`);
+
+shimTest("polyfilled methods are methods: no prototype, not constructors, not enumerable", `
+  const TypedArray = Object.getPrototypeOf(Int8Array);
+  const targets = [
+    [Iterator, "from", "concat"],
+    [Map.prototype, "getOrInsert", "getOrInsertComputed"],
+    [WeakMap.prototype, "getOrInsert", "getOrInsertComputed"],
+    [URL, "parse"],
+    [String.prototype, "isWellFormed", "toWellFormed"],
+    [Object, "groupBy"],
+    [Map, "groupBy"],
+    [Array.prototype, "toSorted", "toReversed", "toSpliced"],
+    [TypedArray.prototype, "toSorted", "toReversed"],
+    [ArrayBuffer.prototype, "transfer", "transferToFixedLength"],
+    [Atomics, "pause"],
+    [Uint8Array, "fromBase64", "fromHex"],
+    [Uint8Array.prototype, "toBase64", "setFromBase64", "toHex", "setFromHex"],
+  ];
+  for (const [object, ...keys] of targets) remove(object, ...keys);
+  remove(ArrayBuffer.prototype, "detached");
+  install();
+  const source = (fn) => Function.prototype.toString.call(fn);
+  for (const [object, ...keys] of targets) {
+    for (const key of keys) {
+      const { value, enumerable } = Object.getOwnPropertyDescriptor(object, key);
+      // The polyfill is what is measured, not a native the removal missed.
+      assert.doesNotMatch(source(value), /\\[native code\\]/, key);
+      assert.equal(enumerable, false, key);
+      assert.equal(value.name, key);
+      assert.equal(Object.hasOwn(value, "prototype"), false, key);
+      assert.throws(() => Reflect.construct(Object, [], value), TypeError, key);
+    }
+  }
+  const detached = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "detached").get;
+  assert.doesNotMatch(source(detached), /\\[native code\\]/);
+  assert.equal(detached.name, "get detached");
+  assert.equal(Object.hasOwn(detached, "prototype"), false);
 `);
 
 shimTest("RegExp.escape protects concatenation, punctuation, whitespace, lone surrogates and astral text", `
