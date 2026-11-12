@@ -60,7 +60,9 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(400);
 /// to `http://<same-host>/` would otherwise carry the `_authToken` (which
 /// `fetch_text_auth` / `download_to_file_auth` attach) into cleartext. The hop
 /// cap matches reqwest's own default (≤10) so the only behavior change is the
-/// scheme guard.
+/// scheme guard. `attempt.stop()` hands the 3xx back as the response, which
+/// `error_for_status` passes, so every request through this client also goes
+/// through [`refuse_downgrade`].
 fn client() -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
         .user_agent(concat!("nub/", env!("CARGO_PKG_VERSION")))
@@ -93,7 +95,8 @@ fn with_auth(
 }
 
 /// Whether a transport error is worth retrying: a timeout or a
-/// connection-level fault (reset / refused / DNS blip) is transient; a TLS or
+/// connection-level fault (reset / refused / DNS blip) is transient, and so is a
+/// failed TLS handshake, which reqwest reports through the same connect error; a
 /// redirect-policy error is not. `error_for_status` produces a `status()`-bearing
 /// error for non-2xx — those are classified by [`status_is_transient`], not here.
 fn err_is_transient(err: &reqwest::Error) -> bool {
@@ -110,6 +113,54 @@ fn err_is_transient(err: &reqwest::Error) -> bool {
 /// is a hard failure that must not retry.
 fn status_is_transient(status: reqwest::StatusCode) -> bool {
     status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+}
+
+/// Fail a response that is the 3xx [`client`]'s redirect policy stopped on. Not
+/// transient, and it keeps its status: `attempt.error` would surface as a
+/// status-less transport error, which tells a caller with a sibling endpoint
+/// (`resolve_version_authed`) not to try it.
+fn refuse_downgrade(
+    resp: reqwest::blocking::Response,
+) -> std::result::Result<reqwest::blocking::Response, Attempt> {
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok());
+    match downgrade_refusal(resp.status(), resp.url(), location) {
+        Some(error) => Err(Attempt {
+            error,
+            transient: false,
+            status: Some(resp.status().as_u16()),
+        }),
+        None => Ok(resp),
+    }
+}
+
+/// The error for a redirect from an https `from` to any other scheme, or
+/// `None` when the response is not one. Only the statuses reqwest follows count,
+/// since only those reach the redirect policy.
+fn downgrade_refusal(
+    status: reqwest::StatusCode,
+    from: &reqwest::Url,
+    location: Option<&str>,
+) -> Option<anyhow::Error> {
+    use reqwest::StatusCode;
+    let followed = [
+        StatusCode::MOVED_PERMANENTLY,
+        StatusCode::FOUND,
+        StatusCode::SEE_OTHER,
+        StatusCode::TEMPORARY_REDIRECT,
+        StatusCode::PERMANENT_REDIRECT,
+    ];
+    if !followed.contains(&status) || from.scheme() != "https" {
+        return None;
+    }
+    let to = from.join(location?).ok()?;
+    (to.scheme() != "https").then(|| {
+        anyhow::anyhow!(
+            "refused a {status} redirect to {to}: a redirect from https must stay on https"
+        )
+    })
 }
 
 /// Brief linear backoff between attempts (no jitter — this is a single-process
@@ -190,6 +241,7 @@ fn try_fetch_text(
     }
     let resp = req.send().map_err(Attempt::from_send)?;
     let resp = resp.error_for_status().map_err(Attempt::from_status)?;
+    let resp = refuse_downgrade(resp)?;
     resp.text()
         .map_err(|e| Attempt::transient(anyhow::Error::new(e)))
 }
@@ -300,7 +352,8 @@ fn try_download(
         .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .send()
         .map_err(Attempt::from_send)?;
-    let mut resp = resp.error_for_status().map_err(Attempt::from_status)?;
+    let resp = resp.error_for_status().map_err(Attempt::from_status)?;
+    let mut resp = refuse_downgrade(resp)?;
     let total = resp.content_length();
 
     if let Some(parent) = dest.parent() {
@@ -377,10 +430,14 @@ fn try_download_extract(
     stage_parent: &Path,
     progress: &mut impl FnMut(u64, Option<u64>),
 ) -> std::result::Result<(String, PathBuf), Attempt> {
+    // Identity for the same reason as `try_download`: the hash must cover the
+    // published bytes, not a transfer re-encoding of them.
     let resp = with_auth(client.get(url), None)
+        .header(reqwest::header::ACCEPT_ENCODING, "identity")
         .send()
         .map_err(Attempt::from_send)?;
-    let mut resp = resp.error_for_status().map_err(Attempt::from_status)?;
+    let resp = resp.error_for_status().map_err(Attempt::from_status)?;
+    let mut resp = refuse_downgrade(resp)?;
     let total = resp.content_length();
 
     let stage = stage_parent.join("stream-extract");
@@ -592,6 +649,46 @@ mod tests {
         assert!(!status_is_transient(StatusCode::FORBIDDEN));
         assert!(!status_is_transient(StatusCode::NOT_FOUND));
         assert!(!status_is_transient(StatusCode::OK));
+    }
+
+    #[test]
+    fn a_stopped_https_to_http_redirect_is_an_error_naming_the_redirect() {
+        use reqwest::{StatusCode, Url};
+        let from = Url::parse("https://registry.example/pkg").unwrap();
+        let err = downgrade_refusal(
+            StatusCode::FOUND,
+            &from,
+            Some("http://registry.example/pkg"),
+        )
+        .expect("a downgrade is refused");
+        let msg = err.to_string();
+        assert!(msg.contains("302 Found"), "{msg}");
+        assert!(msg.contains("http://registry.example/pkg"), "{msg}");
+        assert!(msg.contains("must stay on https"), "{msg}");
+        // A relative or https target is one the policy followed.
+        assert!(downgrade_refusal(StatusCode::FOUND, &from, Some("/other")).is_none());
+        assert!(
+            downgrade_refusal(
+                StatusCode::MOVED_PERMANENTLY,
+                &from,
+                Some("https://cdn.example/x")
+            )
+            .is_none()
+        );
+        // A 3xx reqwest never follows reaches the caller as before.
+        assert!(
+            downgrade_refusal(
+                StatusCode::NOT_MODIFIED,
+                &from,
+                Some("http://registry.example/")
+            )
+            .is_none()
+        );
+        // So does any redirect from a plain-http origin.
+        let http = Url::parse("http://registry.example/pkg").unwrap();
+        assert!(
+            downgrade_refusal(StatusCode::FOUND, &http, Some("http://registry.example/")).is_none()
+        );
     }
 
     // A realistic SHASUMS256.txt slice (two-space separator, real format).
