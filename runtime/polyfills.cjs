@@ -2412,10 +2412,13 @@ function newPromiseCapability(C, name) {
 function installPromiseWithResolvers() {
   if (typeof Promise.withResolvers === "function") return;
   ObjectDefineProperty(Promise, "withResolvers", {
-    value: function withResolvers() {
-      const { promise, resolve, reject } = newPromiseCapability(this, "withResolvers");
-      return { promise, resolve, reject };
-    },
+    // Method syntax so it is a non-constructor with no `prototype`, like the builtin.
+    value: {
+      withResolvers() {
+        const { promise, resolve, reject } = newPromiseCapability(this, "withResolvers");
+        return { promise, resolve, reject };
+      },
+    }.withResolvers,
     writable: true,
     enumerable: false,
     configurable: true,
@@ -2475,29 +2478,30 @@ function installKeyedPromiseCombinators() {
   };
 
   const install = (name, isSettled) => {
-    const fn = function (promises) {
-      const ctor = this;
-      const capability = newPromiseCapability(ctor, name);
-      try {
-        const promiseResolve = ctor.resolve;
-        if (typeof promiseResolve !== "function") {
-          throw new TypeError("Promise resolve is not a function");
+    // Method syntax: a non-constructor with no `prototype`, like the builtin, and
+    // the computed key gives it the builtin's `name`.
+    const fn = {
+      [name](promises) {
+        const ctor = this;
+        const capability = newPromiseCapability(ctor, name);
+        try {
+          const promiseResolve = ctor.resolve;
+          if (typeof promiseResolve !== "function") {
+            throw new TypeError("Promise resolve is not a function");
+          }
+          if (
+            promises === null ||
+            (typeof promises !== "object" && typeof promises !== "function")
+          ) {
+            throw new TypeError(`Promise.${name} argument must be an object`);
+          }
+          perform(isSettled, promises, ctor, capability, promiseResolve);
+        } catch (err) {
+          capability.reject(err);
         }
-        if (
-          promises === null ||
-          (typeof promises !== "object" && typeof promises !== "function")
-        ) {
-          throw new TypeError(`Promise.${name} argument must be an object`);
-        }
-        perform(isSettled, promises, ctor, capability, promiseResolve);
-      } catch (err) {
-        capability.reject(err);
-      }
-      return capability.promise;
-    };
-    // A builtin's `name` and `length` are observable; the anonymous function
-    // expression above gives length 1 but an empty name.
-    ObjectDefineProperty(fn, "name", { value: name, configurable: true });
+        return capability.promise;
+      },
+    }[name];
     ObjectDefineProperty(Promise, name, {
       value: fn,
       writable: true,

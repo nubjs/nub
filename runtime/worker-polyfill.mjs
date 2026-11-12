@@ -112,16 +112,52 @@ function getErrorEventCtor() {
   return (_ErrorEventCtor ??=
     typeof globalThis.ErrorEvent === "function"
       ? globalThis.ErrorEvent
-      : class ErrorEvent extends Event {
-          constructor(type, init = {}) {
-            super(type, init);
-            this.message = init.message ?? "";
-            this.error = init.error ?? null;
-            this.filename = init.filename ?? "";
-            this.lineno = init.lineno ?? 0;
-            this.colno = init.colno ?? 0;
-          }
-        });
+      : fallbackErrorEvent());
+}
+
+// The five fields are read-only accessors on the prototype, as on Node 25+'s
+// native ErrorEvent; nothing is an own property of the instance.
+function fallbackErrorEvent() {
+  class ErrorEvent extends Event {
+    #message;
+    #error;
+    #filename;
+    #lineno;
+    #colno;
+    constructor(type, init = {}) {
+      super(type, init);
+      this.#message = init.message ?? "";
+      this.#error = init.error ?? null;
+      this.#filename = init.filename ?? "";
+      this.#lineno = init.lineno ?? 0;
+      this.#colno = init.colno ?? 0;
+    }
+    get message() {
+      return this.#message;
+    }
+    get filename() {
+      return this.#filename;
+    }
+    get lineno() {
+      return this.#lineno;
+    }
+    get colno() {
+      return this.#colno;
+    }
+    get error() {
+      return this.#error;
+    }
+  }
+  // WebIDL attributes are enumerable; class accessors are not.
+  const enumerable = { enumerable: true };
+  Object.defineProperties(ErrorEvent.prototype, {
+    message: enumerable,
+    filename: enumerable,
+    lineno: enumerable,
+    colno: enumerable,
+    error: enumerable,
+  });
+  return ErrorEvent;
 }
 
 // Define the browser-shape `Worker` global (main thread) + the worker-side scope

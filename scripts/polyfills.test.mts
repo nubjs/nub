@@ -170,6 +170,19 @@ shimTest("Promise.withResolvers and keyed combinators preserve constructors, key
   assert.equal(Object.keys(await Promise.allKeyed({})).length, 0);
 `);
 
+shimTest("Promise.withResolvers and keyed combinators are non-constructors like builtin methods", `
+  remove(Promise, "withResolvers", "allKeyed", "allSettledKeyed"); install();
+  for (const [key, length] of [["withResolvers", 0], ["allKeyed", 1], ["allSettledKeyed", 1]]) {
+    const fn = Promise[key];
+    assert.equal(Object.hasOwn(fn, "prototype"), false, key);
+    assert.deepEqual(Reflect.ownKeys(fn), ["length", "name"], key);
+    assert.throws(() => Reflect.construct(Object, [], fn), TypeError, key);
+    assert.throws(() => new fn(), TypeError, key);
+    assert.equal(fn.name, key); assert.equal(fn.length, length, key);
+    assert.deepEqual(Object.getOwnPropertyDescriptor(Promise, key), { value: fn, writable: true, enumerable: false, configurable: true }, key);
+  }
+`);
+
 shimTest("JSON options freeze recursively, isolate prototypes and preserve revivers", `
   const parse = JSON.parse; install();
   const value = JSON.parse('{"nested":{"x":1},"array":[{"y":2}]}', { freeze: true });
