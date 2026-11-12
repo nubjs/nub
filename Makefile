@@ -148,7 +148,7 @@ test-build-slots:
 # end-to-end tests remain separate parts of the pre-push verification loop.
 verify:
 	@test -f node_modules/@oxc-project/runtime/package.json || { \
-		echo "make verify requires installed JS dependencies; run: pnpm install --frozen-lockfile" >&2; \
+		echo "make verify requires installed JS dependencies; run: nub install --frozen-lockfile --node-linker hoisted" >&2; \
 		exit 1; \
 	}
 	NUB_SHARED_TARGET="$(CURDIR)/target" "$(RUST_BUILD)" fmt --check
