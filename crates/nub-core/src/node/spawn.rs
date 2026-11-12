@@ -3116,15 +3116,17 @@ pub unsafe fn restore_fresh_invocation_environment() {
 /// `loadSync` are unimplemented stubs that throw `ERR_METHOD_NOT_IMPLEMENTED`.
 /// nub's sync `module.registerHooks` fast tier forces resolution synchronous, so
 /// composing it with a foreign async loader (tsx/ts-node) reaches that throwing
-/// stub and crashes the run. Node implemented these methods in 24.11.1
-/// (block-on-loader-worker), so the broken window is 22.15.0 ..= 24.11.0
-/// inclusive; 24.11.1+/25.2+/26 are fine. Refs nodejs/node#59666. (A later 22.x
-/// that backported the fix would be over-covered here — harmless, since the
-/// async tier composes correctly on every version.)
+/// stub and crashes the run. Node implemented these methods
+/// (block-on-loader-worker) in 24.12.0 and 25.2.0, so the broken window is
+/// 22.15.0 up to 24.12.0, plus 25.0 and 25.1; 24.11.1 is inside it, measured
+/// with tsx. Refs nodejs/node#59666. (A later 22.x that backported the fix is
+/// over-covered here — harmless, since the async tier composes correctly on
+/// every version.)
 // @lat: [[research/registerhooks-coverage-matrix#registerHooks coverage & sync/async-composition matrix (empirical)#Consequences]]
 fn node_hook_compose_broken(v: &super::version::NodeVersion) -> bool {
     use super::version::NodeVersion;
-    *v >= NodeVersion::new(22, 15, 0) && *v <= NodeVersion::new(24, 11, 0)
+    (NodeVersion::new(22, 15, 0)..NodeVersion::new(24, 12, 0)).contains(v)
+        || (NodeVersion::new(25, 0, 0)..NodeVersion::new(25, 2, 0)).contains(v)
 }
 
 /// Whether the child nub is about to launch hosts a FOREIGN async ESM loader — a
@@ -4696,24 +4698,27 @@ mod tests {
     }
 
     #[test]
-    fn hook_compose_broken_band_is_22_15_through_24_11_0_inclusive() {
-        // Broken (async-loader resolveSync stub throws): the whole 22.15.0–24.11.0 window.
+    fn hook_compose_broken_band_is_22_15_up_to_24_12_and_25_0_up_to_25_2() {
+        // Broken (async-loader resolveSync stub throws). 24.11.1, 25.0.0 and 25.1.0
+        // were measured with tsx: the fix shipped in 24.12.0 and 25.2.0.
         for v in [
             NodeVersion::new(22, 15, 0),
             NodeVersion::new(22, 16, 0),
             NodeVersion::new(23, 11, 0),
             NodeVersion::new(24, 11, 0),
+            NodeVersion::new(24, 11, 1),
+            NodeVersion::new(25, 0, 0),
+            NodeVersion::new(25, 1, 0),
         ] {
             assert!(
                 node_hook_compose_broken(&v),
                 "{v:?} must be in the broken band"
             );
         }
-        // Fixed at 24.11.1 (Node implemented resolveSync/loadSync), and below the
-        // fast-tier floor there is no sync registerHooks to force the crash.
+        // Fixed from 24.12.0 and 25.2.0 (Node implemented resolveSync/loadSync), and
+        // below the fast-tier floor there is no sync registerHooks to force the crash.
         for v in [
             NodeVersion::new(22, 14, 99),
-            NodeVersion::new(24, 11, 1),
             NodeVersion::new(24, 12, 0),
             NodeVersion::new(25, 2, 0),
             NodeVersion::new(26, 2, 0),
