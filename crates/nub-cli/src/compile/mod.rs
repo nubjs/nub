@@ -2963,13 +2963,18 @@ fn prepare_node_bytes(
         None => original.clone(),
     };
 
-    let tmp = std::env::temp_dir().join(format!("nub-compile-node-{}", std::process::id()));
-    let _ = fs::remove_file(&tmp);
+    // A private directory under an unpredictable name, removed with everything in
+    // it when this returns. The staged file is executed below, so it must not sit
+    // at a path another account could create first in a shared temp directory.
+    let stage = tempfile::Builder::new()
+        .prefix("nub-compile-node-")
+        .tempdir()
+        .context("creating a staging directory for Node")?;
+    let tmp = stage.path().join("node");
     fs::write(&tmp, &staged).with_context(|| format!("staging Node at {}", tmp.display()))?;
     // fs::write lands 0644; the post-strip `--version` verification must be able to
     // EXEC the staged binary, so restore the executable bit before strip/verify.
     set_executable(&tmp)?;
-    let _guard = FileGuard(tmp.clone());
 
     // Capture the entitlements BEFORE stripping, because the stripper may destroy
     // them and `--preserve-metadata` would then have nothing to read. Measured:
@@ -2990,7 +2995,6 @@ fn prepare_node_bytes(
             ],
         )
         && fs::metadata(&entitlements).is_ok_and(|m| m.len() > 0);
-    let _ent_guard = FileGuard(entitlements.clone());
 
     let mut ok = match &strip {
         Some(strip) => {
@@ -3004,10 +3008,11 @@ fn prepare_node_bytes(
     };
     if ok && needs_resign {
         // `-i node` is load-bearing, not cosmetic. Without it `codesign` derives the
-        // CodeDirectory identifier from the file's BASENAME, and this file is staged
-        // as `nub-compile-node-<pid>` — so the same Node signed by two compiles gets
-        // two identifiers, two signatures, and two `node_sha256` values. That keys a
-        // different `compile-node/<version>-<hash>` extraction dir every time, so a
+        // CodeDirectory identifier from the file's BASENAME, which is whatever this
+        // function staged the file as. When that carried the process id, the same
+        // Node signed by two compiles got two identifiers, two signatures, and two
+        // `node_sha256` values. That keys a different
+        // `compile-node/<version>-<hash>` extraction dir every time, so a
         // compile-and-run loop leaves a fresh ~107 MB tree behind on each pass and
         // nothing collects them. It also makes a byte-identical rebuild impossible.
         // `node` is what the official distribution signs with.
