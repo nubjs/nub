@@ -1046,10 +1046,14 @@ pub fn strip_yaml_value(rest: &str) -> &str {
             return &inner[..end];
         }
     }
-    // Unquoted: an inline comment starts at the first ` #` (space then hash);
-    // a bare `#` mid-token is not a comment in flow scalars.
-    match rest.split_once(" #") {
-        Some((value, _comment)) => value.trim_end(),
+    // Unquoted: a comment starts at a `#` that opens the value or follows a space
+    // or a tab. A `#` inside a token is part of the value.
+    let comment = rest
+        .match_indices('#')
+        .map(|(at, _)| at)
+        .find(|&at| at == 0 || rest[..at].ends_with([' ', '\t']));
+    match comment {
+        Some(at) => rest[..at].trim_end(),
         None => rest,
     }
 }
@@ -1430,6 +1434,11 @@ mod tests {
             ".yarn/releases/with space.cjs",
             "a quoted value keeps its spaces and is taken verbatim"
         );
+        // YAML separates a comment with a space or a tab, and a `#` inside a
+        // token belongs to the value.
+        assert_eq!(strip_yaml_value(" pnp\t# linker"), "pnp");
+        assert_eq!(strip_yaml_value(" a#b # c"), "a#b");
+        assert_eq!(strip_yaml_value(" # nothing set"), "");
 
         // End to end: a commented yarnPath still resolves to the real release path.
         let dir = tmpdir("yarnpath-comment");

@@ -4724,6 +4724,10 @@ mod tests {
         std::fs::write(&path, "nodeLinker: pnp # managed by yarn\n").unwrap();
         assert_eq!(yarnrc_node_linker(dir.path()).as_deref(), Some("pnp"));
 
+        // A tab separates a comment as a space does.
+        std::fs::write(&path, "nodeLinker: pnp\t# managed by yarn\n").unwrap();
+        assert_eq!(yarnrc_node_linker(dir.path()).as_deref(), Some("pnp"));
+
         // Indented (nested) — must not match.
         std::fs::write(&path, "  nodeLinker: pnp\n").unwrap();
         assert_eq!(yarnrc_node_linker(dir.path()), None);
