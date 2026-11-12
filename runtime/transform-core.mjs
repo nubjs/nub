@@ -130,7 +130,8 @@ let nubNative = null;
 
 // Idempotent. Acquires the node: builtins + the native addon. Runs eagerly at module
 // eval on the fast tier (getBuiltinModule present); on the floor it is invoked at the
-// top of every exported entry point, where the threaded createRequire is ready.
+// top of each exported entry point that needs them, where the threaded createRequire
+// is ready.
 let __builtinsReady = false;
 function __ensureBuiltins() {
   if (__builtinsReady) return;

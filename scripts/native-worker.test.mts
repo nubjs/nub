@@ -163,7 +163,9 @@ void describe("native Worker handoff", { concurrency: true }, () => {
         assert.throws(() => { "use strict"; event.message = "changed"; }, TypeError);
         const Ctor = event.constructor as new (type: string, init?: object) => Record<string, unknown>;
         const blank = new Ctor("error");
-        assert.deepEqual(fields.map(key => blank[key]), ["", "", 0, 0, null]);
+        assert.deepEqual(fields.map(key => blank[key]), ["", "", 0, 0, undefined]);
+        assert.equal(new Ctor("error", { error: null }).error, null);
+        assert.equal(Object.prototype.toString.call(event), "[object ErrorEvent]");
         void worker.terminate();
       }, { once: true });
     });

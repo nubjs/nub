@@ -91,7 +91,7 @@ function __getBuiltin(id) {
   return _bootstrapCreateRequire(import.meta.url)(id);
 }
 
-// `ErrorEvent` only became a global in Node 26. On the 22/24 floor it is
+// `ErrorEvent` only became a global in Node 25. On the 22/24 floor it is
 // undefined, so `new ErrorEvent(...)` below would throw a ReferenceError inside
 // the worker's "error" handler — crashing the PARENT thread on every worker
 // that throws. Resolve the constructor lazily and memoize on first use: use the
@@ -127,7 +127,8 @@ function fallbackErrorEvent() {
     constructor(type, init = {}) {
       super(type, init);
       this.#message = init.message ?? "";
-      this.#error = init.error ?? null;
+      // Left undefined when the caller gives none, as the native class leaves it.
+      this.#error = init.error;
       this.#filename = init.filename ?? "";
       this.#lineno = init.lineno ?? 0;
       this.#colno = init.colno ?? 0;
@@ -156,6 +157,7 @@ function fallbackErrorEvent() {
     lineno: enumerable,
     colno: enumerable,
     error: enumerable,
+    [Symbol.toStringTag]: { value: "ErrorEvent", configurable: true },
   });
   return ErrorEvent;
 }
