@@ -909,12 +909,31 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // the full argv on purpose: `force_async_tier_env` looks for a `tsx` ENTRY, and
     // `gc::eligible` inspects where the entry sits.
     let node_args = super::argv::leading_options(config.user_args);
-    let typed_switch = permission_switch(node_args, &config.node.version);
-    let has_permission = typed_switch.is_some() || node_args.iter().any(|a| is_permission_flag(a));
-    let has_allow_addons = node_args.iter().any(|a| a == "--allow-addons");
+    // Read the inherited NODE_OPTIONS once and reuse it for the permission scan,
+    // the re-entrancy check and the flag-injection block below — the env value is
+    // constant across a single spawn.
+    let node_options = env::var("NODE_OPTIONS").ok();
+    // The permission model is on when Node reads its switch, on the command line
+    // or in NODE_OPTIONS. An `--allow-*` flag alone does not turn it on: Node fails
+    // that itself with ERR_MISSING_OPTION, which names the switch.
+    let permission_flags: Vec<String> = node_args
+        .iter()
+        .cloned()
+        .chain(
+            node_options
+                .as_deref()
+                .map(split_node_options)
+                .unwrap_or_default(),
+        )
+        .collect();
+    let permission = permission_switch(&permission_flags, &config.node.version);
+    let has_permission = permission.is_some();
+    let has_allow_addons = permission_flags.iter().any(|a| a == "--allow-addons");
 
-    if has_permission && !has_allow_addons && !config.compat_mode {
-        let switch = typed_switch.unwrap_or("--permission");
+    if let Some(switch) = permission
+        && !has_allow_addons
+        && !config.compat_mode
+    {
         if permission_model_lacks_allow_addons(&config.node.version) {
             anyhow::bail!(
                 "nub: {switch} blocks Nub's native addon on Node {}\n\
@@ -972,10 +991,6 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
         .as_deref()
         .map(|p| preload_injection(p, &config.node.version));
     let reentrancy_key = injection.as_ref().map(|i| i.node_options_token());
-    // Read the inherited NODE_OPTIONS once and reuse it for both the re-entrancy
-    // check and the flag-injection block below — the env value is constant across
-    // a single spawn.
-    let node_options = env::var("NODE_OPTIONS").ok();
     let is_reentrant = is_reentrant_in(node_options.as_deref(), reentrancy_key.as_deref());
 
     // A compat re-entry may arrive through an augmented parent's PATH shim.
@@ -2493,48 +2508,21 @@ impl AugmentationEnv {
     }
 }
 
-/// Node's permission-model flags — the *exact, closed* set that, when present,
-/// engages Node's `--permission` sandbox (and therefore needs `--allow-addons`
-/// for nub's native oxc-transform addon to dlopen). This MUST be an exact
-/// allowlist, not a `starts_with("--allow-")` prefix match: V8 exposes flags that
-/// share the `--allow-` prefix but are NOT permission flags — most notably
-/// `--allow-natives-syntax` (enables `%`-prefixed V8 natives like
-/// `%OptimizeFunctionOnNextCall`). The old prefix match misclassified it as a
-/// permission flag and aborted `nub --allow-natives-syntax x.js` with
-/// "--permission requires --allow-addons", where stock node runs it (exit 0).
-/// `--allow-ffi` is a real Node permission flag on the versions that carry it
-/// (it is gone on node 25, where node itself rejects it as a bad option) and is
-/// deliberately kept here so it classifies correctly wherever it exists. Match
-/// the token up to any `=`, since the value-taking flags appear as
-/// `--allow-fs-read=/path`, `--allow-net=host`, etc.
-fn is_permission_flag(arg: &str) -> bool {
-    const PERMISSION_FLAGS: &[&str] = &[
-        "--permission",
-        "--allow-addons",
-        "--allow-child-process",
-        "--allow-ffi",
-        "--allow-fs-read",
-        "--allow-fs-write",
-        "--allow-inspector",
-        "--allow-net",
-        "--allow-wasi",
-        "--allow-worker",
-    ];
-    let token = arg.split('=').next().unwrap_or(arg);
-    PERMISSION_FLAGS.contains(&token)
-}
-
-/// The permission-model switch among `node_args`, as typed. `--experimental-permission`
-/// is the only spelling on 20.x, 22.0–22.12 and 23.0–23.4 (22.13 and 23.5 added
-/// `--permission`). It does not count outside 20.0–23.x, where it is Node's own
-/// bad option: 18.x predates it and 24.0 removed it.
-fn permission_switch(node_args: &[String], node: &NodeVersion) -> Option<&'static str> {
-    let typed = |flag: &str| node_args.iter().any(|a| a.split('=').next() == Some(flag));
-    let experimental_exists =
-        (NodeVersion::new(20, 0, 0)..NodeVersion::new(24, 0, 0)).contains(node);
-    if typed("--permission") {
+/// The permission-model switch Node will act on among `flags`, as typed. Each
+/// spelling counts only where Node has it, so that anywhere else Node reports
+/// its own bad option: `--experimental-permission` exists on 20.0 through 23.x,
+/// and `--permission` from 22.13 on the 22 line and from 23.5.
+///
+/// Only a switch counts. Matching on the `--allow-` prefix once refused
+/// `nub --allow-natives-syntax x.js`, a V8 flag that plain Node runs.
+fn permission_switch(flags: &[String], node: &NodeVersion) -> Option<&'static str> {
+    let typed = |flag: &str| flags.iter().any(|a| a.split('=').next() == Some(flag));
+    let stable = *node >= NodeVersion::new(22, 13, 0)
+        && !(NodeVersion::new(23, 0, 0)..NodeVersion::new(23, 5, 0)).contains(node);
+    let experimental = (NodeVersion::new(20, 0, 0)..NodeVersion::new(24, 0, 0)).contains(node);
+    if stable && typed("--permission") {
         Some("--permission")
-    } else if typed("--experimental-permission") && experimental_exists {
+    } else if experimental && typed("--experimental-permission") {
         Some("--experimental-permission")
     } else {
         None
@@ -6381,58 +6369,51 @@ mod tests {
     }
 
     #[test]
-    fn permission_flag_classifier_is_exact_not_a_prefix_match() {
-        // Real permission flags engage Node's sandbox (and need --allow-addons).
-        assert!(is_permission_flag("--permission"));
-        assert!(is_permission_flag("--allow-addons"));
-        // Value-taking permission flags appear as `--flag=value`; match up to `=`.
-        assert!(is_permission_flag("--allow-fs-read=/tmp"));
-        assert!(is_permission_flag("--allow-net=localhost"));
-        // --allow-ffi is a real permission flag on the Node versions that have it.
-        assert!(is_permission_flag("--allow-ffi"));
-
-        // The bug R5 fixes: a V8 flag that shares the --allow- prefix but is NOT a
-        // permission flag. Stock node runs `--allow-natives-syntax x.js`; the old
-        // prefix match aborted it as "--permission requires --allow-addons".
-        assert!(!is_permission_flag("--allow-natives-syntax"));
-        // Plain user args and other --allow-*-looking-but-unknown tokens don't trip it.
-        assert!(!is_permission_flag("--enable-source-maps"));
-        assert!(!is_permission_flag("script.js"));
-    }
-
-    #[test]
-    fn experimental_permission_is_the_permission_switch_until_node_24() {
+    fn a_permission_switch_counts_only_where_node_has_it() {
         let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let experimental = args(&["--experimental-permission"]);
+        let switch = |flags: &[&str], version: (u32, u32, u32)| {
+            let (major, minor, patch) = version;
+            permission_switch(&args(flags), &NodeVersion::new(major, minor, patch))
+        };
+        let experimental = Some("--experimental-permission");
+        let stable = Some("--permission");
+
+        // 20.0 through 23.x have the experimental spelling; 18.x predates it and
+        // 24.0 removed it, and there Node rejects it itself.
+        for (version, expected) in [
+            ((18, 20, 0), None),
+            ((20, 0, 0), experimental),
+            ((22, 12, 0), experimental),
+            ((23, 11, 0), experimental),
+            ((24, 0, 0), None),
+        ] {
+            assert_eq!(
+                switch(&["--experimental-permission"], version),
+                expected,
+                "{version:?}"
+            );
+        }
+        // The stable spelling arrived in 22.13 and 23.5.
+        for (version, expected) in [
+            ((18, 20, 0), None),
+            ((20, 19, 0), None),
+            ((22, 12, 0), None),
+            ((22, 13, 0), stable),
+            ((23, 4, 0), None),
+            ((23, 5, 0), stable),
+            ((26, 0, 0), stable),
+        ] {
+            assert_eq!(switch(&["--permission"], version), expected, "{version:?}");
+        }
+        // An `--allow-*` flag is no switch, and neither is a V8 flag that shares
+        // the prefix.
         assert_eq!(
-            permission_switch(&experimental, &NodeVersion::new(22, 12, 0)),
-            Some("--experimental-permission")
-        );
-        assert_eq!(
-            permission_switch(&experimental, &NodeVersion::new(23, 11, 0)),
-            Some("--experimental-permission")
-        );
-        // Removed at 24.0 and absent on 18.x: Node rejects it itself, so Nub neither
-        // refuses nor grants.
-        assert_eq!(
-            permission_switch(&experimental, &NodeVersion::new(24, 0, 0)),
+            switch(&["--allow-fs-read=/tmp", "--allow-addons"], (26, 0, 0)),
             None
         );
-        assert_eq!(
-            permission_switch(&experimental, &NodeVersion::new(18, 20, 0)),
-            None
-        );
-        assert_eq!(
-            permission_switch(&args(&["--permission"]), &NodeVersion::new(24, 0, 0)),
-            Some("--permission")
-        );
-        assert_eq!(
-            permission_switch(
-                &args(&["--allow-fs-read=/tmp"]),
-                &NodeVersion::new(22, 12, 0)
-            ),
-            None
-        );
+        assert_eq!(switch(&["--allow-natives-syntax"], (26, 0, 0)), None);
+        // A value on the switch does not hide it.
+        assert_eq!(switch(&["--permission=true"], (26, 0, 0)), stable);
     }
 
     #[test]

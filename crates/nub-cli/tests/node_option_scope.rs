@@ -54,19 +54,72 @@ fn a_permission_flag_after_the_entry_is_the_programs_argument() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout.trim(), r#"["--permission"]"#, "stderr: {stderr}");
 
-    // The same flag ahead of the entry is Node's, and Nub refuses it for want of
-    // `--allow-addons`. Node 20.0-20.11 and 21.0-21.5 have the permission model
-    // without that flag, so the refusal there names no flag to add.
+    // The same flag ahead of the entry is Node's. Where Node has it, Nub refuses it
+    // for want of `--allow-addons`; anywhere else Node rejects it itself.
     let (stdout, stderr, code) = run_nub(&dir, &["--permission", "app.js"]);
     assert_ne!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    let version = node_version(&probe(&dir, &["probe.js"]));
-    let refusal = if ((20, 0)..(20, 12)).contains(&version) || ((21, 0)..(21, 6)).contains(&version)
-    {
-        "--permission blocks Nub's native addon"
+    let refusal = if has_stable_permission(node_version(&probe(&dir, &["probe.js"]))) {
+        "nub: --permission requires --allow-addons"
     } else {
-        "--permission requires --allow-addons"
+        "bad option: --permission"
     };
     assert!(stderr.contains(refusal), "stderr: {stderr}");
+}
+
+/// `--permission` is the stable spelling from 22.13 and 23.5; 23.0-23.4 and older
+/// lines know only `--experimental-permission`.
+fn has_stable_permission(version: (u32, u32)) -> bool {
+    version >= (23, 5) || ((22, 13)..(23, 0)).contains(&version)
+}
+
+/// Nub answers for its addon wherever Node turns the permission model on, and
+/// leaves every other spelling to Node: a switch this Node lacks is Node's bad
+/// option, and an `--allow-*` flag with no switch is Node's missing option.
+#[test]
+fn only_a_permission_switch_node_acts_on_gets_nubs_refusal() {
+    let dir = probe_dir("permission-switch");
+    let version = node_version(&probe(&dir, &["probe.js"]));
+
+    let (stdout, stderr, code) = run_nub(&dir, &["--experimental-permission", "probe.js"]);
+    assert_ne!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let expected = if !((20, 0)..(24, 0)).contains(&version) {
+        "bad option: --experimental-permission"
+    } else if ((20, 0)..(20, 12)).contains(&version) || ((21, 0)..(21, 6)).contains(&version) {
+        // The permission model without `--allow-addons`: no flag to suggest.
+        "nub: --experimental-permission blocks Nub's native addon"
+    } else {
+        "nub: --experimental-permission requires --allow-addons"
+    };
+    assert!(stderr.contains(expected), "stderr: {stderr}");
+
+    let (stdout, stderr, code) = run_nub(&dir, &["--allow-fs-read=/tmp", "probe.js"]);
+    assert_ne!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let expected = if version >= (20, 0) {
+        "ERR_MISSING_OPTION"
+    } else {
+        "bad option: --allow-fs-read"
+    };
+    assert!(
+        stderr.contains(expected) && !stderr.contains("nub: "),
+        "stderr: {stderr}"
+    );
+
+    // Node reads the switch from NODE_OPTIONS as well.
+    if has_stable_permission(version) {
+        let out = Command::new(nub_binary())
+            .arg("probe.js")
+            .current_dir(&dir)
+            .env_remove("NODE_COMPAT")
+            .env("NODE_OPTIONS", "--permission")
+            .output()
+            .expect("failed to spawn nub");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "stderr: {stderr}");
+        assert!(
+            stderr.contains("nub: --permission requires --allow-addons"),
+            "stderr: {stderr}"
+        );
+    }
 }
 
 /// Under the permission model the program may read only what the user granted
@@ -77,10 +130,8 @@ fn a_permission_flag_after_the_entry_is_the_programs_argument() {
 #[test]
 fn the_permission_model_starts_with_nubs_runtime_readable() {
     let dir = probe_dir("permission-runtime");
-    // `--permission` is the stable spelling from 22.13 and 23.5; 23.0-23.4 and
-    // older lines know only `--experimental-permission`.
     let version = node_version(&probe(&dir, &["probe.js"]));
-    if !(version >= (23, 5) || ((22, 13)..(23, 0)).contains(&version)) {
+    if !has_stable_permission(version) {
         eprintln!("skipping: Node {version:?} has no --permission");
         return;
     }
@@ -90,7 +141,13 @@ fn the_permission_model_starts_with_nubs_runtime_readable() {
     )
     .unwrap();
     let grant = format!("--allow-fs-read={}", dir.display());
+    // Node 22 reads the entry through its real path, and macOS keeps the temp
+    // directory behind a symlink, so the grant names that spelling as well.
+    let real_grant = format!("--allow-fs-read={}", dir.canonicalize().unwrap().display());
     let mut args = vec!["--permission", "--allow-addons", grant.as_str()];
+    if cfg!(unix) {
+        args.push(real_grant.as_str());
+    }
     // Before 22.15 Nub's hooks run on a loader worker thread, which the
     // permission model gates on its own flag. That grant is the user's to make.
     if version < (22, 15) {
