@@ -24,11 +24,7 @@ require("fs").writeFileSync(process.argv[2], JSON.stringify({
 "#;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/ (or fast/)
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 /// An offline project whose `dump` script and `postinstall` both run the probe.

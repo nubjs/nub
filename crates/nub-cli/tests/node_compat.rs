@@ -262,11 +262,7 @@ fn all_pids() -> Vec<libc::pid_t> {
 }
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop();
-    path.pop();
-    path.push("nub");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 fn suite_dir() -> PathBuf {

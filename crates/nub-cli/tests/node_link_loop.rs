@@ -16,11 +16,7 @@ const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 const MAX_DEPTH: u32 = 64;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/ (or fast/)
-    path.push(format!("nub{EXE}"));
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 fn real_node() -> Option<PathBuf> {

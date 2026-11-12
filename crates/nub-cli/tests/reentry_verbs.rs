@@ -15,11 +15,7 @@
 use std::path::PathBuf;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // <profile>/
-    path.push(format!("nub{}", std::env::consts::EXE_SUFFIX));
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 /// Every name nub dispatches on in `Argv0::detect`.

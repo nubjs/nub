@@ -22,11 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn nub_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps/
-    path.pop(); // debug/
-    path.push("nub.exe");
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_nub"))
 }
 
 /// Unique temp dir under the system temp root (never under the user profile —
