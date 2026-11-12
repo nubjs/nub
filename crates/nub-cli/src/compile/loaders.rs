@@ -266,7 +266,9 @@ pub struct FilePlugin {
     /// Every mapped extension → the loader that owns it. Both families are
     /// present so [`FilePlugin::claims`] can resolve specificity across them; see
     /// its doc comment. The loader's NAME is kept, not just which family it is
-    /// in, so [`FilePlugin::case_mismatch`] can suggest the flag verbatim.
+    /// in, so [`FilePlugin::case_mismatch`] can suggest the flag verbatim. The
+    /// data family is present too, under [`DATA_FAMILY`], so its extensions get
+    /// the same case hint.
     by_ext: BTreeMap<String, &'static str>,
     collected: Arc<Assets>,
     /// Hints for imports whose extension is mapped only in another case. Kept
@@ -282,6 +284,7 @@ impl FilePlugin {
             .map(|(ext, ty)| (ext.clone(), loader_name(ty)))
             .collect();
         by_ext.extend(loaders.file.iter().map(|ext| (ext.clone(), "file")));
+        by_ext.extend(loaders.data.iter().map(|ext| (ext.clone(), DATA_FAMILY)));
         Self {
             by_ext,
             collected,
@@ -348,6 +351,28 @@ impl FilePlugin {
                 .map(|(mapped, loader)| (mapped.as_str(), *loader))
         })
     }
+}
+
+/// Stands in for the data family in [`FilePlugin`]'s extension map. Not a
+/// `--loader` value: no flag maps an extension to the data parsers, so the case
+/// hint for this family suggests renaming the file instead of a flag.
+const DATA_FAMILY: &str = "data";
+
+/// The hint for an import whose extension, as written, is mapped only in
+/// another case.
+fn case_hint(as_written: &str, mapped: &str, loader: &str) -> String {
+    let remedy = if loader == DATA_FAMILY {
+        // `nub` refuses the other spelling at run time too, so a rename is what
+        // makes the program work both ways.
+        format!("Rename the file to use .{mapped}")
+    } else {
+        format!("Map this spelling too: --loader .{as_written}={loader}")
+    };
+    format!(
+        "\x20\x20Extensions match exactly, case included, so .{as_written} is not \
+         covered by the mapping for .{mapped}.\n\
+         \x20\x20{remedy}"
+    )
 }
 
 /// The `--loader` spelling of a Rolldown module type, for echoing back in a
@@ -559,11 +584,7 @@ impl Plugin for FilePlugin {
                     let as_written = Path::new(&id)
                         .extension()
                         .map_or_else(|| mapped.clone(), |e| e.to_string_lossy().into_owned());
-                    seen.insert(format!(
-                        "\x20\x20Extensions match exactly, case included, so .{as_written} is not \
-                         covered by the mapping for .{mapped}.\n\
-                         \x20\x20Map this spelling too: --loader .{as_written}={loader}"
-                    ));
+                    seen.insert(case_hint(&as_written, &mapped, loader));
                 }
                 return Ok(None);
             }
@@ -728,6 +749,32 @@ mod tests {
             p.case_mismatch("/proj/notes.rst"),
             None,
             "an extension mapped in no case is not this diagnostic's business"
+        );
+    }
+
+    // A data import with the extension in another case fails with Rolldown's
+    // MISSING_EXPORT just like the file family. No flag maps an extension to the
+    // data parsers, so the hint names the spelling that works instead of a flag.
+    #[test]
+    fn a_case_mismatched_data_extension_suggests_the_mapped_spelling() {
+        let p = FilePlugin::new(&plan(&[]).expect("valid"), Arc::default());
+        assert_eq!(
+            p.case_mismatch("/proj/CONFIG.YAML"),
+            Some(("yaml", DATA_FAMILY))
+        );
+        assert!(
+            !p.claims("/proj/config.yaml"),
+            "the data family is in the map for hints only; the file loader must not claim it"
+        );
+        assert_eq!(
+            case_hint("YAML", "yaml", DATA_FAMILY),
+            "  Extensions match exactly, case included, so .YAML is not covered by the \
+             mapping for .yaml.\n  Rename the file to use .yaml"
+        );
+        assert_eq!(
+            case_hint("PNG", "png", "file"),
+            "  Extensions match exactly, case included, so .PNG is not covered by the \
+             mapping for .png.\n  Map this spelling too: --loader .PNG=file"
         );
     }
 

@@ -1923,8 +1923,10 @@ fn load_version_info(
     if let Some(name) = out_path.file_name().and_then(|n| n.to_str()) {
         strings.insert("OriginalFilename".to_string(), name.to_string());
     }
+    let mut explicit = std::collections::HashSet::new();
     for assignment in metadata {
         let (key, value) = version_info::parse_assignment(assignment)?;
+        explicit.insert(key);
         if value.is_empty() {
             strings.remove(key);
         } else {
@@ -1935,14 +1937,36 @@ fn load_version_info(
     // The numeric block is derived from the strings so the two can never
     // disagree; a prerelease tag survives in the string and is truncated only in
     // the four-u16 block, which has nowhere to put it.
-    let file_version =
-        version_info::parse_version(strings.get("FileVersion").map(String::as_str).unwrap_or(""))?;
-    let product_version = version_info::parse_version(
-        strings
-            .get("ProductVersion")
-            .map(String::as_str)
-            .unwrap_or(""),
-    )?;
+    let numeric_version = |key: &str| -> Result<[u16; 4]> {
+        let text = strings.get(key).map(String::as_str).unwrap_or("");
+        let parsed = version_info::parse_version(text);
+        if explicit.contains(key) {
+            return parsed;
+        }
+        // Not set with --metadata, so it is package.json's `version`, and the
+        // user did not necessarily know that field reaches this one. Both
+        // version fields default to it, so the message names each one still
+        // to override rather than failing once per field.
+        let defaulted: Vec<&str> = ["FileVersion", "ProductVersion"]
+            .into_iter()
+            .filter(|field| !explicit.contains(field))
+            .collect();
+        let overrides: Vec<String> = defaulted
+            .iter()
+            .map(|field| format!("--metadata {field}=<major.minor.patch>"))
+            .collect();
+        parsed.map_err(|err| {
+            anyhow!(
+                "{err}.\n\
+                 \x20\x20It comes from \"version\" in package.json, the default for {}.\n\
+                 \x20\x20Override it with {}, or drop a field with --metadata <field>=",
+                defaulted.join(" and "),
+                overrides.join(" ")
+            )
+        })
+    };
+    let file_version = numeric_version("FileVersion")?;
+    let product_version = numeric_version("ProductVersion")?;
     let info = version_info::VersionInfo {
         file_version,
         product_version,
@@ -4169,6 +4193,66 @@ mod tests {
             load_version_info(&[], &dir, &out, &linux)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    /// A version Windows cannot store fails the build either way, but only the
+    /// defaulted one needs to say where it came from: the user typed the explicit
+    /// one, and may never have connected package.json's `version` to this field.
+    #[test]
+    fn an_unstorable_manifest_version_names_package_json_and_the_override() {
+        let dir = fresh_dir("versioninfo-wide");
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"acme-tool","version":"1.70000.0"}"#,
+        )
+        .unwrap();
+        let win = TargetPlatform {
+            os: TargetOs::Win32,
+            arch: TargetArch::X64,
+            musl: false,
+        };
+        let out = dir.join("acme.exe");
+
+        let err = load_version_info(&[], &dir, &out, &win)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with(r#"version component 70000 in "1.70000.0" does not fit in 16 bits."#)
+                && err.contains(
+                    r#""version" in package.json, the default for FileVersion and ProductVersion."#
+                )
+                && err.contains(
+                    "--metadata FileVersion=<major.minor.patch> \
+                     --metadata ProductVersion=<major.minor.patch>"
+                ),
+            "got: {err}"
+        );
+
+        // FileVersion overridden, so ProductVersion is the defaulted field left.
+        let err = load_version_info(&["FileVersion=1.0.0".to_string()], &dir, &out, &win)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("the default for ProductVersion.")
+                && !err.contains("--metadata FileVersion"),
+            "got: {err}"
+        );
+
+        let err = load_version_info(
+            &[
+                "FileVersion=1.70000.0".to_string(),
+                "ProductVersion=1.0.0".to_string(),
+            ],
+            &dir,
+            &out,
+            &win,
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            err,
+            r#"version component 70000 in "1.70000.0" does not fit in 16 bits"#
         );
     }
 
