@@ -1241,8 +1241,21 @@ pub(crate) fn regenerate_workspace_yaml(root: &Path) -> Result<Vec<String>> {
     std::fs::write(&yaml_path, body).with_context(|| format!("writing {}", yaml_path.display()))?;
 
     nub_core::pm::resolve::edit_root_manifest(root, |obj| {
+        // Only what moved leaves `workspaces`. A key the yaml did not take, such
+        // as yarn's `nohoist`, stays where it was.
+        let rest_is_empty = match obj.get_mut("workspaces") {
+            Some(Value::Object(rest)) => {
+                for key in ["packages", "catalog", "catalogs"] {
+                    rest.remove(key);
+                }
+                rest.is_empty()
+            }
+            _ => true,
+        };
+        if rest_is_empty {
+            obj.remove("workspaces");
+        }
         for key in [
-            "workspaces",
             "overrides",
             "patchedDependencies",
             aube_manifest::ROOT_ALLOW_SCRIPTS_KEY,
@@ -1647,6 +1660,32 @@ mod tests {
         }
 
         // Idempotent rerun: nothing left to move.
+        assert!(regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn regenerate_keeps_the_workspaces_keys_it_does_not_move() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            serde_json::to_string_pretty(&json!({
+                "name": "app",
+                "workspaces": { "packages": ["packages/*"], "nohoist": ["**/react-native"] }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(!regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
+
+        let manifest: Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("package.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.get("workspaces"),
+            Some(&json!({ "nohoist": ["**/react-native"] }))
+        );
         assert!(regenerate_workspace_yaml(dir.path()).unwrap().is_empty());
     }
 
