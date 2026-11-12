@@ -15,7 +15,7 @@ inputs:
     description: "Provision this Node version and front its bin dir on PATH for the rest of the job, as actions/setup-node does. Any range npm understands, or an nvm alias (lts/*, lts/<codename>, node). Default: the project's own pin (package.json#devEngines.runtime, .node-version, .nvmrc, .tool-versions, package.json#engines.node); the runner's Node stays when it satisfies the pin or the project has none. nub itself still runs the project's pin at its own invocation; the action warns if the two differ."
     required: false
   node-version-file:
-    description: "Read a Node version from this file (.node-version, .nvmrc, package.json), provision it, and front it on PATH. An explicit alternative to node-version; the file must exist."
+    description: "Read a Node version from this file (.node-version, .nvmrc, .tool-versions, package.json), provision it, and front it on PATH. An explicit alternative to node-version; the file must exist."
     required: false
   cache:
     description: "Cache nub's global store and provisioned Node toolchains across runs. A boolean (true/false); for setup-node drop-in compatibility a PM name (npm/yarn/pnpm/bun) is also accepted and treated as truthy. Leave UNSET to auto-enable when a lockfile or a package.json packageManager/devEngines field is present (mirrors setup-node). Set false to disable."
@@ -482,6 +482,14 @@ runs:
           case "$NODE_VERSION_FILE" in
             # devEngines.runtime.version first (nub's primary signal), then engines.node.
             *.json) want="$(node -p "try{const p=require(require('path').resolve(process.argv[1]));const r=p.devEngines&&p.devEngines.runtime;(r&&r.version)||(p.engines&&p.engines.node)||''}catch(e){''}" "$NODE_VERSION_FILE" 2>/dev/null || true)" ;;
+            # asdf/mise: `<tool> <version...>` lines, `#` comments. The first
+            # nodejs (asdf) or node (mise) line's first version, as Nub's own pin walk reads it.
+            *.tool-versions)
+              want="$(awk '{ sub(/#.*/, ""); gsub(/\r/, "") } $1 == "nodejs" || $1 == "node" { v = $2; sub(/^v/, "", v); print v; exit }' "$NODE_VERSION_FILE")"
+              if [ -z "$want" ]; then
+                echo "::error::node-version-file '${NODE_VERSION_FILE}' has no nodejs or node line with a version."
+                exit 1
+              fi ;;
             *)      want="$(head -n1 "$NODE_VERSION_FILE" | tr -d 'v[:space:]')" ;;
           esac
         fi

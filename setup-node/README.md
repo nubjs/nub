@@ -49,7 +49,7 @@ A workflow that omits `node-version` keeps running on the runner's Node when the
 | Input | Default | Behavior |
 |---|---|---|
 | `node-version` | the project's pin | Provision this Node and front it on PATH for the rest of the job. Any range npm understands (`20`, `22.14.0`, `^20.10`) or an nvm alias (`lts/*`, `lts/iron`, `node`). |
-| `node-version-file` | — | Read the version from this file (`.node-version`, `.nvmrc`, `package.json`) and treat it as `node-version`. The file must exist. |
+| `node-version-file` | — | Read the version from this file (`.node-version`, `.nvmrc`, `.tool-versions`, `package.json`) and treat it as `node-version`. The file must exist. |
 | `provision-node` | `true` | `false` leaves Node alone: nothing installed, nothing fronted, `node-version` output empty. For a job where `actions/setup-node` already ran. |
 | `shim` | `true` | `false` leaves `npm`/`pnpm`/`yarn` as the runner ships them. |
 | `cache` | auto | Caching of Nub's store. A boolean; a package-manager name is accepted and treated as `true`. Unset: on when a lockfile or a `packageManager`/`devEngines` field exists. |
