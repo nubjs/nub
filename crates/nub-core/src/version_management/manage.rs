@@ -153,18 +153,14 @@ fn store_root_of(store: &Path) -> &Path {
     store.parent().unwrap_or(store)
 }
 
-/// The version of whatever `node` is on PATH, if any (skipping nub's own shim
-/// dirs is `which_node`'s job; here a plain probe is enough for the PATH-reuse
-/// skip check). `None` if no node is found or it doesn't report a version.
+/// The version of the `node` on PATH, with nub's own shims stepped over. A shim
+/// answers `--version` with the working directory's pin, and downloads that
+/// version first when it is not installed. `None` if no node is found or it
+/// doesn't report a version.
 fn path_node_version() -> Option<NodeVersion> {
-    let out = std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+    discovery::discover_shell_node()
+        .ok()
+        .map(|node| node.version)
 }
 
 /// Bare `nub node install`: resolve the project pin through the FULL chain —
