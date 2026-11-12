@@ -1973,6 +1973,96 @@ fn ci_dep_axis_flags_select_which_dependency_sets_link() {
     );
 }
 
+/// A production install from a lockfile fetches only what it links. The
+/// devDependency is a local tarball whose marker can reach the store only
+/// through the fetch, so finding it there means the fetch walked the whole
+/// lockfile graph while `node_modules` linked the filtered one (#1120).
+#[test]
+fn prod_install_leaves_dev_dependencies_out_of_the_store() {
+    let root = pm_tmpdir("prod-fetch");
+    let src = root.join("src/package");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("package.json"),
+        r#"{"name":"dev-pkg","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let marker = format!("prod-fetch-dev-marker-{}", std::process::id());
+    std::fs::write(src.join("marker.txt"), &marker).unwrap();
+    let status = Command::new("tar")
+        .args(["-czf", "dev.tgz", "package"])
+        .current_dir(root.join("src"))
+        .status()
+        .expect("failed to spawn tar");
+    assert!(status.success(), "tar must pack the fixture tarball");
+    let prod = root.join("prod-pkg");
+    std::fs::create_dir_all(&prod).unwrap();
+    std::fs::write(
+        prod.join("package.json"),
+        r#"{"name":"prod-pkg","version":"1.0.0"}"#,
+    )
+    .unwrap();
+    let proj = root.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("package.json"),
+        r#"{"name":"app","private":true,"dependencies":{"prod-pkg":"file:../prod-pkg"},"devDependencies":{"dev-pkg":"file:../src/dev.tgz"}}"#,
+    )
+    .unwrap();
+    let (err, code) = run_install_in_store(
+        &proj,
+        &pm_tmpdir("prod-fetch-seed-store"),
+        &pm_tmpdir("prod-fetch-seed-cache"),
+        &["install", "--lockfile-only"],
+    );
+    assert_eq!(code, 0, "lockfile seed must succeed: {err}");
+
+    fn tree_contains(dir: &Path, needle: &str) -> bool {
+        std::fs::read_dir(dir).into_iter().flatten().any(|e| {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                tree_contains(&path, needle)
+            } else {
+                std::fs::read(&path)
+                    .is_ok_and(|b| b.windows(needle.len()).any(|w| w == needle.as_bytes()))
+            }
+        })
+    }
+
+    for args in [
+        &["install", "--prod", "--frozen-lockfile"][..],
+        &["ci", "--prod"][..],
+    ] {
+        let store = pm_tmpdir("prod-fetch-store");
+        let cache = pm_tmpdir("prod-fetch-cache");
+        let (err, code) = run_install_in_store(&proj, &store, &cache, args);
+        assert_eq!(code, 0, "`nub {}` must succeed: {err}", args.join(" "));
+        assert!(
+            proj.join("node_modules/prod-pkg").exists()
+                && !proj.join("node_modules/dev-pkg").exists(),
+            "`nub {}` must link only the production dependency: {err}",
+            args.join(" ")
+        );
+        assert!(
+            !tree_contains(&store, &marker) && !tree_contains(&cache, &marker),
+            "`nub {}` imported the devDependency into the store",
+            args.join(" ")
+        );
+        let _ = std::fs::remove_dir_all(proj.join("node_modules"));
+    }
+
+    // Positive control: the same lockfile without `--prod` does import it,
+    // so the absence above is the filter and not a broken probe.
+    let store = pm_tmpdir("prod-fetch-full-store");
+    let cache = pm_tmpdir("prod-fetch-full-cache");
+    let (err, code) = run_install_in_store(&proj, &store, &cache, &["ci"]);
+    assert_eq!(code, 0, "bare `nub ci` must succeed: {err}");
+    assert!(
+        tree_contains(&store, &marker) || tree_contains(&cache, &marker),
+        "bare `nub ci` must import the devDependency, or the probe above proves nothing"
+    );
+}
+
 /// Two projects whose `file:` dependencies share a relative path — a tarball
 /// and a directory — but not their contents must each install their OWN
 /// files from one shared store. A local package's dep path hashes its

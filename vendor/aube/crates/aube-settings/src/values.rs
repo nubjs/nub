@@ -607,11 +607,7 @@ fn cli_key_matches(key: &str, meta: &meta::SettingMeta) -> bool {
     if key == meta.name {
         return true;
     }
-    let key_kebab = to_kebab_case(key);
-    if key_kebab == to_kebab_case(meta.name) {
-        return true;
-    }
-    false
+    to_kebab_case(key) == to_kebab_case(meta.name)
 }
 
 /// Lower-case kebab form of a setting / flag identifier. Splits on

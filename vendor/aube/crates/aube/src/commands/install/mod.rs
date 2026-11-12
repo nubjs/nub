@@ -1514,11 +1514,24 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             );
             phase_timings.record("resolve", phase_start.elapsed());
 
+            // `--prod` / `--dev` / `--no-optional` and the workspace scope
+            // decide what gets linked, so they decide what gets fetched too:
+            // a production install must not download devDependencies into
+            // the store (#1120). The progress total follows the same set.
+            let lock_install_graph = std::sync::Arc::new(filter_graph_for_install(
+                &cwd,
+                &workspace_packages,
+                &graph,
+                &opts,
+                has_workspace && !link_all_workspace_importers,
+                false,
+            )?);
+
             // Lockfile path: the total is known upfront, so seed the overall
-            // bar with the full package count and enter the fetch phase.
+            // bar with the package count and enter the fetch phase.
             control::check_cancelled()?;
             if let Some(p) = prog_ref {
-                p.set_total(graph.packages.len());
+                p.set_total(lock_install_graph.packages.len());
                 p.set_phase("fetching");
             }
             // Seed the chain index for diagnostic enrichment on the
@@ -1607,14 +1620,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             let (lock_supported_architectures, lock_ignored_optional) =
                 prewarm_host_filter_inputs(&manifest, &ws_config_shared, &settings_ctx);
             let (lock_materialize_tx, lock_materialize_rx) = materialize_channel();
-            let lock_materialize_graph = std::sync::Arc::new(filter_graph_for_install(
-                &cwd,
-                &workspace_packages,
-                &graph,
-                &opts,
-                has_workspace && !link_all_workspace_importers,
-                false,
-            )?);
+            let lock_materialize_graph = lock_install_graph.clone();
             // Hoisted out of the prewarm task (where it used to run
             // concurrently with fetch) because the already-linked
             // shortcut below cannot classify an entry without it. The
@@ -1662,7 +1668,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             };
 
             let fetch_result = fetch_packages_with_root(
-                &graph.packages,
+                &lock_install_graph.packages,
                 &store,
                 || {
                     std::sync::Arc::new(
@@ -1917,6 +1923,15 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 libc: fetch_sup_libc,
                 ..Default::default()
             };
+            // Under `--prod` / `--dev` / `--no-optional` the resolver still
+            // walks every dependency set (the lockfile records them all), but
+            // which packages survive the selection is only known once it
+            // finishes: a package first reached through a devDependency can
+            // turn out to be a production one too. So registry tarballs wait
+            // for the catch-up pass below, which fetches only what the
+            // filtered graph keeps (#1120). Local sources still import up
+            // front, because their lockfile integrity comes from the bytes.
+            let fetch_defer_registry = opts.dep_selection.is_filtered();
             // Each imported (dep_path, index) feeds the GVS-prewarm
             // materializer running concurrently with the rest of fetch.
             /*
@@ -2056,6 +2071,9 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                             pkg.name,
                             pkg.version
                         );
+                        continue;
+                    }
+                    if fetch_defer_registry && pkg.local_source.is_none() {
                         continue;
                     }
 
@@ -2866,9 +2884,38 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // the surviving graph produces a stable cur/total ratio
             // and a size estimate that reflects only what will
             // actually install.
+            //
+            // A filtered dependency selection fetches only what it links, so
+            // the registry tarballs it deferred and dropped leave both totals.
+            let install_graph = if opts.dep_selection.is_filtered() {
+                Some(filter_graph_for_install(
+                    &cwd,
+                    &workspace_packages,
+                    &graph,
+                    &opts,
+                    has_workspace && !link_all_workspace_importers,
+                    false,
+                )?)
+            } else {
+                None
+            };
+            let skipped_by_selection = |dep_path: &str, pkg: &aube_lockfile::LockedPackage| {
+                install_graph.as_ref().is_some_and(|g| {
+                    pkg.local_source.is_none()
+                        && !g.packages.contains_key(dep_path)
+                        && !indices.contains_key(dep_path)
+                })
+            };
             if let Some(p) = prog_ref {
-                p.set_total(graph.packages.len());
-                p.reconcile_estimated_bytes(graph.packages.keys());
+                let counted = || {
+                    graph
+                        .packages
+                        .iter()
+                        .filter(|(k, v)| !skipped_by_selection(k, v))
+                        .map(|(k, _)| k)
+                };
+                p.set_total(counted().count());
+                p.reconcile_estimated_bytes(counted());
             }
 
             // Catch-up fetch: the streaming coordinator deferred
@@ -2897,6 +2944,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                 // (reused > resolved → WARN_AUBE_PROGRESS_OVERFLOW).
                 .filter(|(dep_path, pkg)| {
                     !indices.contains_key(*dep_path)
+                        && !skipped_by_selection(dep_path, pkg)
                         && (pkg.local_source.is_none()
                             || !aube_resolver::is_supported(
                                 &pkg.os,
