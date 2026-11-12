@@ -909,12 +909,23 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // the full argv on purpose: `force_async_tier_env` looks for a `tsx` ENTRY, and
     // `gc::eligible` inspects where the entry sits.
     let node_args = super::argv::leading_options(config.user_args);
-    let has_permission = node_args.iter().any(|a| is_permission_flag(a));
+    let typed_switch = permission_switch(node_args, &config.node.version);
+    let has_permission = typed_switch.is_some() || node_args.iter().any(|a| is_permission_flag(a));
     let has_allow_addons = node_args.iter().any(|a| a == "--allow-addons");
 
     if has_permission && !has_allow_addons && !config.compat_mode {
+        let switch = typed_switch.unwrap_or("--permission");
+        if permission_model_lacks_allow_addons(&config.node.version) {
+            anyhow::bail!(
+                "nub: {switch} blocks Nub's native addon on Node {}\n\
+                 \x20\x20Nub's transpiler uses a native addon (oxc-transform), and Node's\n\
+                 \x20\x20--allow-addons flag exists only from 20.12 and 21.6.\n\
+                 \x20\x20Use --node to run without Nub's augmentation, or a newer Node.",
+                config.node.version
+            );
+        }
         anyhow::bail!(
-            "nub: --permission requires --allow-addons\n\
+            "nub: {switch} requires --allow-addons\n\
              \x20\x20Nub's transpiler uses a native addon (oxc-transform).\n\
              \x20\x20Add --allow-addons to your Node permission flags,\n\
              \x20\x20or use --node to run without Nub's augmentation."
@@ -2511,6 +2522,31 @@ fn is_permission_flag(arg: &str) -> bool {
     ];
     let token = arg.split('=').next().unwrap_or(arg);
     PERMISSION_FLAGS.contains(&token)
+}
+
+/// The permission-model switch among `node_args`, as typed. `--experimental-permission`
+/// is the only spelling on 20.x, 22.0–22.12 and 23.0–23.4 (22.13 and 23.5 added
+/// `--permission`). It does not count outside 20.0–23.x, where it is Node's own
+/// bad option: 18.x predates it and 24.0 removed it.
+fn permission_switch(node_args: &[String], node: &NodeVersion) -> Option<&'static str> {
+    let typed = |flag: &str| node_args.iter().any(|a| a.split('=').next() == Some(flag));
+    let experimental_exists =
+        (NodeVersion::new(20, 0, 0)..NodeVersion::new(24, 0, 0)).contains(node);
+    if typed("--permission") {
+        Some("--permission")
+    } else if typed("--experimental-permission") && experimental_exists {
+        Some("--experimental-permission")
+    } else {
+        None
+    }
+}
+
+/// Whether this Node has the permission model without `--allow-addons`, which
+/// arrived in 20.12 and 21.6. The model blocks every native addon there, so
+/// there is no flag to suggest.
+fn permission_model_lacks_allow_addons(node: &NodeVersion) -> bool {
+    (NodeVersion::new(20, 0, 0)..NodeVersion::new(20, 12, 0)).contains(node)
+        || (NodeVersion::new(21, 0, 0)..NodeVersion::new(21, 6, 0)).contains(node)
 }
 
 /// Carries the running binary's version (`env!("CARGO_PKG_VERSION")`) to the
@@ -6362,6 +6398,61 @@ mod tests {
         // Plain user args and other --allow-*-looking-but-unknown tokens don't trip it.
         assert!(!is_permission_flag("--enable-source-maps"));
         assert!(!is_permission_flag("script.js"));
+    }
+
+    #[test]
+    fn experimental_permission_is_the_permission_switch_until_node_24() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let experimental = args(&["--experimental-permission"]);
+        assert_eq!(
+            permission_switch(&experimental, &NodeVersion::new(22, 12, 0)),
+            Some("--experimental-permission")
+        );
+        assert_eq!(
+            permission_switch(&experimental, &NodeVersion::new(23, 11, 0)),
+            Some("--experimental-permission")
+        );
+        // Removed at 24.0 and absent on 18.x: Node rejects it itself, so Nub neither
+        // refuses nor grants.
+        assert_eq!(
+            permission_switch(&experimental, &NodeVersion::new(24, 0, 0)),
+            None
+        );
+        assert_eq!(
+            permission_switch(&experimental, &NodeVersion::new(18, 20, 0)),
+            None
+        );
+        assert_eq!(
+            permission_switch(&args(&["--permission"]), &NodeVersion::new(24, 0, 0)),
+            Some("--permission")
+        );
+        assert_eq!(
+            permission_switch(
+                &args(&["--allow-fs-read=/tmp"]),
+                &NodeVersion::new(22, 12, 0)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn allow_addons_is_missing_only_on_early_20_and_21() {
+        for (version, lacks) in [
+            ((18, 20, 0), false),
+            ((20, 0, 0), true),
+            ((20, 11, 1), true),
+            ((20, 12, 0), false),
+            ((21, 5, 0), true),
+            ((21, 6, 0), false),
+            ((22, 0, 0), false),
+        ] {
+            let (major, minor, patch) = version;
+            assert_eq!(
+                permission_model_lacks_allow_addons(&NodeVersion::new(major, minor, patch)),
+                lacks,
+                "Node {major}.{minor}.{patch}"
+            );
+        }
     }
 
     #[test]

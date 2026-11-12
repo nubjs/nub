@@ -43,7 +43,7 @@ fn run_nub(dir: &std::path::Path, args: &[&str]) -> (String, String, i32) {
 
 #[test]
 fn a_permission_flag_after_the_entry_is_the_programs_argument() {
-    let dir = tmp_dir("permission");
+    let dir = probe_dir("permission");
     std::fs::write(
         dir.join("app.js"),
         "console.log(JSON.stringify(process.argv.slice(2)));\n",
@@ -54,13 +54,19 @@ fn a_permission_flag_after_the_entry_is_the_programs_argument() {
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout.trim(), r#"["--permission"]"#, "stderr: {stderr}");
 
-    // The same flag ahead of the entry is Node's, and still needs `--allow-addons`.
+    // The same flag ahead of the entry is Node's, and Nub refuses it for want of
+    // `--allow-addons`. Node 20.0-20.11 and 21.0-21.5 have the permission model
+    // without that flag, so the refusal there names no flag to add.
     let (stdout, stderr, code) = run_nub(&dir, &["--permission", "app.js"]);
     assert_ne!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        stderr.contains("--permission requires --allow-addons"),
-        "stderr: {stderr}"
-    );
+    let version = node_version(&probe(&dir, &["probe.js"]));
+    let refusal = if ((20, 0)..(20, 12)).contains(&version) || ((21, 0)..(21, 6)).contains(&version)
+    {
+        "--permission blocks Nub's native addon"
+    } else {
+        "--permission requires --allow-addons"
+    };
+    assert!(stderr.contains(refusal), "stderr: {stderr}");
 }
 
 /// Under the permission model the program may read only what the user granted
