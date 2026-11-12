@@ -31,8 +31,8 @@
 //!
 //! Scope note: this ledger records *consent*, not the fetched bytes. The
 //! per-resolution tree cache (skip the re-fetch on a hit) is the separate,
-//! locked-but-deferred follow-up (see `.fray/universal-nubx.md`); it keys off the
-//! same entries, so it layers on without changing this contract.
+//! locked-but-deferred follow-up; it keys off the same entries, so it layers on
+//! without changing this contract.
 
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
@@ -394,11 +394,13 @@ fn prompt_consent(specs: &[String]) -> Consent {
             Key::Char('n') | Key::Char('N') => break Consent::No,
             Key::Escape | Key::CtrlC => break Consent::No,
             // A stray key on a terminal that isn't delivering arrows (Unknown)
-            // shouldn't spin: fall back to the line reader.
+            // shouldn't spin: fall back to the line reader. Only the question
+            // line is cleared and re-asked; it is the fixed short one, so a long
+            // spec list wrapping the first header line cannot skew the clear.
             Key::Unknown => {
-                let _ = term.clear_last_lines(OPTIONS.len());
+                let _ = term.clear_last_lines(OPTIONS.len() + 1);
                 let _ = term.show_cursor();
-                return prompt_line(specs, &term);
+                return ask_line(&term);
             }
             _ => continue,
         }
@@ -426,9 +428,16 @@ fn option_at(sel: usize) -> Consent {
 fn prompt_line(specs: &[String], term: &console::Term) -> Consent {
     let bin = specs.join(" ");
     let _ = term.write_str(&format!(
-        "The {} bin is not installed locally.\nInstall and run from the remote registry? [y/N] ",
+        "The {} bin is not installed locally.\n",
         console::style(&bin).cyan()
     ));
+    ask_line(term)
+}
+
+/// The question half of [`prompt_line`], for a caller whose header is already
+/// on screen.
+fn ask_line(term: &console::Term) -> Consent {
+    let _ = term.write_str("Install and run from the remote registry? [y/N] ");
     let _ = term.flush();
     match term.read_line() {
         Ok(line) if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") => {
