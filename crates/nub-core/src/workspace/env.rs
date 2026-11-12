@@ -2,7 +2,7 @@
 //! The parser follows Node's `--env-file` grammar; expansion stays in Nub's
 //! intentional post-parse layer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -245,11 +245,12 @@ pub fn discover_env_files(project_root: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// A self-referential value grows MULTIPLICATIVELY per round, so the 10-round
-/// bound alone does not bound the output: `A=${A}${A}${A}${A}${A}${A}${A}${A}`
-/// is 8x per pass, i.e. 8^10 ≈ a billion characters, which leaves the process
-/// thrashing swap rather than looping forever. Reachable from a cloned repo —
-/// a `.env` file has always fed this, and a `nub.jsonc` `envFile` now does too.
+/// References MULTIPLY, so the 10-round bound alone does not bound the output:
+/// with `B=${A}${A}${A}${A}${A}${A}${A}${A}`, `C` the same eight of `B`, and so
+/// on, each link is 8x the one before, and ten links are 8^10 ≈ a billion times
+/// the first value, which leaves the process thrashing swap rather than looping
+/// forever. Reachable from a cloned repo — a `.env` file has always fed this,
+/// and a `nub.jsonc` `envFile` now does too.
 ///
 /// A value that would exceed the cap keeps its PRE-expansion text rather than
 /// being truncated: a truncated value is a silently wrong one, and the raw form
@@ -260,8 +261,9 @@ const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 /// Expand `${VAR}` and `$VAR` references within all values of a map, in-place.
 /// Multi-pass (up to 10 rounds) to resolve nested chains like `A=hello`,
 /// `B=${A}_world`, `C=${B}_!`. Undefined references resolve to the empty string
-/// (consistent with [`load_env_files`]). Mutates `map` in-place and returns it
-/// for easy chaining.
+/// (consistent with [`load_env_files`]), and so does a reference that leads back
+/// to the variable it sits in ([`drop_reference_cycles`]). Mutates `map`
+/// in-place and returns it for easy chaining.
 ///
 /// A `\$` escape stays escaped through every round and becomes a literal `$`
 /// only once the rounds are done. Resolving it inside a round would hand the
@@ -269,6 +271,7 @@ const MAX_EXPANDED_VALUE: usize = 128 * 1024;
 /// would come out as `foo`, the exact result the escape exists to prevent.
 // @lat: [[research/env-expansion-and-test-skip#Research:  expansion semantics + the -in-test convention#What Nub does#Expansion ruleset]]
 pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String, String> {
+    drop_reference_cycles(map);
     for _ in 0..10 {
         let snapshot = map.clone();
         let mut changed = false;
@@ -291,6 +294,65 @@ pub fn expand_env_map(map: &mut HashMap<String, String>) -> &mut HashMap<String,
         }
     }
     map
+}
+
+/// Remove every reference that leads back to the variable it sits in, directly
+/// or through other variables: `A=x$A` becomes `x`, and `A=$B` with `B=$A`
+/// leaves both empty.
+///
+/// Expanding such a reference splices a variable into its own value, which
+/// never settles: each round re-reads the result, so `A=x$A` doubled ten times
+/// over into 1,024 copies of `x` and a literal `$A`. This runs before the
+/// rounds because a round copies raw text between variables, and a cycle copied
+/// into a variable outside it can no longer be told from an ordinary reference.
+fn drop_reference_cycles(map: &mut HashMap<String, String>) {
+    let references: HashMap<&str, Vec<&str>> = map
+        .iter()
+        .map(|(key, value)| {
+            let mut names = Vec::new();
+            scan_references(value, |_, name, _| {
+                names.extend(map.get_key_value(name).map(|(name, _)| name.as_str()));
+                Some(())
+            });
+            (key.as_str(), names)
+        })
+        .collect();
+    let reaches = |from: &str, to: &str| {
+        let mut pending = vec![from];
+        let mut seen = HashSet::new();
+        while let Some(name) = pending.pop() {
+            if name == to {
+                return true;
+            }
+            if seen.insert(name) {
+                pending.extend(references.get(name).into_iter().flatten().copied());
+            }
+        }
+        false
+    };
+    let rewritten: Vec<(String, String)> = references
+        .iter()
+        .filter_map(|(&key, names)| {
+            let cyclic: HashSet<&str> = names
+                .iter()
+                .copied()
+                .filter(|&name| reaches(name, key))
+                .collect();
+            if cyclic.is_empty() {
+                return None;
+            }
+            let value = scan_references(&map[key], |result, name, written| {
+                if cyclic.contains(name) {
+                    return Some(());
+                }
+                written
+                    .iter()
+                    .try_for_each(|&ch| push_char_bounded(result, ch))
+            })?;
+            Some((key.to_string(), value))
+        })
+        .collect();
+    map.extend(rewritten);
 }
 
 /// Load and merge `.env*` files WITHOUT `${VAR}` expansion — the *raw* values
@@ -621,6 +683,18 @@ fn push_var_bounded(result: &mut String, name: &str, env: &HashMap<String, Strin
 /// `None` means the expansion would exceed [`MAX_EXPANDED_VALUE`]. Callers keep
 /// the raw value in that case rather than publishing a truncated replacement.
 fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
+    scan_references(value, |result, name, _| push_var_bounded(result, name, env))
+}
+
+/// Copy `value`, handing each `${VAR}` and `$VAR` reference to `reference`
+/// with the output so far, the name, and the reference as written. A `\$`
+/// escape is copied through unchanged, so the `$` after it is never a
+/// reference. `None` means the copy would exceed [`MAX_EXPANDED_VALUE`], or
+/// `reference` gave up.
+fn scan_references(
+    value: &str,
+    mut reference: impl FnMut(&mut String, &str, &[char]) -> Option<()>,
+) -> Option<String> {
     let mut result = String::new();
     let chars: Vec<char> = value.chars().collect();
     let mut i = 0;
@@ -637,7 +711,7 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
                 // ${VAR} form
                 if let Some(close) = chars[i + 2..].iter().position(|&c| c == '}') {
                     let var_name: String = chars[i + 2..i + 2 + close].iter().collect();
-                    push_var_bounded(&mut result, &var_name, env)?;
+                    reference(&mut result, &var_name, &chars[i..i + close + 3])?;
                     i += close + 3;
                     continue;
                 }
@@ -650,7 +724,7 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
                     end += 1;
                 }
                 let var_name: String = chars[start..end].iter().collect();
-                push_var_bounded(&mut result, &var_name, env)?;
+                reference(&mut result, &var_name, &chars[i..end])?;
                 i = end;
                 continue;
             }
@@ -667,27 +741,31 @@ fn expand_vars(value: &str, env: &HashMap<String, String>) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// A self-referential value must not be expanded into swap. The 10-round
-    /// bound does not bound the OUTPUT — each pass multiplies, so eight
-    /// self-references reach ~8^10 characters and the process thrashes long
-    /// before it terminates. Measured before the cap: `nub` on a project whose
-    /// `envFile` held this line did not finish inside 15s.
+    /// A chain of repeating references must not be expanded into swap. The
+    /// 10-round bound does not bound the OUTPUT — each link multiplies the one
+    /// before it, so eight references per link reach ~8^10 times the first value
+    /// and the process thrashes long before it terminates.
     #[test]
-    fn a_self_referential_value_cannot_blow_up_the_expansion() {
+    fn a_chain_of_repeating_references_cannot_blow_up_the_expansion() {
         let mut map = HashMap::new();
-        map.insert(
-            "A".to_string(),
-            "${A}${A}${A}${A}${A}${A}${A}${A}".to_string(),
-        );
+        map.insert("L0".to_string(), "x".repeat(1024));
+        for link in 1..=10 {
+            map.insert(format!("L{link}"), format!("${{L{}}}", link - 1).repeat(8));
+        }
         map.insert("SANE".to_string(), "plain".to_string());
 
         expand_env_map(&mut map);
 
-        assert!(
-            map["A"].len() <= MAX_EXPANDED_VALUE,
-            "runaway value grew to {} bytes",
-            map["A"].len()
-        );
+        for (key, value) in &map {
+            assert!(
+                value.len() <= MAX_EXPANDED_VALUE,
+                "runaway {key} grew to {} bytes",
+                value.len()
+            );
+        }
+        // Proof the cap was reached: the last link is still unexpanded text.
+        assert!(map["L10"].contains("${"), "the chain never reached the cap");
+        assert_eq!(map["L2"].len(), 64 * 1024, "links under the cap expand");
         // The control: capping the pathological value must not stop ordinary
         // expansion happening around it.
         assert_eq!(map["SANE"], "plain");
@@ -696,6 +774,46 @@ mod tests {
         chain.insert("B".to_string(), "${A}_world".to_string());
         expand_env_map(&mut chain);
         assert_eq!(chain["B"], "hello_world", "normal chains still expand");
+    }
+
+    /// A reference that leads back to the variable it sits in expands to
+    /// nothing, whether it names the variable itself or reaches it through
+    /// others. Everything else in those values still expands, and a variable
+    /// outside the cycle that references one inside it gets that one's value.
+    #[test]
+    fn a_reference_back_to_its_own_variable_expands_to_nothing() {
+        let mut map = HashMap::new();
+        for (key, value) in [
+            ("SELF", "$SELF"),
+            ("WRAPPED", "pre-${WRAPPED}-post"),
+            ("PAIR_A", "a$PAIR_B"),
+            ("PAIR_B", "b${PAIR_A}"),
+            ("RING_A", "$RING_B"),
+            ("RING_B", "$RING_C"),
+            ("RING_C", "$RING_A"),
+            ("PLAIN", "plain"),
+            ("MIXED", "${PLAIN}/$MIXED/${PLAIN}"),
+            ("OUTSIDE", "<$PAIR_A|$SELF|$PLAIN>"),
+            ("ESCAPED", r"\$ESCAPED"),
+        ] {
+            map.insert(key.to_string(), value.to_string());
+        }
+
+        expand_env_map(&mut map);
+
+        assert_eq!(map["SELF"], "");
+        assert_eq!(map["WRAPPED"], "pre--post");
+        assert_eq!(map["PAIR_A"], "a");
+        assert_eq!(map["PAIR_B"], "b");
+        assert_eq!(map["RING_A"], "");
+        assert_eq!(map["RING_B"], "");
+        assert_eq!(map["RING_C"], "");
+        assert_eq!(map["MIXED"], "plain//plain");
+        assert_eq!(map["OUTSIDE"], "<a||plain>");
+        assert_eq!(
+            map["ESCAPED"], "$ESCAPED",
+            "an escaped dollar is no reference"
+        );
     }
 
     #[test]
