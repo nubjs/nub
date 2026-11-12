@@ -1428,7 +1428,7 @@ pub fn run_install(flags: InstallFlags) -> Result<i32> {
     // flags on top.
     let mut args = default_install_args();
     args.prod = flags.prod || config.dep_selection.prod;
-    args.dev = flags.dev || config.dep_selection.dev;
+    args.dev = flags.dev;
     args.ignore_scripts = flags.ignore_scripts;
     // An explicitly named pnpmfile loads whatever the project's incumbent is
     // — `detect`'s `pnpmfile_default_enabled` gate only ever suppresses the
@@ -1748,7 +1748,7 @@ pub fn run_ci(flags: CiFlags) -> Result<i32> {
         // contract as `run_install`.
         dep_selection: DepSelection::from_flags(
             dep.prod || flags.prod,
-            dep.dev || flags.dev,
+            flags.dev,
             dep.no_optional || flags.no_optional,
         ),
         ignore_scripts: flags.ignore_scripts,

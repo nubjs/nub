@@ -58,19 +58,18 @@ fn read_config_text(path: &Path) -> Option<Arc<String>> {
 }
 
 /// A config-derived override of the dependency selection axis
-/// (`--prod`/`--dev`/`--no-optional`). `false` per field means "not pinned by
+/// (`--prod`/`--no-optional`). `false` per field means "not pinned by
 /// config — leave the CLI/default behavior". Composed onto the install args
 /// only when the active PM owns the config that set it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct DepSelectionConfig {
     pub(crate) prod: bool,
-    pub(crate) dev: bool,
     pub(crate) no_optional: bool,
 }
 
 impl DepSelectionConfig {
     fn is_empty(self) -> bool {
-        !self.prod && !self.dev && !self.no_optional
+        !self.prod && !self.no_optional
     }
 }
 
@@ -124,7 +123,6 @@ fn npm_omit_include_in(paths: &[PathBuf]) -> DepSelectionConfig {
     let omits = |ty: &str| omit.iter().any(|o| o == ty) && !include.iter().any(|i| i == ty);
     DepSelectionConfig {
         prod: omits("dev"),
-        dev: false,
         no_optional: omits("optional"),
     }
 }
@@ -134,7 +132,6 @@ fn bunfig_production(root: &Path) -> DepSelectionConfig {
     let prod = bunfig_install_bool(root, "production").unwrap_or(false);
     DepSelectionConfig {
         prod,
-        dev: false,
         no_optional: false,
     }
 }
