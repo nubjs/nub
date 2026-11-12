@@ -13,7 +13,7 @@
 //! - **Never false-warn.** Every uncertain case — yarn-PnP, an unrecognized
 //!   layout, a spec that isn't a semver range, a prerelease install, no manifest
 //!   — degrades to a SILENT skip. A missed warning is cheap; a wrong one erodes
-//!   trust (the maintainer's explicit concern).
+//!   trust.
 //! - **Fire at most once per user command.** A process latch stops nested
 //!   in-process entrypoints (`exec` → bin launch → file runner) from re-checking,
 //!   and the `npm_lifecycle_event` re-entry guard stops the inner `node`s a
@@ -22,8 +22,8 @@
 //! Policy lives in the neutral `.npmrc` key `verify-deps-before-run` (with the
 //! `NUB_VERIFY_DEPS` env override); nub's default is `warn`. That is a
 //! deliberate divergence from the vendored engine's `install` default, wired
-//! through nub's OWN resolution so standalone aube's default is untouched
-//! (fork-discipline). Under a pnpm-**11+** incumbent the key lives SOLELY in
+//! through nub's OWN resolution so the engine's default is untouched. Under a
+//! pnpm-**11+** incumbent the key lives SOLELY in
 //! `pnpm-workspace.yaml` — v11 dropped `.npmrc` support for it entirely — so
 //! `resolve_policy` reads whichever home the detected incumbent major actually
 //! uses (see its doc).

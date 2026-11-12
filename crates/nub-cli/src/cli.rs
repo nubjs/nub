@@ -2932,7 +2932,7 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
     // offline fallbacks for the homepage prompt's fetch of start.md/skill.md).
     // Like `node`/`pm`, it's a non-forwarding manual sub-verb match — its
     // bare-usage and invalid-verb messages read consistently and it never reaches
-    // parser dispatch. Spec: .fray/ai-friendliness.md. Print-only, so it reads no
+    // parser dispatch. Print-only, so it reads no
     // project config and never initializes the snapshot — a malformed `nub.jsonc`
     // in some ancestor must not silence the offline docs.
     if subcommand == "agent" {

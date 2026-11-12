@@ -4,7 +4,7 @@
 //! durable-settings home and is read best-effort (a malformed file degrades to
 //! the default); the PROJECT file is authored by the user for one project and is
 //! read FAIL-LOUD (an unknown key or malformed value is an error, per the bunfig
-//! silent-no-op lesson — [`.fray/nub-config-spec.md`]).
+//! silent-no-op lesson).
 //!
 //! Dialect: JSONC (JSON + comments + trailing commas), the tsconfig dialect,
 //! parsed through [`crate::jsonc`] — the same depth-guarded reader the global

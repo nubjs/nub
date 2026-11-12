@@ -6454,8 +6454,7 @@ fn report_unbundled_packages(packages: &[String]) {
 /// directory, which for a self-contained binary usually has no `node_modules` at
 /// all. That lands as `Cannot find package …` on the deploy machine with nothing
 /// at build time to attribute it to. Refusing is not available — the flag exists
-/// precisely to allow this, and the maintainer confirmed it is needed in the wild
-/// — so the build says which sites it deferred, and what each resolves to when
+/// precisely to allow this, and real projects need it — so the build says which sites it deferred, and what each resolves to when
 /// that is knowable, which is the difference between an author seeing their
 /// platform package go unbundled and finding out on the deploy machine.
 fn warn_deferred_imports(sites: &[&DynamicSite]) {

@@ -894,8 +894,7 @@ mod tests {
     /// test that checked one of them would read as coverage whichever way the code
     /// went.
     ///
-    /// `External` pins the correction that a review caught: it looked admissible
-    /// everywhere, because its map is never named by the bundle and its frames come
+    /// `External` is the cell that looks admissible everywhere, because its map is never named by the bundle and its frames come
     /// back unmapped in every shape. But `Mode::Inline` publishes a DETACHED map
     /// made before [`rewrite_chunk`] shifts the code it describes, so admitting it
     /// there hands an error tracker a map that resolves to the wrong line and says
