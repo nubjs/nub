@@ -2900,30 +2900,13 @@ fn yarnrc_node_linker(root: &Path) -> Option<String> {
         }
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("nodeLinker:") {
-            let value = strip_yarnrc_value(rest);
+            let value = nub_core::pm::resolve::strip_yaml_value(rest);
             if !value.is_empty() {
                 return Some(value.to_ascii_lowercase());
             }
         }
     }
     None
-}
-
-/// Extract a scalar YAML value from the text after a `key:`. Strips surrounding
-/// quotes and inline `# comments` on unquoted values. Mirrors the logic in
-/// `nub_core::pm::resolve::strip_yaml_value` (duplicated here to avoid a
-/// cross-crate dep for one small helper).
-fn strip_yarnrc_value(rest: &str) -> &str {
-    let rest = rest.trim();
-    for quote in ['"', '\''] {
-        if let Some(inner) = rest.strip_prefix(quote) {
-            if let Some(end) = inner.find(quote) {
-                return &inner[..end];
-            }
-        }
-    }
-    // Unquoted: trim trailing `# comment`.
-    rest.split('#').next().map(str::trim).unwrap_or(rest)
 }
 
 /// Nub's replacement setting defaults, fed to the engine's embedder-defaults

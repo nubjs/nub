@@ -1037,7 +1037,7 @@ pub fn committed_yarn_path(cwd: &Path) -> Option<PathBuf> {
 /// `# comment` removed — `yarnPath: .yarn/releases/x.cjs # pinned` is the path,
 /// not `… # pinned`. Comments are only recognized on unquoted values (a `#`
 /// inside quotes is part of the path).
-pub(super) fn strip_yaml_value(rest: &str) -> &str {
+pub fn strip_yaml_value(rest: &str) -> &str {
     let rest = rest.trim();
     for quote in ['"', '\''] {
         if let Some(inner) = rest.strip_prefix(quote)
