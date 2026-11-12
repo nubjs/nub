@@ -2457,6 +2457,17 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
     cleanup_orphan_staging(base, &tmp, ".compile-app.");
     let _ = fs::remove_dir_all(&tmp);
     create_staging_dir(&tmp)?;
+    // A partial tree goes now rather than waiting out the orphan sweep's age
+    // limit; `publish_cache_dir` owns the staging directory from here on.
+    extract_app_files(view, &tmp).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&tmp);
+    })?;
+    publish_cache_dir(&tmp, &app_dir, |dir| app_cache_matches_payload(view, dir))?;
+    Ok(app_dir)
+}
+
+/// Write every payload file into the staging directory `tmp`.
+fn extract_app_files(view: &PayloadView<'_>, tmp: &Path) -> Result<()> {
     let mut split = ExtractSplit::default();
     // One decompressor for the whole payload, and one pass per DIRECTORY rather
     // than per file. Both exist because this loop runs per file and a payload is
@@ -2486,7 +2497,7 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
         if let Some(parent) = dest.parent()
             && !dirs.contains(parent)
         {
-            create_staging_subdirs(&tmp, parent)?;
+            create_staging_subdirs(tmp, parent)?;
             dirs.insert(parent.to_path_buf());
         }
         let mark = split.lap(mark, |s| &mut s.mkdir);
@@ -2503,8 +2514,7 @@ fn ensure_app(view: &PayloadView<'_>, base: &Path) -> Result<PathBuf> {
         }
     }
     split.report(view.app_files.len());
-    publish_cache_dir(&tmp, &app_dir, |dir| app_cache_matches_payload(view, dir))?;
-    Ok(app_dir)
+    Ok(())
 }
 
 /// Where the extraction loop's wall clock goes, split three ways.
@@ -4551,6 +4561,30 @@ mod tests {
         );
         assert!(!app_dir.join("package.json").exists());
         assert!(app_cache_matches_payload(&view, &app_dir));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn ensure_app_removes_its_staging_dir_when_extraction_fails() {
+        let base = fresh_cache_dir("app-extract-fails");
+        let mut view = test_view();
+        // Last, so the files ahead of it are already written into the stage.
+        view.app_files
+            .push(AppFile::plain("../outside.js", &b"escape"[..]));
+
+        let error = ensure_app(&view, &base).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            r#"compiled payload has an unsafe file name: "../outside.js""#
+        );
+        let stages: Vec<_> = fs::read_dir(&base)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".compile-app."))
+            .collect();
+        assert!(stages.is_empty(), "staging left behind: {stages:?}");
+        assert!(!app_cache_dir(&base, &view.manifest).exists());
         let _ = fs::remove_dir_all(&base);
     }
 
