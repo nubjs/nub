@@ -485,12 +485,17 @@ runs:
             # asdf/mise: `<tool> <version...>` lines, `#` comments. The first
             # nodejs (asdf) or node (mise) line's first version, as Nub's own pin walk reads it.
             *.tool-versions)
-              want="$(awk '{ sub(/#.*/, ""); gsub(/\r/, "") } $1 == "nodejs" || $1 == "node" { v = $2; sub(/^v/, "", v); print v; exit }' "$NODE_VERSION_FILE")"
+              want="$(LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { sub(/#.*/, ""); gsub(/\r/, "") } $1 == "nodejs" || $1 == "node" { v = $2; sub(/^v/, "", v); print v; exit }' "$NODE_VERSION_FILE")"
               if [ -z "$want" ]; then
                 echo "::error::node-version-file '${NODE_VERSION_FILE}' has no nodejs or node line with a version."
                 exit 1
               fi ;;
-            *)      want="$(head -n1 "$NODE_VERSION_FILE" | tr -d 'v[:space:]')" ;;
+            # LC_ALL=C on both awk calls so the byte-order mark matches as three bytes
+            # under every awk.
+            # .nvmrc and .node-version, read as nvm reads them: `#` starts a comment
+            # anywhere, and the version is the first line with anything left on it.
+            # Only a leading `v` goes, so a range such as `>=20 <23` keeps its space.
+            *)      want="$(LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "") } $0 != "" { sub(/^v/, ""); print; exit }' "$NODE_VERSION_FILE")" ;;
           esac
         fi
         # nvm-style aliases, as setup-node reads them: lts/*, lts/<codename>, node,
