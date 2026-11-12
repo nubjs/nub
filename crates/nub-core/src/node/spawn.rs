@@ -2508,11 +2508,11 @@ impl AugmentationEnv {
 }
 
 /// The permission-model switch Node ends up with on after reading `flags` in
-/// order, as typed. The last of a switch and its `--no-` form decides. Each
-/// spelling counts only where Node has it, so that anywhere else Node reports
-/// its own bad option: `--experimental-permission` exists on 20.0 through 23.x,
-/// and `--permission` from 22.13 on the 22 line and from 23.5. Where Node has
-/// both they are one option, so either `--no-` form turns the other off.
+/// order. The last of a switch and its `--no-` form decides. Each spelling
+/// counts only where Node has it, so that anywhere else Node reports its own
+/// bad option: `--experimental-permission` exists on 20.0 through 23.x, and
+/// `--permission` from 22.13 on the 22 line and from 23.5. Where Node has both
+/// they are one option, so either `--no-` form turns the other off.
 ///
 /// Only a switch counts. Matching on the `--allow-` prefix once refused
 /// `nub --allow-natives-syntax x.js`, a V8 flag that plain Node runs.
@@ -2522,13 +2522,13 @@ fn permission_switch(flags: &[String], node: &NodeVersion) -> Option<&'static st
     let experimental = (NodeVersion::new(20, 0, 0)..NodeVersion::new(24, 0, 0)).contains(node);
     let mut on = None;
     for flag in flags {
-        match flag.split('=').next() {
-            Some("--permission") if stable => on = Some("--permission"),
-            Some("--experimental-permission") if experimental => {
+        match boolean_option_name(flag).as_str() {
+            "--permission" if stable => on = Some("--permission"),
+            "--experimental-permission" if experimental => {
                 on = Some("--experimental-permission");
             }
-            Some("--no-permission") if stable => on = None,
-            Some("--no-experimental-permission") if experimental => on = None,
+            "--no-permission" if stable => on = None,
+            "--no-experimental-permission" if experimental => on = None,
             _ => {}
         }
     }
@@ -2543,13 +2543,21 @@ fn boolean_option(flags: &[String], name: &str) -> bool {
         .iter()
         .rev()
         .find_map(|flag| {
+            let flag = boolean_option_name(flag);
             if flag == name {
                 Some(true)
             } else {
-                (*flag == negated).then_some(false)
+                (flag == negated).then_some(false)
             }
         })
         .unwrap_or(false)
+}
+
+/// The name Node reads a boolean option under. It takes `_` for `-` anywhere in
+/// the name, and ignores a `=value`: `--allow_addons=false` turns `--allow-addons`
+/// on.
+fn boolean_option_name(flag: &str) -> String {
+    flag.split('=').next().unwrap_or(flag).replace('_', "-")
 }
 
 /// Whether this Node has the permission model without `--allow-addons`, which
@@ -6500,6 +6508,37 @@ mod tests {
         assert!(addons(&["--no-allow-addons", "--allow-addons"]));
         assert!(!addons(&["--allow-addons", "--no-allow-addons"]));
         assert!(!addons(&["--allow-fs-read=/tmp"]));
+
+        // Node takes `_` for `-` in a name and ignores a value on a boolean.
+        assert_eq!(
+            switch(
+                &[
+                    "--permission",
+                    "--no-permission",
+                    "--experimental_permission"
+                ],
+                (22, 13, 0)
+            ),
+            experimental
+        );
+        assert_eq!(
+            switch(&["--permission", "--no_permission"], (26, 0, 0)),
+            None
+        );
+        assert_eq!(switch(&["--permission=false"], (26, 0, 0)), stable);
+        assert_eq!(
+            switch(&["--permission", "--no-permission=1"], (26, 0, 0)),
+            None
+        );
+        assert!(addons(&[
+            "--allow-addons",
+            "--no-allow-addons",
+            "--allow-addons=true"
+        ]));
+        assert!(addons(&["--no-allow-addons", "--allow_addons"]));
+        assert!(addons(&["--allow-addons=false"]));
+        assert!(!addons(&["--allow-addons", "--no_allow_addons"]));
+        assert!(!addons(&["--allow-addons", "--no-allow_addons=1"]));
     }
 
     #[test]

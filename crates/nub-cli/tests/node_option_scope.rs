@@ -153,6 +153,8 @@ fn a_permission_switch_turned_off_again_is_not_refused() {
         (Some("--permission"), &["--no-permission", "probe.js"][..]),
         (Some("--permission --no-permission"), &["probe.js"][..]),
         (None, &["--permission", "--no-permission", "probe.js"][..]),
+        // Node takes `_` for `-` in an option name and ignores a boolean's value.
+        (None, &["--permission", "--no_permission=1", "probe.js"][..]),
     ] {
         let (ok, stderr) = run(node_options, args);
         assert!(ok, "{node_options:?} {args:?}\nstderr: {stderr}");
