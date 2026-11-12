@@ -48,7 +48,7 @@ pub const PATH_LIST_SEPARATOR: &str = if cfg!(windows) { ";" } else { ":" };
 /// A name that already carries an extension is taken as spelled, and whether that
 /// spelling runs is the caller's business.
 #[cfg(windows)]
-pub fn command_candidates(dir: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
+fn command_candidates(dir: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
     if std::path::Path::new(name).extension().is_some() {
         return vec![dir.join(name)];
     }
@@ -68,7 +68,7 @@ pub fn command_candidates(dir: &std::path::Path, name: &str) -> Vec<std::path::P
 /// See the Windows counterpart. Elsewhere a command is spelled on disk exactly as
 /// it is invoked, so there is one candidate.
 #[cfg(not(windows))]
-pub fn command_candidates(dir: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
+fn command_candidates(dir: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
     vec![dir.join(name)]
 }
 
