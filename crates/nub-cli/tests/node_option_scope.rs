@@ -122,6 +122,50 @@ fn only_a_permission_switch_node_acts_on_gets_nubs_refusal() {
     }
 }
 
+/// Node reads NODE_OPTIONS before the command line, and the last of a switch and
+/// its `--no-` form decides. A model the user turned back off is not Nub's to
+/// refuse; the other order leaves it on.
+#[test]
+fn a_permission_switch_turned_off_again_is_not_refused() {
+    let dir = probe_dir("permission-negated");
+    let version = node_version(&probe(&dir, &["probe.js"]));
+    if !has_stable_permission(version) {
+        eprintln!("skipping: Node {version:?} has no --permission");
+        return;
+    }
+    let run = |node_options: Option<&str>, args: &[&str]| {
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(args)
+            .current_dir(&dir)
+            .env_remove("NODE_COMPAT")
+            .env_remove("NODE_OPTIONS");
+        if let Some(value) = node_options {
+            cmd.env("NODE_OPTIONS", value);
+        }
+        let out = cmd.output().expect("failed to spawn nub");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+
+    for (node_options, args) in [
+        (Some("--permission"), &["--no-permission", "probe.js"][..]),
+        (Some("--permission --no-permission"), &["probe.js"][..]),
+        (None, &["--permission", "--no-permission", "probe.js"][..]),
+    ] {
+        let (ok, stderr) = run(node_options, args);
+        assert!(ok, "{node_options:?} {args:?}\nstderr: {stderr}");
+    }
+
+    let (ok, stderr) = run(Some("--no-permission"), &["--permission", "probe.js"]);
+    assert!(!ok, "stderr: {stderr}");
+    assert!(
+        stderr.contains("nub: --permission requires --allow-addons"),
+        "stderr: {stderr}"
+    );
+}
+
 /// Under the permission model the program may read only what the user granted
 /// plus what Nub grants for its own runtime. The runtime is not under the install
 /// directory (a shipped build extracts it to the cache, a dev build reads the

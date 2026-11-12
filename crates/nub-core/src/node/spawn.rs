@@ -913,22 +913,21 @@ pub fn spawn_node(config: &SpawnConfig<'_>) -> Result<SpawnResult> {
     // the re-entrancy check and the flag-injection block below — the env value is
     // constant across a single spawn.
     let node_options = env::var("NODE_OPTIONS").ok();
-    // The permission model is on when Node reads its switch, on the command line
-    // or in NODE_OPTIONS. An `--allow-*` flag alone does not turn it on: Node fails
-    // that itself with ERR_MISSING_OPTION, which names the switch.
-    let permission_flags: Vec<String> = node_args
-        .iter()
-        .cloned()
-        .chain(
-            node_options
-                .as_deref()
-                .map(split_node_options)
-                .unwrap_or_default(),
-        )
+    // The permission model is on when Node ends up with its switch on. Node reads
+    // NODE_OPTIONS before the command line and the last of a flag and its `--no-`
+    // form decides, so the flags are scanned in that order. An `--allow-*` flag
+    // alone does not turn the model on: Node fails that itself with
+    // ERR_MISSING_OPTION, which names the switch.
+    let permission_flags: Vec<String> = node_options
+        .as_deref()
+        .map(split_node_options)
+        .unwrap_or_default()
+        .into_iter()
+        .chain(node_args.iter().cloned())
         .collect();
     let permission = permission_switch(&permission_flags, &config.node.version);
     let has_permission = permission.is_some();
-    let has_allow_addons = permission_flags.iter().any(|a| a == "--allow-addons");
+    let has_allow_addons = boolean_option(&permission_flags, "--allow-addons");
 
     if let Some(switch) = permission
         && !has_allow_addons
@@ -2508,25 +2507,49 @@ impl AugmentationEnv {
     }
 }
 
-/// The permission-model switch Node will act on among `flags`, as typed. Each
+/// The permission-model switch Node ends up with on after reading `flags` in
+/// order, as typed. The last of a switch and its `--no-` form decides. Each
 /// spelling counts only where Node has it, so that anywhere else Node reports
 /// its own bad option: `--experimental-permission` exists on 20.0 through 23.x,
-/// and `--permission` from 22.13 on the 22 line and from 23.5.
+/// and `--permission` from 22.13 on the 22 line and from 23.5. Where Node has
+/// both they are one option, so either `--no-` form turns the other off.
 ///
 /// Only a switch counts. Matching on the `--allow-` prefix once refused
 /// `nub --allow-natives-syntax x.js`, a V8 flag that plain Node runs.
 fn permission_switch(flags: &[String], node: &NodeVersion) -> Option<&'static str> {
-    let typed = |flag: &str| flags.iter().any(|a| a.split('=').next() == Some(flag));
     let stable = *node >= NodeVersion::new(22, 13, 0)
         && !(NodeVersion::new(23, 0, 0)..NodeVersion::new(23, 5, 0)).contains(node);
     let experimental = (NodeVersion::new(20, 0, 0)..NodeVersion::new(24, 0, 0)).contains(node);
-    if stable && typed("--permission") {
-        Some("--permission")
-    } else if experimental && typed("--experimental-permission") {
-        Some("--experimental-permission")
-    } else {
-        None
+    let mut on = None;
+    for flag in flags {
+        match flag.split('=').next() {
+            Some("--permission") if stable => on = Some("--permission"),
+            Some("--experimental-permission") if experimental => {
+                on = Some("--experimental-permission");
+            }
+            Some("--no-permission") if stable => on = None,
+            Some("--no-experimental-permission") if experimental => on = None,
+            _ => {}
+        }
     }
+    on
+}
+
+/// Whether the boolean Node option `name` is on after Node reads `flags` in
+/// order: the last `name` or its `--no-` form decides.
+fn boolean_option(flags: &[String], name: &str) -> bool {
+    let negated = format!("--no-{}", name.trim_start_matches("--"));
+    flags
+        .iter()
+        .rev()
+        .find_map(|flag| {
+            if flag == name {
+                Some(true)
+            } else {
+                (*flag == negated).then_some(false)
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// Whether this Node has the permission model without `--allow-addons`, which
@@ -6419,6 +6442,64 @@ mod tests {
         assert_eq!(switch(&["--allow-natives-syntax"], (26, 0, 0)), None);
         // A value on the switch does not hide it.
         assert_eq!(switch(&["--permission=true"], (26, 0, 0)), stable);
+    }
+
+    /// Each row is what plain Node does with the flags in that order, which is the
+    /// order it reads them: NODE_OPTIONS, then the command line.
+    #[test]
+    fn the_last_of_a_permission_flag_and_its_negation_decides() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let switch = |flags: &[&str], version: (u32, u32, u32)| {
+            let (major, minor, patch) = version;
+            permission_switch(&args(flags), &NodeVersion::new(major, minor, patch))
+        };
+        let experimental = Some("--experimental-permission");
+        let stable = Some("--permission");
+
+        for (flags, version, expected) in [
+            (&["--permission", "--no-permission"][..], (26, 0, 0), None),
+            (&["--no-permission", "--permission"][..], (26, 0, 0), stable),
+            (
+                &["--experimental-permission", "--no-experimental-permission"][..],
+                (20, 19, 0),
+                None,
+            ),
+            (
+                &["--no-experimental-permission", "--experimental-permission"][..],
+                (22, 12, 0),
+                experimental,
+            ),
+            // Where Node has both spellings they are one option.
+            (
+                &["--permission", "--no-experimental-permission"][..],
+                (22, 13, 0),
+                None,
+            ),
+            (
+                &["--experimental-permission", "--no-permission"][..],
+                (23, 11, 0),
+                None,
+            ),
+            // A negation this Node lacks is its bad option, not a switch turned off.
+            (
+                &["--experimental-permission", "--no-permission"][..],
+                (20, 19, 0),
+                experimental,
+            ),
+            (
+                &["--permission", "--no-experimental-permission"][..],
+                (24, 0, 0),
+                stable,
+            ),
+        ] {
+            assert_eq!(switch(flags, version), expected, "{flags:?} on {version:?}");
+        }
+
+        let addons = |flags: &[&str]| boolean_option(&args(flags), "--allow-addons");
+        assert!(addons(&["--allow-addons"]));
+        assert!(addons(&["--no-allow-addons", "--allow-addons"]));
+        assert!(!addons(&["--allow-addons", "--no-allow-addons"]));
+        assert!(!addons(&["--allow-fs-read=/tmp"]));
     }
 
     #[test]
