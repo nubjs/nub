@@ -889,7 +889,7 @@ pub(crate) fn run_use_nub(root: &Path, exact_pin: Option<&str>) -> Result<i32> {
     super::engine_brand_preflight();
 
     // ── plan everything before writing anything (refuse-early) ──────────
-    let plan = use_align::plan_alignment(root, "nub")?;
+    let plan = use_align::plan_alignment(root, "nub", false)?;
 
     let manifest_content = std::fs::read_to_string(root.join("package.json"))
         .with_context(|| format!("reading {}", root.join("package.json").display()))?;

@@ -115,7 +115,7 @@ pub fn provision_pm_announced(
         .with_context(|| format!("no version to provision for {pm}"))?;
     let (spec, pin_hash) = split_hash_suffix(raw);
 
-    let pm_store = store_root.join("pm").join(pm.to_string());
+    let pm_store = store_root.join("pm").join(pm.store_dir());
 
     // 2. Exact pin + cached install → done, zero network. The bin path comes from
     // the cached package's own manifest (same `name`/`bin` shape as the packument).
@@ -157,7 +157,9 @@ pub fn provision_pm_announced(
         return Ok(ProvisionedPm { bin, version }); // cache hit — silent
     }
 
-    let dist = match registry::resolve_version_authed(&cfg, &pm.to_string(), spec) {
+    let dist = match registry::resolve_version_authed(&cfg, pm.registry_package(), spec)
+        .map_err(|e| berry_resolve_context(e, pm, spec))
+    {
         Ok(dist) => {
             if is_tag {
                 record_tag_resolution(&pm_store, &cfg.base, spec, &dist.version);
@@ -261,7 +263,7 @@ pub fn provision_pm_from_tarball(
     tarball: &Path,
     store_root: &Path,
 ) -> Result<ProvisionedPm> {
-    let pm_store = store_root.join("pm").join(pm.to_string());
+    let pm_store = store_root.join("pm").join(pm.store_dir());
     let final_dir = store_version_dir(&pm_store, &dist.version)?;
     let bin = final_dir.join("package").join(&dist.bin_subpath);
 
@@ -386,7 +388,7 @@ fn cached_bin(pm_store: &Path, version: &str) -> Option<PathBuf> {
 /// manifest; the bytes are only needed when the store is cold). A `false` here
 /// means "not present or incomplete" — the caller must then fetch.
 pub fn pm_version_cached(pm: super::Pm, version: &str, store_root: &Path) -> bool {
-    let pm_store = store_root.join("pm").join(pm.to_string());
+    let pm_store = store_root.join("pm").join(pm.store_dir());
     cached_bin(&pm_store, version).is_some()
 }
 
@@ -471,7 +473,13 @@ fn install(
     // DOWNLOAD path only — an exact pin already in the store returned from the
     // cache scan before any download (a hit is trusted; the version-addressed
     // store posture in the module doc).
-    if let Some(suffix) = pin_hash {
+    // A Berry pin hash is over the single-file `yarn.js` (Corepack's format), so
+    // it is checked on the extracted launcher instead, still before placement.
+    let (tarball_pin_hash, launcher_pin_hash) = match pm {
+        super::Pm::YarnBerry => (None, pin_hash),
+        _ => (pin_hash, None),
+    };
+    if let Some(suffix) = tarball_pin_hash {
         verify_pin_hash(&tarball, suffix).with_context(|| {
             format!(
                 "verifying {pm} {} against the packageManager pin hash",
@@ -482,7 +490,7 @@ fn install(
     registry::verify_integrity(&tarball, &dist.integrity)
         .with_context(|| format!("verifying {pm} {}", dist.version))?;
 
-    extract_and_place(pm, dist, pm_store, final_dir, &tarball)?;
+    extract_and_place(pm, dist, pm_store, final_dir, &tarball, launcher_pin_hash)?;
 
     line.finish(format_args!(
         "Installed in {:.1}s",
@@ -496,7 +504,9 @@ fn install(
 /// pre-downloaded [`provision_pm_from_tarball`] path (whose caller already
 /// downloaded + verified). VERIFICATION IS THE CALLER'S JOB: this runs no integrity
 /// check, so every path into it must have verified the tarball against
-/// `dist.integrity` (and any pin hash) first. The extraction normalizes the
+/// `dist.integrity` (and any tarball pin hash) first. `launcher_pin_hash` is the
+/// one check made here, on the extracted launcher before it is placed (Berry's
+/// pin hash covers `yarn.js`, not the tarball). The extraction normalizes the
 /// publisher's top dir to `package/` and the rename keeps a concurrent install's
 /// result if one beat us.
 fn extract_and_place(
@@ -505,6 +515,7 @@ fn extract_and_place(
     pm_store: &Path,
     final_dir: &Path,
     tarball: &Path,
+    launcher_pin_hash: Option<&str>,
 ) -> Result<()> {
     // A sibling work dir on the same filesystem → the place is an atomic rename.
     // (The networked `install` already has one for the download; this stands up
@@ -540,6 +551,14 @@ fn extract_and_place(
             dist.version,
             final_bin.display()
         );
+    }
+    if let Some(suffix) = launcher_pin_hash {
+        verify_pin_hash(&staging_bin, suffix).with_context(|| {
+            format!(
+                "verifying {pm} {} against the packageManager pin hash",
+                dist.version
+            )
+        })?;
     }
 
     if final_bin.is_file() {
@@ -669,7 +688,7 @@ fn place_verified_tarball(
     final_dir: &Path,
     tarball: &Path,
 ) -> Result<()> {
-    extract_and_place(pm, dist, pm_store, final_dir, tarball)
+    extract_and_place(pm, dist, pm_store, final_dir, tarball, None)
 }
 
 /// Rename an extracted tarball's single top-level dir to `package/` when the
@@ -726,11 +745,25 @@ fn verify_pin_hash(file: &Path, suffix: &str) -> Result<()> {
     if !got.eq_ignore_ascii_case(want) {
         bail!(
             "pin hash mismatch for {}: the packageManager pin expects {algo}.{want}, \
-             the downloaded tarball is {algo}.{got}",
+             the download is {algo}.{got}",
             file.display()
         );
     }
     Ok(())
+}
+
+/// Name where a Berry spec is looked up when its resolution fails: the error
+/// otherwise reports `@yarnpkg/cli-dist`, a package the user never wrote, and
+/// releases before 2.4.1 were never published there.
+fn berry_resolve_context(err: anyhow::Error, pm: super::Pm, spec: &str) -> anyhow::Error {
+    if pm != super::Pm::YarnBerry {
+        return err;
+    }
+    err.context(format!(
+        "resolving yarn {spec}: Yarn 2+ is downloaded as @yarnpkg/cli-dist, which has \
+         every release from 2.4.1 on (an older one needs a committed release and \
+         yarnPath in .yarnrc.yml)"
+    ))
 }
 
 /// Best-effort cleanup of the temp work dir on any return path (the same guard
@@ -996,6 +1029,104 @@ mod tests {
             }
         });
         format!("http://127.0.0.1:{port}")
+    }
+
+    /// A loopback registry serving one Berry release the way npm does: the
+    /// `@yarnpkg/cli-dist` version manifest, and its tarball with a real
+    /// `shasum`, so the whole download → verify → extract path runs.
+    fn mock_registry_serving_berry(version: &'static str, tgz: Vec<u8>) -> String {
+        use sha1::{Digest as _, Sha1};
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let shasum = super::super::hex_lower(&Sha1::digest(&tgz));
+        let manifest = format!(
+            r#"{{ "name": "@yarnpkg/cli-dist", "version": "{version}",
+                 "bin": {{ "yarn": "bin/yarn.js", "yarnpkg": "bin/yarn.js" }},
+                 "dist": {{ "tarball": "http://127.0.0.1:{port}/cli-dist-{version}.tgz",
+                            "shasum": "{shasum}" }} }}"#
+        );
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                let mut buf = [0u8; 4096];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let path = head.split_whitespace().nth(1).unwrap_or_default();
+                let (status, body) = if path.ends_with(".tgz") {
+                    ("200 OK", tgz.clone())
+                } else if path == format!("/@yarnpkg/cli-dist/{version}") {
+                    ("200 OK", manifest.clone().into_bytes())
+                } else {
+                    ("404 Not Found", b"{}".to_vec())
+                };
+                let _ = conn.write_all(
+                    format!(
+                        "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+                let _ = conn.write_all(&body);
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[test]
+    fn berry_downloads_cli_dist_and_checks_the_pin_hash_against_yarn_js() {
+        use flate2::{Compression, write::GzEncoder};
+        use sha2::{Digest as _, Sha512};
+        if ambient_registry_override() {
+            return; // env registry outranks the test .npmrc — see helper
+        }
+        let yarn_js = b"#!/usr/bin/env node\n// berry 4.18.1\n";
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        for (path, body) in [
+            (
+                "package/package.json",
+                br#"{ "name": "@yarnpkg/cli-dist", "bin": { "yarn": "bin/yarn.js", "yarnpkg": "bin/yarn.js" } }"#
+                    .as_slice(),
+            ),
+            ("package/bin/yarn.js", yarn_js.as_slice()),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            tar.append_data(&mut h, path, body).unwrap();
+        }
+        let tgz = tar.into_inner().unwrap().finish().unwrap();
+        let tarball_hash = super::super::hex_lower(&Sha512::digest(&tgz));
+        let launcher_hash = super::super::hex_lower(&Sha512::digest(yarn_js));
+
+        let store = std::env::temp_dir().join(format!("nub-pm-berry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&store);
+        std::fs::create_dir_all(&store).unwrap();
+        let mock = mock_registry_serving_berry("4.18.1", tgz);
+        std::fs::write(store.join(".npmrc"), format!("registry={mock}\n")).unwrap();
+        let pin = |hash: &str| PmPin {
+            pm: Pm::YarnBerry,
+            version: Some(format!("4.18.1+sha512.{hash}")),
+        };
+
+        // A hash over the tarball — the npm/pnpm/classic shape — is not what
+        // Corepack writes for Berry, so it fails, and nothing is placed.
+        let err = provision_pm(&pin(&tarball_hash), &store, &store, None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("pin hash mismatch"),
+            "a tarball hash must not verify a Berry pin, got: {err:#}"
+        );
+        assert!(!store.join("pm/yarn-berry/4.18.1").exists());
+
+        // Corepack's hash, over yarn.js, installs into Berry's own store dir.
+        let prov = provision_pm(&pin(&launcher_hash), &store, &store, None)
+            .expect("a yarn.js hash verifies the Berry pin");
+        assert_eq!(
+            prov.bin,
+            store.join("pm/yarn-berry/4.18.1/package/bin/yarn.js")
+        );
+        assert_eq!(std::fs::read(&prov.bin).unwrap(), yarn_js);
+        let _ = std::fs::remove_dir_all(&store);
     }
 
     #[test]

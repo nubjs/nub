@@ -454,9 +454,9 @@ pub enum PinState {
 pub enum ShimDecision {
     /// Name match: provision the pinned PM (cache-first) and exec `bin_entry`
     /// from its bin map under the PROJECT's Node. Same-PM version drift never
-    /// refuses — running the pinned version IS the shim's job. `pm` is the
-    /// pinned value, so `YarnBerry` tells the caller to exec the committed
-    /// `yarnPath` release instead of provisioning.
+    /// refuses — running the pinned version IS the shim's job. A committed
+    /// `yarnPath` release (the resolved target, not `pm`) is exec'd instead of
+    /// provisioning.
     RunPinned { pm: Pm, bin_entry: &'static str },
     /// Strict by default: a non-transparent invocation of the WRONG PM in a
     /// pinned project exits nonzero, naming the pinned PM + its provenance and

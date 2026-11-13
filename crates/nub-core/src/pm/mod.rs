@@ -23,15 +23,41 @@ use std::fmt;
 /// The package managers Nub manages. `bun` is deliberately absent — it is out of
 /// scope for v0.x (see `detect_package_manager`'s preserved bun inference).
 ///
-/// `YarnBerry` is a distinct variant from `Yarn` because the provisioning engine
-/// branches hard on it (Berry ships as a committed release / Plug'n'Play, classic
-/// Yarn downloads a tarball). Both print `yarn` — the distinction is internal.
+/// `YarnBerry` is a distinct variant from `Yarn` because the two ship as different
+/// npm packages with different pin-hash targets (see [`Pm::registry_package`]).
+/// Both print `yarn` — the distinction is internal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pm {
     Npm,
     Pnpm,
     Yarn,
     YarnBerry,
+}
+
+impl Pm {
+    /// The npm package provisioning downloads. The `yarn` package is classic only;
+    /// Berry publishes its single-file CLI as `@yarnpkg/cli-dist` (2.4.1 onward),
+    /// whose `bin/yarn.js` is byte-identical to the release on repo.yarnpkg.com.
+    /// Corepack downloads the same package when pointed at a custom registry, and
+    /// a Corepack Berry pin hash is over that `yarn.js`, not over the tarball.
+    pub fn registry_package(self) -> &'static str {
+        match self {
+            Pm::Npm => "npm",
+            Pm::Pnpm => "pnpm",
+            Pm::Yarn => "yarn",
+            Pm::YarnBerry => "@yarnpkg/cli-dist",
+        }
+    }
+
+    /// The store directory under `<cache>/pm/`. Berry gets its own so classic
+    /// yarn never reads Berry's recorded `latest`, and a classic range (`>=1`)
+    /// can't fall back to a cached Berry release offline.
+    pub fn store_dir(self) -> &'static str {
+        match self {
+            Pm::YarnBerry => "yarn-berry",
+            pm => pm.registry_package(),
+        }
+    }
 }
 
 impl fmt::Display for Pm {

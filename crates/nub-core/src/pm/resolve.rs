@@ -3,7 +3,7 @@
 //!
 //! Resolution sources, in precedence order:
 //!   1. `.yarnrc.yml`'s `yarnPath:` — a committed Berry release short-circuits
-//!      everything (run that file directly; never provision).
+//!      everything (run that file directly; never download).
 //!   2. `package.json#packageManager` — the Corepack standard.
 //!   3. `package.json#devEngines.packageManager` (object form only).
 //!
@@ -35,11 +35,8 @@ pub struct PmPin {
 pub enum PmTarget {
     /// A committed Berry release at this path — exec it directly, never download.
     YarnPath(PathBuf),
-    /// Provision (download/cache) the pinned manager.
+    /// Provision (download/cache) the pinned manager, Berry included.
     Provision(PmPin),
-    /// A bare Berry pin (`yarn@>=2`) with no `yarnPath` — Nub can't synthesize a
-    /// Berry release, so the engine surfaces a clear error.
-    BerryNoYarnPath,
 }
 
 /// WHICH field supplied the pin — the provenance `nub pm which` must report. The
@@ -69,15 +66,12 @@ impl std::fmt::Display for PinSource {
     }
 }
 
-/// A resolved [`PmTarget`] with its provenance and any advisory warnings. The
-/// source is `None` only for [`PmTarget::BerryNoYarnPath`] reached via a bare
-/// Berry `packageManager`/`devEngines` pin — there the CLI surfaces an error, not
-/// a provenance line. Warnings are structured (never printed here): the CLI owns
-/// all stderr output.
+/// A resolved [`PmTarget`] with its provenance and any advisory warnings.
+/// Warnings are structured (never printed here): the CLI owns all stderr output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PmTargetResolution {
     pub target: PmTarget,
-    pub source: Option<PinSource>,
+    pub source: PinSource,
     pub warnings: Vec<PinWarning>,
 }
 
@@ -193,7 +187,7 @@ pub fn resolve_target_with_source(cwd: &Path) -> Option<PmTargetResolution> {
     if let Some(path) = committed_yarn_path(cwd) {
         return Some(PmTargetResolution {
             target: PmTarget::YarnPath(path),
-            source: Some(PinSource::YarnPath),
+            source: PinSource::YarnPath,
             warnings: Vec::new(),
         });
     }
@@ -207,15 +201,9 @@ pub fn resolve_target_with_source(cwd: &Path) -> Option<PmTargetResolution> {
         // here (resolve_pin_with_source is the channel that returns them).
         return None;
     };
-    let target = if pin.pm == Pm::YarnBerry {
-        // Berry pinned but no committed release to run — unresolvable.
-        PmTarget::BerryNoYarnPath
-    } else {
-        PmTarget::Provision(pin)
-    };
     Some(PmTargetResolution {
-        target,
-        source: Some(source),
+        target: PmTarget::Provision(apply_yarnrc_signal(pin, cwd)),
+        source,
         warnings: resolved.warnings,
     })
 }
@@ -247,10 +235,28 @@ pub fn resolve_pin_with_source(cwd: &Path) -> Option<PmPinResolution> {
     let resolved = pin_from_manifest(&manifest);
     let (pin, source) = resolved.pin?;
     Some(PmPinResolution {
-        pin,
+        pin: apply_yarnrc_signal(pin, cwd),
         source,
         warnings: resolved.warnings,
     })
+}
+
+/// A version-less yarn pin (a name-only `devEngines` entry, a URL
+/// `packageManager`) can't split classic from Berry by major, so a
+/// `.yarnrc.yml` beside the pin decides it, as [`project_pm_identity`] does.
+/// [`pin_from_manifest`] sees only the manifest, so the file check lives here.
+fn apply_yarnrc_signal(pin: PmPin, cwd: &Path) -> PmPin {
+    let yarnrc_present = || pin_target_dir(cwd).join(".yarnrc.yml").is_file();
+    match pin {
+        PmPin {
+            pm: Pm::Yarn,
+            version: None,
+        } if yarnrc_present() => PmPin {
+            pm: classify_yarn(None, true),
+            version: None,
+        },
+        pin => pin,
+    }
 }
 
 /// The pure core of [`resolve_pin`]: the pin (with its source) from an
@@ -312,7 +318,7 @@ fn pin_from_manifest(manifest: &serde_json::Value) -> ManifestPin {
         };
     };
     let version = dev.get("version").and_then(|v| v.as_str());
-    match classify(name, version) {
+    match classify(name, version, SpecForm::Range) {
         Ok(pin) => ManifestPin {
             pin: Some((pin, PinSource::DevEngines)),
             warnings: Vec::new(),
@@ -917,9 +923,9 @@ fn parse_spec(spec: &str) -> Result<PmPin> {
     // version-switch on a URL spec. Without this the URL reached the semver
     // resolver and aborted the run (`unexpected character 'h'`).
     if is_url_version_ref(version) {
-        return classify(name, None);
+        return classify(name, None, SpecForm::Exact);
     }
-    classify(name, Some(version))
+    classify(name, Some(version), SpecForm::Exact)
 }
 
 /// Whether a `packageManager` *version* slot holds a URL / git / file reference
@@ -933,29 +939,41 @@ fn is_url_version_ref(version: &str) -> bool {
     v.contains("://") || v.starts_with("git+") || v.starts_with("git@") || v.starts_with("file:")
 }
 
+/// Which spec shapes a pin field admits: `packageManager` is exact-only (the
+/// Corepack contract), `devEngines.packageManager` takes a semver range.
+#[derive(Clone, Copy)]
+enum SpecForm {
+    Exact,
+    Range,
+}
+
 /// Map a `(name, version)` pair to a [`PmPin`], applying the yarn classic/berry
 /// split. The version (with any hash suffix) is stored verbatim.
-fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
+fn classify(name: &str, version: Option<&str>, form: SpecForm) -> Result<PmPin> {
     let pm = match name {
         "npm" => Pm::Npm,
         "pnpm" => Pm::Pnpm,
         "yarn" => {
-            // A *pinned* yarn (version present) must classify by major to pick the
-            // classic-tarball vs Berry provisioning path. A dist-tag/range whose
-            // version has no leading numeric major (`yarn@stable`, `yarn@berry`)
-            // can't be split, and Corepack requires an exact version anyway — reject
-            // it here naming the requirement, rather than silently provisioning the
-            // wrong (classic-tarball) artifact for a Berry tag. A genuinely absent
-            // version (the lockfile-inference seam) still flows through the yarnrc
-            // signal in `classify_yarn`.
-            if let Some(v) = version
-                && yarn_major(v).is_none()
-            {
-                bail!(
-                    "yarn \"{v}\" must be an exact version (e.g. yarn@4.2.2) — \
-                     dist-tags and ranges (yarn@stable, yarn@berry) are unsupported \
-                     in a yarn pin"
-                );
+            // A *pinned* yarn (version present) must classify by major to pick
+            // the `yarn` vs `@yarnpkg/cli-dist` package. A spec with no leading
+            // numeric major (`yarn@stable`, `yarn@berry`) can't be split, so it is
+            // rejected naming the requirement rather than silently provisioning
+            // classic for a Berry tag. A genuinely absent version (the
+            // lockfile-inference seam) still flows through the yarnrc signal in
+            // `classify_yarn`.
+            if let Some(v) = version {
+                match form {
+                    SpecForm::Exact if yarn_major(v).is_none() => bail!(
+                        "yarn \"{v}\" must be an exact version (e.g. yarn@4.2.2) — \
+                         dist-tags and ranges (yarn@stable, yarn@berry) are unsupported \
+                         in a yarn pin"
+                    ),
+                    SpecForm::Range if yarn_range_major(v).is_none() => bail!(
+                        "yarn \"{v}\" needs a numeric version or range (e.g. 4.2.2, ^4) — \
+                         dist-tags (stable, berry) can't tell classic yarn from Berry"
+                    ),
+                    _ => {}
+                }
             }
             classify_yarn(version, false)
         }
@@ -973,12 +991,12 @@ fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
 ///     (`yarnrc_present`): a sibling means Berry, otherwise classic.
 ///
 /// The pinned route ([`classify`]) calls this with the version. The unpinned route
-/// does NOT reach here — it defers to whatever `yarn` is on PATH and so needs no
-/// classic/Berry split. [`project_pm_identity`] is the caller of the
-/// `None`-version arm: a versionless yarn declaration beside a `.yarnrc.yml` is
-/// a Berry identity.
+/// does NOT reach here — it defers to whatever `yarn` is on PATH, or to the
+/// lockfile's format. [`project_pm_identity`] and [`apply_yarnrc_signal`] call
+/// the `None`-version arm: a versionless yarn declaration beside a
+/// `.yarnrc.yml` is Berry.
 fn classify_yarn(version: Option<&str>, yarnrc_present: bool) -> Pm {
-    match version.and_then(yarn_major) {
+    match version.and_then(yarn_range_major) {
         Some(major) if major >= 2 => Pm::YarnBerry,
         Some(_) => Pm::Yarn,
         // No usable version: fall back to the .yarnrc.yml signal.
@@ -993,6 +1011,16 @@ fn classify_yarn(version: Option<&str>, yarnrc_present: bool) -> Pm {
 fn yarn_major(version: &str) -> Option<u32> {
     let leading: String = version.chars().take_while(|c| c.is_ascii_digit()).collect();
     leading.parse().ok()
+}
+
+/// [`yarn_major`] for a range's lower bound: `^4.5.0`, `~4.2`, `>=2 <5` and
+/// `v4` all lead with the major once the operator is stripped. An upper-bound-
+/// only range (`<5`) or a wildcard has no major and stays `None`. The CLI's
+/// classic-vs-Berry gate for `nub pm use yarn@<spec>` too.
+pub fn yarn_range_major(version: &str) -> Option<u32> {
+    yarn_major(version.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '^' | '~' | '>' | '=' | 'v')
+    }))
 }
 
 /// Read the single `yarnPath:` key from `.yarnrc.yml` at the project root,
@@ -1162,7 +1190,7 @@ mod tests {
     fn resolve_target_yarn_path_short_circuits_to_yarn_path() {
         let dir = tmpdir("target-yarnpath");
         // A committed Berry release + a Berry pin: yarnPath must win, never
-        // Provision/BerryNoYarnPath.
+        // Provision.
         write_pkg(&dir, r#"{"packageManager":"yarn@4.2.2"}"#);
         let release = dir.join(".yarn/releases");
         std::fs::create_dir_all(&release).unwrap();
@@ -1178,10 +1206,46 @@ mod tests {
     }
 
     #[test]
-    fn resolve_target_bare_berry_without_yarn_path_is_unresolvable() {
+    fn berry_pin_without_yarn_path_provisions_from_either_field() {
         let dir = tmpdir("target-berry-bare");
-        write_pkg(&dir, r#"{"packageManager":"yarn@4.2.2"}"#);
-        assert_eq!(resolve_target(&dir), Some(PmTarget::BerryNoYarnPath));
+        write_pkg(&dir, r#"{"packageManager":"yarn@4.2.2+sha512.abc"}"#);
+        assert_eq!(
+            resolve_target(&dir),
+            Some(PmTarget::Provision(PmPin {
+                pm: Pm::YarnBerry,
+                version: Some("4.2.2+sha512.abc".to_string()),
+            }))
+        );
+
+        // devEngines is range-capable: a caret range still classifies by its
+        // major, rather than being ignored as a non-exact yarn spec.
+        let dir = tmpdir("target-berry-devengines");
+        write_pkg(
+            &dir,
+            r#"{"devEngines":{"packageManager":{"name":"yarn","version":"^4.5.0"}}}"#,
+        );
+        assert_eq!(
+            resolve_target(&dir),
+            Some(PmTarget::Provision(PmPin {
+                pm: Pm::YarnBerry,
+                version: Some("^4.5.0".to_string()),
+            }))
+        );
+
+        // A name-only yarn pin has no major; a `.yarnrc.yml` beside it (a file
+        // only Berry reads) makes it Berry, and its absence leaves classic.
+        let dir = tmpdir("target-yarn-name-only");
+        write_pkg(&dir, r#"{"devEngines":{"packageManager":{"name":"yarn"}}}"#);
+        assert_eq!(resolve_pin(&dir).unwrap().pm, Pm::Yarn);
+        std::fs::write(dir.join(".yarnrc.yml"), "nodeLinker: node-modules\n").unwrap();
+        assert_eq!(resolve_pin(&dir).unwrap().pm, Pm::YarnBerry);
+        assert_eq!(
+            resolve_target(&dir),
+            Some(PmTarget::Provision(PmPin {
+                pm: Pm::YarnBerry,
+                version: None,
+            }))
+        );
     }
 
     #[test]
@@ -1485,9 +1549,10 @@ mod tests {
             other => panic!("expected one packageManager Ignored warning, got: {other:?}"),
         }
 
-        // The same rule covers the devEngines fallback, naming its field.
+        // devEngines admits a range, but a dist-tag still can't be split into
+        // classic-vs-Berry — it warns the same way, naming its field.
         let manifest: serde_json::Value = serde_json::from_str(
-            r#"{"devEngines":{"packageManager":{"name":"yarn","version":"^4"}}}"#,
+            r#"{"devEngines":{"packageManager":{"name":"yarn","version":"stable"}}}"#,
         )
         .unwrap();
         let resolved = pin_from_manifest(&manifest);
@@ -1544,7 +1609,7 @@ mod tests {
         let dir = tmpdir("src-pkgmgr");
         write_pkg(&dir, r#"{"packageManager":"pnpm@9.1.0"}"#);
         let r = resolve_target_with_source(&dir).unwrap();
-        assert_eq!(r.source, Some(PinSource::PackageManager));
+        assert_eq!(r.source, PinSource::PackageManager);
         assert_eq!(PinSource::PackageManager.to_string(), "packageManager");
 
         // A committed yarnPath reports the yarnPath source and never reads a
@@ -1560,7 +1625,7 @@ mod tests {
         )
         .unwrap();
         let r = resolve_target_with_source(&dir).unwrap();
-        assert_eq!(r.source, Some(PinSource::YarnPath));
+        assert_eq!(r.source, PinSource::YarnPath);
         assert!(r.warnings.is_empty());
         assert_eq!(PinSource::YarnPath.to_string(), ".yarnrc.yml yarnPath");
     }
@@ -1988,8 +2053,8 @@ mod tests {
             "a committed yarnPath IS a yarn-Berry identity"
         );
 
-        // (b) A present-but-unusable spec still names its PM (and classifies
-        // yarn@^4 + no yarnrc via the version-less seam — classic here).
+        // (b) A present-but-unusable spec still names its PM (`yarn@^4` is a
+        // range the exact-only packageManager field refuses).
         let dir = tmpdir("ident-range");
         write_pkg(&dir, r#"{"packageManager":"yarn@^4"}"#);
         assert_eq!(

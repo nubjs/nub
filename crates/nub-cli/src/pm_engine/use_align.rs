@@ -8,10 +8,11 @@
 //! rather than delete-and-regenerating.
 //!
 //! The yarn asterisk: `use yarn` converts only to *classic* (v1) yarn.lock,
-//! the writer proven against real yarn. A Berry yarn.lock in place, or a
-//! graph using the `workspace:` protocol yarn v1 cannot express, is refused
-//! before any write — a pin-only half-switch would leave the declaration and
-//! the artifacts disagreeing.
+//! the writer proven against real yarn. A Berry yarn.lock under a classic pin,
+//! another manager's lockfile under a Berry pin, or a graph using the
+//! `workspace:` protocol yarn v1 cannot express, is refused before any write —
+//! a pin-only half-switch would leave the declaration and the artifacts
+//! disagreeing.
 
 use std::path::{Path, PathBuf};
 
@@ -95,9 +96,14 @@ pub(crate) enum AlignPlan {
 ///   infer which one carries the real resolution state;
 /// - a classic-yarn target over a Berry yarn.lock — same filename, but
 ///   keeping it under a classic pin would silently downgrade the format;
+/// - a Berry target (`berry`) over another manager's lockfile — no writer for
+///   Berry's format is proven against real Yarn, so nothing is converted;
 /// - a binary `bun.lockb` as the only conversion source — the engine can't
 ///   read it (text `bun.lock` is the supported format).
-pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
+///
+/// A Berry target keeps any yarn.lock: a v1 file is one Yarn 2+ migrates
+/// itself on its first install.
+pub(crate) fn plan_alignment(root: &Path, target: &str, berry: bool) -> Result<AlignPlan> {
     let present: Vec<(PathBuf, &str)> = LOCKFILES
         .iter()
         .map(|(file, pm)| (root.join(file), *pm))
@@ -119,15 +125,23 @@ pub(crate) fn plan_alignment(root: &Path, target: &str) -> Result<AlignPlan> {
         // Berry-native path. (Classic-yarn *write* fidelity is proven — see
         // the conformance yarn leg — so this is a format-preservation refusal,
         // not a write-fidelity one.)
-        if target == "yarn" && aube_lockfile::yarn::is_berry_path(&kept) {
+        if target == "yarn" && !berry && aube_lockfile::yarn::is_berry_path(&kept) {
             bail!(
-                "this project's yarn.lock is yarn Berry (2+) format — `nub pm use yarn` \
-                 pins classic yarn, and converting a Berry yarn.lock to v1 would \
-                 silently downgrade the lockfile format. Use `yarn set version` to \
-                 manage Berry, or pick another manager: nub pm use pnpm | npm | bun."
+                "this project's yarn.lock is Yarn 2+ format — pinning classic yarn \
+                 would silently downgrade it to v1. Pin a Yarn 2+ release instead \
+                 (e.g. nub pm use yarn@4), or pick another manager: \
+                 nub pm use pnpm | npm | bun."
             );
         }
         return Ok(AlignPlan::Keep { kept, remove });
+    }
+    if berry && let Some((from, _)) = foreign.first() {
+        let file = from.file_name().unwrap_or_default().to_string_lossy();
+        bail!(
+            "nub can't convert {file} to Yarn 2+'s lockfile format. Delete {file} and \
+             rerun `nub pm use`; the pinned Yarn then writes yarn.lock on its first \
+             `yarn install`, resolving versions afresh."
+        );
     }
 
     // Target's format absent: exactly one foreign family converts; more is
@@ -367,14 +381,14 @@ mod tests {
     fn plan_covers_the_spec_rows_keep_convert_fresh_and_authoritative_removal() {
         // none → Fresh.
         assert_eq!(
-            plan_alignment(&root("fresh", &[]), "pnpm").unwrap(),
+            plan_alignment(&root("fresh", &[]), "pnpm", false).unwrap(),
             AlignPlan::Fresh
         );
 
         // already the target's format → Keep, nothing removed.
         let dir = root("keep", &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")]);
         assert_eq!(
-            plan_alignment(&dir, "pnpm").unwrap(),
+            plan_alignment(&dir, "pnpm", false).unwrap(),
             AlignPlan::Keep {
                 kept: dir.join("pnpm-lock.yaml"),
                 remove: vec![]
@@ -384,7 +398,7 @@ mod tests {
         // single other format → Convert + the source removed.
         let dir = root("conv", &[("package-lock.json", "{}")]);
         assert_eq!(
-            plan_alignment(&dir, "pnpm").unwrap(),
+            plan_alignment(&dir, "pnpm", false).unwrap(),
             AlignPlan::Convert {
                 from: dir.join("package-lock.json"),
                 from_kind: LockfileKind::Npm,
@@ -402,7 +416,7 @@ mod tests {
                 ("yarn.lock", "# yarn lockfile v1\n"),
             ],
         );
-        match plan_alignment(&dir, "pnpm").unwrap() {
+        match plan_alignment(&dir, "pnpm", false).unwrap() {
             AlignPlan::Keep { kept, mut remove } => {
                 assert_eq!(kept, dir.join("pnpm-lock.yaml"));
                 remove.sort();
@@ -419,7 +433,7 @@ mod tests {
             "multi-ambig",
             &[("package-lock.json", "{}"), ("yarn.lock", "# v1\n")],
         );
-        let err = plan_alignment(&dir, "pnpm").unwrap_err().to_string();
+        let err = plan_alignment(&dir, "pnpm", false).unwrap_err().to_string();
         assert!(
             err.contains("yarn.lock")
                 && err.contains("package-lock.json")
@@ -429,7 +443,7 @@ mod tests {
     }
 
     #[test]
-    fn use_yarn_converts_to_classic_but_refuses_a_berry_target() {
+    fn use_yarn_converts_to_classic_and_berry_keeps_only_a_yarn_lock() {
         // use yarn over a foreign lockfile → Convert to *classic* yarn.lock.
         // The classic writer is proven frozen-accepted by real yarn (the gate
         // that used to refuse this is lifted — see the conformance yarn leg).
@@ -439,7 +453,7 @@ mod tests {
         );
         assert!(
             matches!(
-                plan_alignment(&dir, "yarn").unwrap(),
+                plan_alignment(&dir, "yarn", false).unwrap(),
                 AlignPlan::Convert { .. }
             ),
             "converting a foreign lockfile to classic yarn must be allowed"
@@ -449,7 +463,7 @@ mod tests {
         // use yarn with a CLASSIC yarn.lock in place → fine (declaration-only).
         let dir = root("yarn-keep", &[("yarn.lock", "# yarn lockfile v1\n")]);
         assert!(matches!(
-            plan_alignment(&dir, "yarn").unwrap(),
+            plan_alignment(&dir, "yarn", false).unwrap(),
             AlignPlan::Keep { .. }
         ));
 
@@ -459,16 +473,41 @@ mod tests {
             "yarn-berry",
             &[("yarn.lock", "__metadata:\n  version: 8\n")],
         );
-        let err = plan_alignment(&dir, "yarn").unwrap_err().to_string();
+        let err = plan_alignment(&dir, "yarn", false).unwrap_err().to_string();
         assert!(
-            err.contains("Berry"),
+            err.contains("Yarn 2+") && err.contains("yarn@4"),
             "a Berry yarn.lock under classic `use yarn` must refuse, got: {err}"
+        );
+
+        // A Berry target keeps that file, and a v1 one too (Yarn 2+ migrates it
+        // on its first install)…
+        assert!(matches!(
+            plan_alignment(&dir, "yarn", true).unwrap(),
+            AlignPlan::Keep { .. }
+        ));
+        let v1 = root("yarn-berry-v1", &[("yarn.lock", "# yarn lockfile v1\n")]);
+        assert!(matches!(
+            plan_alignment(&v1, "yarn", true).unwrap(),
+            AlignPlan::Keep { .. }
+        ));
+        // …but nothing converts *to* Berry: a foreign lockfile refuses, naming
+        // the file to delete.
+        let foreign = root(
+            "yarn-berry-conv",
+            &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")],
+        );
+        let err = plan_alignment(&foreign, "yarn", true)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("Delete pnpm-lock.yaml"),
+            "a Berry target over a foreign lockfile must refuse, got: {err}"
         );
 
         // …while converting AWAY from yarn (a read) is allowed.
         let dir = root("yarn-away", &[("yarn.lock", "# yarn lockfile v1\n")]);
         assert!(matches!(
-            plan_alignment(&dir, "pnpm").unwrap(),
+            plan_alignment(&dir, "pnpm", false).unwrap(),
             AlignPlan::Convert {
                 from_kind: LockfileKind::Yarn,
                 ..
@@ -481,14 +520,14 @@ mod tests {
         // The engine reads only the text bun.lock; a binary-only project can't
         // be a conversion source.
         let dir = root("lockb", &[("bun.lockb", "\0\0binary")]);
-        let err = plan_alignment(&dir, "pnpm").unwrap_err().to_string();
+        let err = plan_alignment(&dir, "pnpm", false).unwrap_err().to_string();
         assert!(
             err.contains("bun.lockb") && err.contains("--save-text-lockfile"),
             "the binary-lockfile refusal must carry the bun remedy, got: {err}"
         );
         // …but `use bun` keeps it: it IS bun's artifact.
         assert!(matches!(
-            plan_alignment(&dir, "bun").unwrap(),
+            plan_alignment(&dir, "bun", false).unwrap(),
             AlignPlan::Keep { .. }
         ));
     }
@@ -501,7 +540,7 @@ mod tests {
         // rules.)
         let dir = root("to-nub", &[("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")]);
         assert_eq!(
-            plan_alignment(&dir, "nub").unwrap(),
+            plan_alignment(&dir, "nub", false).unwrap(),
             AlignPlan::Rename {
                 from: dir.join("pnpm-lock.yaml"),
                 remove: vec![]
@@ -511,7 +550,7 @@ mod tests {
         // nub → pnpm: the reverse rename.
         let dir = root("to-pnpm", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
         assert_eq!(
-            plan_alignment(&dir, "pnpm").unwrap(),
+            plan_alignment(&dir, "pnpm", false).unwrap(),
             AlignPlan::Rename {
                 from: dir.join(NUB_LOCKFILE),
                 remove: vec![]
@@ -521,14 +560,14 @@ mod tests {
         // nub.lock under `use nub` is already nub's artifact: kept.
         let dir = root("keep-nub", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
         assert!(matches!(
-            plan_alignment(&dir, "nub").unwrap(),
+            plan_alignment(&dir, "nub", false).unwrap(),
             AlignPlan::Keep { .. }
         ));
 
         // nub.lock → npm is a real format change: converted, not renamed.
         let dir = root("nub-to-npm", &[(NUB_LOCKFILE, "lockfileVersion: '9.0'\n")]);
         assert!(matches!(
-            plan_alignment(&dir, "npm").unwrap(),
+            plan_alignment(&dir, "npm", false).unwrap(),
             AlignPlan::Convert {
                 from_kind: LockfileKind::Aube,
                 ..
@@ -544,7 +583,7 @@ mod tests {
                 ("package-lock.json", "{}"),
             ],
         );
-        let err = plan_alignment(&dir, "bun").unwrap_err().to_string();
+        let err = plan_alignment(&dir, "bun", false).unwrap_err().to_string();
         assert!(
             err.contains(NUB_LOCKFILE) && err.contains("package-lock.json"),
             "ambiguity must name nub.lock and package-lock.json, got: {err}"
@@ -666,7 +705,7 @@ mod tests {
         )
         .unwrap();
 
-        let plan = plan_alignment(&dir, "yarn").unwrap();
+        let plan = plan_alignment(&dir, "yarn", false).unwrap();
         assert!(matches!(plan, AlignPlan::Convert { .. }));
         let err = refuse_unconvertible(&dir, "yarn", &plan)
             .unwrap_err()
@@ -689,7 +728,7 @@ mod tests {
             "shrinkwrap",
             &[("npm-shrinkwrap.json", "{}"), ("package-lock.json", "{}")],
         );
-        match plan_alignment(&dir, "pnpm").unwrap() {
+        match plan_alignment(&dir, "pnpm", false).unwrap() {
             AlignPlan::Convert {
                 from,
                 from_kind,

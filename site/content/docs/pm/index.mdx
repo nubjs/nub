@@ -25,10 +25,6 @@ Nub reads the pin at the workspace root, in this order:
 
 Ranges belong in `devEngines`, because corepack, pnpm, and Yarn all reject them in `packageManager`. A lockfile never implies a pin. With no pin, `nub pm which` errors and points at [`nub pm use`](#nub-pm-use).
 
-<Callout title="Yarn Berry">
-Nub runs a committed Berry release directly and never provisions Berry, so a `yarn@2+` pin without a `yarnPath` release errors. Yarn classic (1.x) provisions like any other manager.
-</Callout>
-
 ## CLI
 
 The `nub pm` commands resolve, pin, and cache the package manager a project uses.
@@ -49,7 +45,10 @@ Declare the project's package manager: npm, pnpm, Yarn, or Bun. The command reso
 nub pm use pnpm           # newest pnpm (latest dist-tag)
 nub pm use npm@10         # newest 10.x
 nub pm use pnpm@9.15.4    # exact
+nub pm use yarn@4         # newest Yarn 4.x
 ```
+
+A bare `nub pm use yarn` pins classic Yarn 1, unless the project's `yarn.lock` is already in Berry (Yarn 2+) format. Then it pins the newest Berry release.
 
 Moving an npm project to pnpm:
 
@@ -77,12 +76,13 @@ The converted lockfile passes the new manager's frozen install, such as `pnpm in
 Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are.
 </Callout>
 
-Four cases stop the command before anything is written:
+Five cases stop the command before anything is written:
 
 - **Multiple foreign-format lockfiles** — remove the stale ones first.
 - **A binary `bun.lockb` source** — regenerate it as text first with `bun install --save-text-lockfile`.
-- **Running `use yarn` onto a Berry (2+) `yarn.lock`** — classic would downgrade the format; use `yarn set version`.
-- **Running `use yarn` on a graph using the `workspace:` protocol** — classic Yarn can't express it.
+- **Pinning Yarn 1 over a Berry `yarn.lock`** — classic would downgrade the format.
+- **Pinning Berry over another manager's lockfile** — Nub doesn't convert to Berry's format; delete the old lockfile and Yarn writes `yarn.lock` on its first install.
+- **Pinning Yarn 1 on a graph using the `workspace:` protocol** — classic Yarn can't express it.
 
 Running `use bun` writes the pin and lockfile but doesn't provision Bun.
 
