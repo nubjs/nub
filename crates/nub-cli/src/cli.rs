@@ -10551,6 +10551,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 &cwd,
                 !keep_dev_engines,
                 pin.pm == Pm::YarnBerry,
+                |_| Ok(()),
             )?;
             warn_if_yarn_path_shadows_pin(&cwd, &name);
             match current {
@@ -10699,12 +10700,16 @@ fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
 /// same verified file rather than re-downloading (the prior double download —
 /// hash fetch + provision's own fetch — was a real cold-cache bug, fixed
 /// 2026-06-11).
+///
+/// `check_family` sees the manager the spec resolved to before anything is
+/// fetched or written: a dist-tag (`yarn@berry`) only shows it is Berry then.
 fn resolve_provision_declare(
     name: &str,
     spec: &str,
     cwd: &Path,
     maintain_dev_engines: bool,
     berry: bool,
+    check_family: impl FnOnce(Option<nub_core::pm::Pm>) -> Result<()>,
 ) -> Result<(String, nub_core::pm::resolve::DeclaredPmWrite)> {
     use nub_core::pm::{Pm, provision, registry, resolve};
 
@@ -10787,6 +10792,7 @@ fn resolve_provision_declare(
         }
         pm => pm,
     };
+    check_family(pm)?;
 
     // ONE download serves both the pin hash and the store install: fetch + verify
     // the tarball here, compute the sha512 from the verified bytes, then hand that
@@ -10873,7 +10879,7 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
             Some(major) => major >= 2,
             None => aube_lockfile::yarn::is_berry_path(&root.join("yarn.lock")),
         };
-    let plan = use_align::plan_alignment(&root, name, berry)?;
+    let mut plan = use_align::plan_alignment(&root, name, berry)?;
 
     // Refuse a conversion the target format can't faithfully represent
     // (today: `use yarn` over a `workspace:`-protocol graph) BEFORE touching
@@ -10884,7 +10890,14 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     crate::pm_engine::engine_brand_preflight();
     use_align::refuse_unconvertible(&root, name, &plan)?;
 
-    let (version, write) = resolve_provision_declare(name, spec, cwd, true, berry)?;
+    let (version, write) = resolve_provision_declare(name, spec, cwd, true, berry, |pm| {
+        // A tag with no major (`yarn@berry`) can land on Yarn 2+: plan again
+        // for Berry so its refusals still fire before anything is written.
+        if !berry && pm == Some(nub_core::pm::Pm::YarnBerry) {
+            plan = use_align::plan_alignment(&root, name, true)?;
+        }
+        Ok(())
+    })?;
     warn_if_yarn_path_shadows_pin(cwd, name);
 
     // Step 4 — the file-by-file summary (stdout). Nothing silent.

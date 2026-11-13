@@ -1249,9 +1249,10 @@ const BERRY_TGZ_B64: &str = "H4sIAAAAAAAC/+3T0UrDMBTG8VzvKWa8UdCmcWkRvfFVahdKXU1
 const BERRY_YARN_JS: &str = "#!/usr/bin/env node\nconsole.log(\"4.18.1\");\n";
 
 /// A loopback registry serving that release as npm does: the version manifest
-/// (for `4.18.1` and for `latest`) and the tarball. Each connection closes
-/// gracefully — `init_cmd.rs`'s `serve_one` explains why an abortive close
-/// fails the client on every OS.
+/// (for `4.18.1` and for `latest`) and the tarball, plus the `yarn` package's
+/// `berry` tag, which names 2.4.3 as on the public registry. Each connection
+/// closes gracefully — `init_cmd.rs`'s `serve_one` explains why an abortive
+/// close fails the client on every OS.
 fn serve_berry_release() -> String {
     use base64::Engine as _;
     use sha2::{Digest as _, Sha512};
@@ -1273,10 +1274,23 @@ fn serve_berry_release() -> String {
         .to_string()
         .into_bytes(),
     );
+    let berry_tag = std::sync::Arc::new(
+        serde_json::json!({
+            "name": "yarn",
+            "version": "2.4.3",
+            "bin": { "yarn": "./bin/yarn.js" },
+            "dist": {
+                "tarball": format!("{base}/yarn-2.4.3.tgz"),
+                "integrity": format!("sha512-{}", b64.encode(Sha512::digest(b"unserved"))),
+            },
+        })
+        .to_string()
+        .into_bytes(),
+    );
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { break };
-            let (tgz, manifest) = (tgz.clone(), manifest.clone());
+            let (tgz, manifest, berry_tag) = (tgz.clone(), manifest.clone(), berry_tag.clone());
             std::thread::spawn(move || {
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
                 let (mut request, mut buf) = (Vec::new(), [0u8; 4096]);
@@ -1291,6 +1305,7 @@ fn serve_berry_release() -> String {
                     "/@yarnpkg/cli-dist/4.18.1" | "/@yarnpkg/cli-dist/latest" => {
                         ("200 OK", manifest.as_slice())
                     }
+                    "/yarn/berry" => ("200 OK", berry_tag.as_slice()),
                     "/cli-dist-4.18.1.tgz" => ("200 OK", tgz.as_slice()),
                     _ => ("404 Not Found", b"{}".as_slice()),
                 };
@@ -1312,7 +1327,8 @@ fn serve_berry_release() -> String {
 /// `@yarnpkg/cli-dist` with the hash Corepack writes: over the extracted
 /// `yarn.js` (Corepack downloads that single file), not over the tarball, so a
 /// Berry pin either tool wrote verifies in the other. A committed `yarnPath`
-/// outranks the new pin, so `use` says so.
+/// outranks the new pin, so `use` says so. A tag that only turns out to be
+/// Berry once resolved (`yarn@berry`) still gets Berry's lockfile refusal.
 #[test]
 fn berry_use_and_update_pin_cli_dist_with_the_corepack_hash() {
     use sha2::{Digest as _, Sha512};
@@ -1403,6 +1419,28 @@ fn berry_use_and_update_pin_cli_dist_with_the_corepack_hash() {
         corepack_pin,
         "update re-pins to latest with the same hash rule"
     );
+
+    let dir = pm_tmpdir("berry-tag");
+    let manifest = r#"{"name":"app","version":"1.0.0"}"#;
+    let npm_lock = r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"app","version":"1.0.0"}}}"#;
+    std::fs::write(dir.join("package.json"), manifest).unwrap();
+    std::fs::write(dir.join("package-lock.json"), npm_lock).unwrap();
+    std::fs::write(dir.join(".npmrc"), format!("registry={registry}/\n")).unwrap();
+    let out = spawn(&dir, &["pm", "use", "yarn@berry"]);
+    assert!(
+        out.code != 0 && out.stderr.contains("can't convert package-lock.json"),
+        "yarn@berry resolves to Berry, which refuses to convert npm's lockfile:\n{}",
+        out.combined()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("package-lock.json")).unwrap(),
+        npm_lock
+    );
+    assert!(!dir.join("yarn.lock").exists());
 }
 
 /// Brand boundary on the not-a-command front door. pnpm 10.15 delegates its
