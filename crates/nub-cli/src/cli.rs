@@ -10774,16 +10774,15 @@ fn resolve_provision_declare(
     // no-auth caller of the registry stack, 401ing against private mirrors that
     // every other path (shim provision, update) already authenticated against.
     let cfg = registry::registry_config(cwd);
-    let resolve_dist = |package: &str, spec: &str| {
-        registry::resolve_version_authed(&cfg, package, spec)
-            .map_err(|e| humanize_transport_error(e, &cfg.base))
-    };
-    let mut dist = resolve_dist(pm.map_or(name, |pm| pm.registry_package()), spec)?;
-    // The `yarn` package's `berry` dist-tag names a 2.x it published itself;
-    // a tag landing on 2+ is Berry, re-resolved where every Berry release lives.
+    let dist = match pm {
+        Some(pm) => provision::resolve_pm_dist(&cfg, pm, spec),
+        None => registry::resolve_version_authed(&cfg, name, spec),
+    }
+    .map_err(|e| humanize_transport_error(e, &cfg.base))?;
+    // The `yarn` package's `berry` dist-tag names 2.4.3, a Berry release it
+    // published itself (cli-dist never did), so that tarball is used as-is.
     let pm = match pm {
         Some(Pm::Yarn) if resolve::yarn_range_major(&dist.version).is_some_and(|m| m >= 2) => {
-            dist = resolve_dist(Pm::YarnBerry.registry_package(), &dist.version)?;
             Some(Pm::YarnBerry)
         }
         pm => pm,
@@ -14400,58 +14399,6 @@ mod tests {
     }
 
     #[test]
-    fn use_and_update_refuse_berry_pointing_at_the_committed_release_tool() {
-        // `use yarn@<2+>` refuses before anything is written — nub can't
-        // provision Berry, so a pin it can't honestly hash would be a lie.
-        let before = r#"{"packageManager":"yarn@1.22.19"}"#;
-        let dir = offline_project("use-berry", before);
-        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn@4.2.2".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("Berry") && err.contains("committed release"),
-            "use yarn@4.2.2 must refuse with the berry message, got: {err}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("package.json")).unwrap(),
-            before,
-            "a refused berry use must write nothing"
-        );
-
-        // With a yarnPath already committed, the refusal must NOT instruct the
-        // user to commit one (they did) — it points at `yarn set version`, the
-        // tool that manages the committed release.
-        let dir = offline_project("berry-has-yarnpath", r#"{"packageManager":"yarn@4.2.2"}"#);
-        std::fs::write(
-            dir.join(".yarnrc.yml"),
-            "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
-        )
-        .unwrap();
-        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn@4.9.0".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("yarn set version") && err.contains("committed release"),
-            "the with-yarnPath refusal must point at `yarn set version`, got: {err}"
-        );
-        assert!(
-            !err.contains("Commit a release"),
-            "must not instruct committing a release that already exists, got: {err}"
-        );
-
-        // `update` on a Berry-pinned project refuses too, pointing at the tool
-        // that actually manages committed releases.
-        let dir = offline_project("update-berry", r#"{"packageManager":"yarn@4.2.2"}"#);
-        let err = with_cwd(&dir, || run_pm(&["update".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("yarn set version"),
-            "update on a Berry pin must point at `yarn set version`, got: {err}"
-        );
-    }
-
-    #[test]
     fn use_args_error_naming_the_form_the_supported_set_and_the_gated_nub() {
         let dir = offline_project("pm-args", r#"{"name":"app"}"#);
         let run = |args: &[&str]| {
@@ -15119,8 +15066,8 @@ mod tests {
         let bare = pm_tmpdir("dyndef-bare");
         assert_eq!(version(Pm::Yarn, &bare), "latest");
 
-        // `yarn` over a Berry yarn.lock runs the Berry major that wrote it, not
-        // classic (which would rewrite the lockfile as v1).
+        // `yarn` over a Berry yarn.lock runs the Berry releases that write its
+        // format, not classic (which would rewrite the lockfile as v1).
         let dir = pm_tmpdir("dyndef-berry");
         std::fs::write(
             dir.join("yarn.lock"),
@@ -15128,7 +15075,10 @@ mod tests {
         )
         .unwrap();
         let (pin, _) = dynamic_default_pin(Pm::Yarn, &dir).unwrap();
-        assert_eq!((pin.pm, pin.version.as_deref()), (Pm::YarnBerry, Some("4")));
+        assert_eq!(
+            (pin.pm, pin.version.as_deref()),
+            (Pm::YarnBerry, Some(">=4.0 <4.14"))
+        );
 
         // A bun lockfile errors naming bun — nub never provisions bun.
         let dir = pm_tmpdir("dyndef-bun");
