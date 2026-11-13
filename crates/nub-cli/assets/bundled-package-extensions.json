@@ -1,7 +1,7 @@
 {
  "_source": "@nubjs/extensions",
- "_version": "1.0.0",
- "_generated": "2026-09-06",
+ "_version": "1.0.52",
+ "_generated": "2026-11-13",
  "_refresh": "node scripts/sync-package-extensions.mjs",
  "packageExtensions": {
   "@acemir/cssom@*": {
@@ -578,7 +578,7 @@
     "@edge-runtime/primitives": "*"
    }
   },
-  "@electric-sql/pglite-tools@*": {
+  "@electric-sql/pglite@*": {
    "peerDependencies": {
     "ws": "*"
    },
@@ -588,12 +588,12 @@
     }
    }
   },
-  "@electric-sql/pglite@*": {
+  "@electron-forge/core@*": {
    "peerDependencies": {
-    "ws": "*"
+    "@malept/cross-spawn-promise": "*"
    },
    "peerDependenciesMeta": {
-    "ws": {
+    "@malept/cross-spawn-promise": {
      "optional": true
     }
    }
@@ -668,6 +668,24 @@
     }
    }
   },
+  "@expo/cli@*": {
+   "peerDependencies": {
+    "@expo/fingerprint": "*",
+    "expo-atlas": "*",
+    "expo-constants": "*"
+   },
+   "peerDependenciesMeta": {
+    "@expo/fingerprint": {
+     "optional": true
+    },
+    "expo-atlas": {
+     "optional": true
+    },
+    "expo-constants": {
+     "optional": true
+    }
+   }
+  },
   "@expo/dom-webview@*": {
    "peerDependencies": {
     "expo-modules-core": "*"
@@ -694,9 +712,13 @@
   },
   "@expo/log-box@*": {
    "peerDependencies": {
+    "expo-modules-core": "*",
     "react-dom": "*"
    },
    "peerDependenciesMeta": {
+    "expo-modules-core": {
+     "optional": true
+    },
     "react-dom": {
      "optional": true
     }
@@ -704,10 +726,14 @@
   },
   "@expo/metro-config@*": {
    "peerDependencies": {
-    "babel-preset-expo": "*"
+    "babel-preset-expo": "*",
+    "expo-widgets": "*"
    },
    "peerDependenciesMeta": {
     "babel-preset-expo": {
+     "optional": true
+    },
+    "expo-widgets": {
      "optional": true
     }
    }
@@ -774,9 +800,13 @@
   },
   "@fastify/multipart@*": {
    "peerDependencies": {
+    "ajv": "*",
     "fastify": "*"
    },
    "peerDependenciesMeta": {
+    "ajv": {
+     "optional": true
+    },
     "fastify": {
      "optional": true
     }
@@ -1056,6 +1086,26 @@
     "protobufjs": "^6.8.6"
    }
   },
+  "@google-cloud/run@*": {
+   "peerDependencies": {
+    "long": "*"
+   },
+   "peerDependenciesMeta": {
+    "long": {
+     "optional": true
+    }
+   }
+  },
+  "@google-cloud/secret-manager@*": {
+   "peerDependencies": {
+    "long": "*"
+   },
+   "peerDependenciesMeta": {
+    "long": {
+     "optional": true
+    }
+   }
+  },
   "@google/gemini-cli@*": {
    "peerDependencies": {
     "bufferutil": "*",
@@ -1086,16 +1136,6 @@
    },
    "peerDependenciesMeta": {
     "@babel/core": {
-     "optional": true
-    }
-   }
-  },
-  "@graphql-codegen/plugin-helpers@*": {
-   "peerDependencies": {
-    "@graphql-tools/apollo-engine-loader": "*"
-   },
-   "peerDependenciesMeta": {
-    "@graphql-tools/apollo-engine-loader": {
      "optional": true
     }
    }
@@ -1418,55 +1458,27 @@
   },
   "@mastra/core@*": {
    "peerDependencies": {
-    "@ast-grep/napi": "*",
-    "@hono/standard-validator": "*",
-    "@standard-community/standard-json": "*",
-    "@standard-community/standard-openapi": "*",
     "@workflow/serde": "*",
     "msw": "*",
-    "openapi-types": "*",
-    "undici": "*",
-    "vitest": "*"
+    "undici": "*"
    },
    "peerDependenciesMeta": {
-    "@ast-grep/napi": {
-     "optional": true
-    },
-    "@hono/standard-validator": {
-     "optional": true
-    },
-    "@standard-community/standard-json": {
-     "optional": true
-    },
-    "@standard-community/standard-openapi": {
-     "optional": true
-    },
     "@workflow/serde": {
      "optional": true
     },
     "msw": {
      "optional": true
     },
-    "openapi-types": {
-     "optional": true
-    },
     "undici": {
-     "optional": true
-    },
-    "vitest": {
      "optional": true
     }
    }
   },
   "@mastra/schema-compat@*": {
    "peerDependencies": {
-    "ajv": "*",
     "zod-to-json-schema": "*"
    },
    "peerDependenciesMeta": {
-    "ajv": {
-     "optional": true
-    },
     "zod-to-json-schema": {
      "optional": true
     }
@@ -1498,16 +1510,6 @@
    },
    "peerDependenciesMeta": {
     "mdast": {
-     "optional": true
-    }
-   }
-  },
-  "@mendable/firecrawl-js@*": {
-   "peerDependencies": {
-    "undici": "*"
-   },
-   "peerDependenciesMeta": {
-    "undici": {
      "optional": true
     }
    }
@@ -1562,16 +1564,6 @@
     }
    }
   },
-  "@module-federation/webpack-bundler-runtime@*": {
-   "peerDependencies": {
-    "@module-federation/runtime-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "@module-federation/runtime-core": {
-     "optional": true
-    }
-   }
-  },
   "@monaco-editor/loader@*": {
    "peerDependencies": {
     "monaco-editor": "*"
@@ -1588,16 +1580,6 @@
    },
    "peerDependenciesMeta": {
     "set-cookie-parser": {
-     "optional": true
-    }
-   }
-  },
-  "@mui/material@*": {
-   "peerDependencies": {
-    "@mui/styled-engine": "*"
-   },
-   "peerDependenciesMeta": {
-    "@mui/styled-engine": {
      "optional": true
     }
    }
@@ -1658,26 +1640,6 @@
    },
    "peerDependenciesMeta": {
     "@standard-schema/spec": {
-     "optional": true
-    }
-   }
-  },
-  "@nestjs/graphql@*": {
-   "peerDependencies": {
-    "typescript": "*"
-   },
-   "peerDependenciesMeta": {
-    "typescript": {
-     "optional": true
-    }
-   }
-  },
-  "@nestjs/swagger@*": {
-   "peerDependencies": {
-    "typescript": "*"
-   },
-   "peerDependenciesMeta": {
-    "typescript": {
      "optional": true
     }
    }
@@ -1848,32 +1810,6 @@
     }
    }
   },
-  "@nuxt/kit@*": {
-   "peerDependencies": {
-    "@nuxt/schema": "*",
-    "nitropack": "*",
-    "unimport": "*",
-    "vite": "*",
-    "webpack": "*"
-   },
-   "peerDependenciesMeta": {
-    "@nuxt/schema": {
-     "optional": true
-    },
-    "nitropack": {
-     "optional": true
-    },
-    "unimport": {
-     "optional": true
-    },
-    "vite": {
-     "optional": true
-    },
-    "webpack": {
-     "optional": true
-    }
-   }
-  },
   "@nuxt/nitro-server@*": {
    "peerDependencies": {
     "@nuxt/schema": "*"
@@ -1893,7 +1829,6 @@
     "@vue/compiler-sfc": "*",
     "@vue/language-core": "*",
     "autoprefixer": "*",
-    "c12": "*",
     "chokidar": "*",
     "compatx": "*",
     "css-minimizer-webpack-plugin": "*",
@@ -1901,22 +1836,16 @@
     "esbuild": "*",
     "esbuild-loader": "*",
     "h3": "*",
-    "hookable": "*",
-    "ignore": "*",
     "mini-css-extract-plugin": "*",
-    "nitropack": "*",
-    "ofetch": "*",
     "oxc-transform": "*",
     "postcss": "*",
     "pug": "*",
     "rollup-plugin-visualizer": "*",
-    "scule": "*",
     "unctx": "*",
     "unimport": "*",
     "untyped": "*",
     "vite": "*",
     "vue": "*",
-    "vue-bundle-renderer": "*",
     "vue-loader": "*",
     "vue-router": "*",
     "webpack": "*",
@@ -1946,9 +1875,6 @@
     "autoprefixer": {
      "optional": true
     },
-    "c12": {
-     "optional": true
-    },
     "chokidar": {
      "optional": true
     },
@@ -1970,19 +1896,7 @@
     "h3": {
      "optional": true
     },
-    "hookable": {
-     "optional": true
-    },
-    "ignore": {
-     "optional": true
-    },
     "mini-css-extract-plugin": {
-     "optional": true
-    },
-    "nitropack": {
-     "optional": true
-    },
-    "ofetch": {
      "optional": true
     },
     "oxc-transform": {
@@ -1995,9 +1909,6 @@
      "optional": true
     },
     "rollup-plugin-visualizer": {
-     "optional": true
-    },
-    "scule": {
      "optional": true
     },
     "unctx": {
@@ -2013,9 +1924,6 @@
      "optional": true
     },
     "vue": {
-     "optional": true
-    },
-    "vue-bundle-renderer": {
      "optional": true
     },
     "vue-loader": {
@@ -2055,17 +1963,13 @@
   "@nuxt/vite-builder@*": {
    "peerDependencies": {
     "@babel/core": "*",
-    "@nuxt/schema": "*",
-    "unplugin": "*"
+    "@nuxt/schema": "*"
    },
    "peerDependenciesMeta": {
     "@babel/core": {
      "optional": true
     },
     "@nuxt/schema": {
-     "optional": true
-    },
-    "unplugin": {
      "optional": true
     }
    }
@@ -2178,16 +2082,6 @@
     }
    }
   },
-  "@nx/eslint@*": {
-   "peerDependencies": {
-    "@angular-devkit/core": "*"
-   },
-   "peerDependenciesMeta": {
-    "@angular-devkit/core": {
-     "optional": true
-    }
-   }
-  },
   "@nx/jest@*": {
    "peerDependencies": {
     "@jest/core": "*",
@@ -2245,30 +2139,16 @@
     "tslib": "*"
    }
   },
-  "@nx/module-federation@*": {
-   "peerDependencies": {
-    "@angular-devkit/build-angular": "*",
-    "nx": "*",
-    "typescript": "*"
-   },
-   "peerDependenciesMeta": {
-    "@angular-devkit/build-angular": {
-     "optional": true
-    },
-    "nx": {
-     "optional": true
-    },
-    "typescript": {
-     "optional": true
-    }
-   }
-  },
   "@nx/node@*": {
    "peerDependencies": {
+    "@nx/rolldown": "*",
     "@nx/vitest": "*",
     "@nx/webpack": "*"
    },
    "peerDependenciesMeta": {
+    "@nx/rolldown": {
+     "optional": true
+    },
     "@nx/vitest": {
      "optional": true
     },
@@ -2395,6 +2275,16 @@
     }
    }
   },
+  "@nx/rspack@*": {
+   "peerDependencies": {
+    "yargs": "*"
+   },
+   "peerDependenciesMeta": {
+    "yargs": {
+     "optional": true
+    }
+   }
+  },
   "@nx/storybook@*": {
    "peerDependencies": {
     "typescript": "*"
@@ -2441,14 +2331,10 @@
   },
   "@nx/webpack@*": {
    "peerDependencies": {
-    "@swc/core": "*",
     "swc-loader": "*",
     "typescript": "*"
    },
    "peerDependenciesMeta": {
-    "@swc/core": {
-     "optional": true
-    },
     "swc-loader": {
      "optional": true
     },
@@ -2588,13 +2474,17 @@
   "@openrouter/ai-sdk-provider@*": {
    "peerDependencies": {
     "@ai-sdk/provider": "*",
-    "@ai-sdk/provider-utils": "*"
+    "@ai-sdk/provider-utils": "*",
+    "undici": "*"
    },
    "peerDependenciesMeta": {
     "@ai-sdk/provider": {
      "optional": true
     },
     "@ai-sdk/provider-utils": {
+     "optional": true
+    },
+    "undici": {
      "optional": true
     }
    }
@@ -2812,13 +2702,17 @@
   "@promptbook/utils@*": {
    "peerDependencies": {
     "openai": "*",
-    "papaparse": "*"
+    "papaparse": "*",
+    "type-fest": "*"
    },
    "peerDependenciesMeta": {
     "openai": {
      "optional": true
     },
     "papaparse": {
+     "optional": true
+    },
+    "type-fest": {
      "optional": true
     }
    }
@@ -3001,13 +2895,9 @@
   },
   "@react-native/community-cli-plugin@*": {
    "peerDependencies": {
-    "@react-native-community/cli-server-api": "*",
     "react-native": "*"
    },
    "peerDependenciesMeta": {
-    "@react-native-community/cli-server-api": {
-     "optional": true
-    },
     "react-native": {
      "optional": true
     }
@@ -3023,16 +2913,6 @@
      "optional": true
     },
     "puppeteer": {
-     "optional": true
-    }
-   }
-  },
-  "@react-native/debugger-shell@*": {
-   "peerDependencies": {
-    "electron": "*"
-   },
-   "peerDependenciesMeta": {
-    "electron": {
      "optional": true
     }
    }
@@ -3159,30 +3039,6 @@
    },
    "peerDependencies": {
     "react": "^16.8.6"
-   }
-  },
-  "@redocly/config@*": {
-   "peerDependencies": {
-    "@markdoc/markdoc": "*",
-    "react": "*"
-   },
-   "peerDependenciesMeta": {
-    "@markdoc/markdoc": {
-     "optional": true
-    },
-    "react": {
-     "optional": true
-    }
-   }
-  },
-  "@redocly/openapi-core@*": {
-   "peerDependencies": {
-    "json-schema-to-ts": "*"
-   },
-   "peerDependenciesMeta": {
-    "json-schema-to-ts": {
-     "optional": true
-    }
    }
   },
   "@redocly/respect-core@*": {
@@ -3385,54 +3241,6 @@
     }
    }
   },
-  "@sentry/electron@*": {
-   "peerDependencies": {
-    "electron": "*"
-   },
-   "peerDependenciesMeta": {
-    "electron": {
-     "optional": true
-    }
-   }
-  },
-  "@sentry/react-native@*": {
-   "peerDependencies": {
-    "@expo/config": "*",
-    "@expo/env": "*",
-    "@react-navigation/native": "*",
-    "dotenv": "*",
-    "expo-router": "*",
-    "expo-updates": "*",
-    "open": "*",
-    "promise": "*"
-   },
-   "peerDependenciesMeta": {
-    "@expo/config": {
-     "optional": true
-    },
-    "@expo/env": {
-     "optional": true
-    },
-    "@react-navigation/native": {
-     "optional": true
-    },
-    "dotenv": {
-     "optional": true
-    },
-    "expo-router": {
-     "optional": true
-    },
-    "expo-updates": {
-     "optional": true
-    },
-    "open": {
-     "optional": true
-    },
-    "promise": {
-     "optional": true
-    }
-   }
-  },
   "@sentry/tracing@*": {
    "peerDependencies": {
     "@sentry/core": "*",
@@ -3449,10 +3257,10 @@
   },
   "@sentry/vercel-edge@*": {
    "peerDependencies": {
-    "@opentelemetry/sdk-trace-base": "*"
+    "@sentry/opentelemetry": "*"
    },
    "peerDependenciesMeta": {
-    "@opentelemetry/sdk-trace-base": {
+    "@sentry/opentelemetry": {
      "optional": true
     }
    }
@@ -3702,13 +3510,17 @@
   "@storybook/core@*": {
    "peerDependencies": {
     "react": "*",
-    "react-dom": "*"
+    "react-dom": "*",
+    "string_decoder": "*"
    },
    "peerDependenciesMeta": {
     "react": {
      "optional": true
     },
     "react-dom": {
+     "optional": true
+    },
+    "string_decoder": {
      "optional": true
     }
    }
@@ -3949,76 +3761,6 @@
     }
    }
   },
-  "@tanstack/devtools-event-client@*": {
-   "peerDependencies": {
-    "@tanstack/intent": "*"
-   },
-   "peerDependenciesMeta": {
-    "@tanstack/intent": {
-     "optional": true
-    }
-   }
-  },
-  "@tanstack/devtools@*": {
-   "peerDependencies": {
-    "@tanstack/intent": "*"
-   },
-   "peerDependenciesMeta": {
-    "@tanstack/intent": {
-     "optional": true
-    }
-   }
-  },
-  "@tanstack/query-devtools@*": {
-   "peerDependencies": {
-    "@kobalte/core": "*",
-    "@solid-primitives/keyed": "*",
-    "@solid-primitives/resize-observer": "*",
-    "@solid-primitives/storage": "*",
-    "@tanstack/match-sorter-utils": "*",
-    "@tanstack/query-core": "*",
-    "clsx": "*",
-    "goober": "*",
-    "solid-js": "*",
-    "solid-transition-group": "*",
-    "superjson": "*"
-   },
-   "peerDependenciesMeta": {
-    "@kobalte/core": {
-     "optional": true
-    },
-    "@solid-primitives/keyed": {
-     "optional": true
-    },
-    "@solid-primitives/resize-observer": {
-     "optional": true
-    },
-    "@solid-primitives/storage": {
-     "optional": true
-    },
-    "@tanstack/match-sorter-utils": {
-     "optional": true
-    },
-    "@tanstack/query-core": {
-     "optional": true
-    },
-    "clsx": {
-     "optional": true
-    },
-    "goober": {
-     "optional": true
-    },
-    "solid-js": {
-     "optional": true
-    },
-    "solid-transition-group": {
-     "optional": true
-    },
-    "superjson": {
-     "optional": true
-    }
-   }
-  },
   "@tanstack/react-start-rsc@*": {
    "peerDependencies": {
     "vite": "*"
@@ -4059,39 +3801,11 @@
     }
    }
   },
-  "@tanstack/start-server-core@*": {
-   "peerDependencies": {
-    "@standard-schema/spec": "*",
-    "cookie-es": "*"
-   },
-   "peerDependenciesMeta": {
-    "@standard-schema/spec": {
-     "optional": true
-    },
-    "cookie-es": {
-     "optional": true
-    }
-   }
-  },
-  "@temporalio/client@*": {
-   "peerDependencies": {
-    "protobufjs": "*"
-   },
-   "peerDependenciesMeta": {
-    "protobufjs": {
-     "optional": true
-    }
-   }
-  },
   "@temporalio/workflow@*": {
    "peerDependencies": {
-    "long": "*",
     "source-map": "*"
    },
    "peerDependenciesMeta": {
-    "long": {
-     "optional": true
-    },
     "source-map": {
      "optional": true
     }
@@ -4113,38 +3827,6 @@
    },
    "peerDependenciesMeta": {
     "prosemirror-model": {
-     "optional": true
-    }
-   }
-  },
-  "@tokenizer/inflate@*": {
-   "peerDependencies": {
-    "strtok3": "*"
-   },
-   "peerDependenciesMeta": {
-    "strtok3": {
-     "optional": true
-    }
-   }
-  },
-  "@trpc/server@*": {
-   "peerDependencies": {
-    "@tanstack/intent": "*",
-    "express": "*",
-    "next": "*",
-    "ws": "*"
-   },
-   "peerDependenciesMeta": {
-    "@tanstack/intent": {
-     "optional": true
-    },
-    "express": {
-     "optional": true
-    },
-    "next": {
-     "optional": true
-    },
-    "ws": {
      "optional": true
     }
    }
@@ -4251,10 +3933,10 @@
   },
   "@vercel/go@*": {
    "peerDependencies": {
-    "encoding": "*"
+    "execa": "*"
    },
    "peerDependenciesMeta": {
-    "encoding": {
+    "execa": {
      "optional": true
     }
    }
@@ -4379,24 +4061,10 @@
   },
   "@volar/typescript@*": {
    "peerDependencies": {
-    "@volar/language-service": "*",
     "typescript": "*"
    },
    "peerDependenciesMeta": {
-    "@volar/language-service": {
-     "optional": true
-    },
     "typescript": {
-     "optional": true
-    }
-   }
-  },
-  "@vscode/emmet-helper@*": {
-   "peerDependencies": {
-    "vscode": "*"
-   },
-   "peerDependenciesMeta": {
-    "vscode": {
      "optional": true
     }
    }
@@ -4948,6 +4616,16 @@
     }
    }
   },
+  "appium-adb@*": {
+   "peerDependencies": {
+    "@appium/types": "*"
+   },
+   "peerDependenciesMeta": {
+    "@appium/types": {
+     "optional": true
+    }
+   }
+  },
   "appium-chromedriver@*": {
    "peerDependencies": {
     "@appium/types": "*",
@@ -4992,16 +4670,6 @@
     }
    }
   },
-  "ast-v8-to-istanbul@*": {
-   "peerDependencies": {
-    "istanbul-lib-coverage": "*"
-   },
-   "peerDependenciesMeta": {
-    "istanbul-lib-coverage": {
-     "optional": true
-    }
-   }
-  },
   "astring@*": {
    "peerDependencies": {
     "source-map": "*"
@@ -5014,10 +4682,10 @@
   },
   "astro@*": {
    "peerDependencies": {
-    "typescript": "*"
+    "@astrojs/cloudflare": "*"
    },
    "peerDependenciesMeta": {
-    "typescript": {
+    "@astrojs/cloudflare": {
      "optional": true
     }
    }
@@ -5163,10 +4831,14 @@
   },
   "broccoli-persistent-filter@*": {
    "peerDependencies": {
-    "broccoli-node-api": "*"
+    "broccoli-node-api": "*",
+    "fs-merger": "*"
    },
    "peerDependenciesMeta": {
     "broccoli-node-api": {
+     "optional": true
+    },
+    "fs-merger": {
      "optional": true
     }
    }
@@ -5204,6 +4876,24 @@
   "cacheable-lookup@<4.1.2": {
    "dependencies": {
     "@types/keyv": "^3.1.1"
+   }
+  },
+  "chromatic@*": {
+   "peerDependencies": {
+    "bufferutil": "*",
+    "kerberos": "*",
+    "utf-8-validate": "*"
+   },
+   "peerDependenciesMeta": {
+    "bufferutil": {
+     "optional": true
+    },
+    "kerberos": {
+     "optional": true
+    },
+    "utf-8-validate": {
+     "optional": true
+    }
    }
   },
   "clipanion-v3-codemod@<=0.2.0": {
@@ -5548,30 +5238,6 @@
     }
    }
   },
-  "crossws@*": {
-   "peerDependencies": {
-    "@cloudflare/workers-types": "*",
-    "bun": "*"
-   },
-   "peerDependenciesMeta": {
-    "@cloudflare/workers-types": {
-     "optional": true
-    },
-    "bun": {
-     "optional": true
-    }
-   }
-  },
-  "cssnano-utils@*": {
-   "peerDependencies": {
-    "postcss-value-parser": "*"
-   },
-   "peerDependenciesMeta": {
-    "postcss-value-parser": {
-     "optional": true
-    }
-   }
-  },
   "cypress@*": {
    "peerDependencies": {
     "@angular/common": "*",
@@ -5630,11 +5296,11 @@
   },
   "dd-trace@*": {
    "peerDependencies": {
-    "@vitest/runner": "*",
+    "pnpapi": "*",
     "typescript": "*"
    },
    "peerDependenciesMeta": {
-    "@vitest/runner": {
+    "pnpapi": {
      "optional": true
     },
     "typescript": {
@@ -5762,26 +5428,6 @@
   "echarts-for-react@*": {
    "dependencies": {
     "tslib": "*"
-   }
-  },
-  "electron-log@*": {
-   "peerDependencies": {
-    "electron": "*"
-   },
-   "peerDependenciesMeta": {
-    "electron": {
-     "optional": true
-    }
-   }
-  },
-  "electron-updater@*": {
-   "peerDependencies": {
-    "electron": "*"
-   },
-   "peerDependenciesMeta": {
-    "electron": {
-     "optional": true
-    }
    }
   },
   "elkjs@*": {
@@ -5935,8 +5581,7 @@
     "@eslint/core": "*",
     "@typescript-eslint/types": "*",
     "jsdoc-type-pratt-parser": "*",
-    "json-schema": "*",
-    "typescript": "*"
+    "json-schema": "*"
    },
    "peerDependenciesMeta": {
     "@eslint/core": {
@@ -5949,9 +5594,6 @@
      "optional": true
     },
     "json-schema": {
-     "optional": true
-    },
-    "typescript": {
      "optional": true
     }
    }
@@ -5968,13 +5610,9 @@
   },
   "eslint-plugin-perfectionist@*": {
    "peerDependencies": {
-    "@typescript-eslint/types": "*",
     "typescript": "*"
    },
    "peerDependenciesMeta": {
-    "@typescript-eslint/types": {
-     "optional": true
-    },
     "typescript": {
      "optional": true
     }
@@ -5994,22 +5632,22 @@
     }
    }
   },
+  "eslint-plugin-security@*": {
+   "peerDependencies": {
+    "eslint": "*"
+   },
+   "peerDependenciesMeta": {
+    "eslint": {
+     "optional": true
+    }
+   }
+  },
   "eslint-plugin-svelte@*": {
    "peerDependencies": {
     "typescript": "*"
    },
    "peerDependenciesMeta": {
     "typescript": {
-     "optional": true
-    }
-   }
-  },
-  "eslint-plugin-tsdoc@*": {
-   "peerDependencies": {
-    "eslint": "*"
-   },
-   "peerDependenciesMeta": {
-    "eslint": {
      "optional": true
     }
    }
@@ -6058,51 +5696,17 @@
     }
    }
   },
-  "expect-webdriverio@*": {
-   "peerDependencies": {
-    "@wdio/types": "*"
-   },
-   "peerDependenciesMeta": {
-    "@wdio/types": {
-     "optional": true
-    }
-   }
-  },
-  "expo-application@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
   "expo-asset@*": {
    "peerDependencies": {
-    "@react-native/assets-registry": "*",
     "expo-modules-core": "*"
    },
    "peerDependenciesMeta": {
-    "@react-native/assets-registry": {
-     "optional": true
-    },
     "expo-modules-core": {
      "optional": true
     }
    }
   },
   "expo-auth-session@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-blur@*": {
    "peerDependencies": {
     "expo-modules-core": "*"
    },
@@ -6134,56 +5738,15 @@
   },
   "expo-constants@*": {
    "peerDependencies": {
-    "expo-manifests": "*",
-    "expo-modules-core": "*"
+    "expo-manifests": "*"
    },
    "peerDependenciesMeta": {
     "expo-manifests": {
      "optional": true
-    },
-    "expo-modules-core": {
-     "optional": true
     }
-   }
-  },
-  "expo-crypto@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
    },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-dev-menu@*": {
-   "peerDependencies": {
+   "dependencies": {
     "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-device@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-document-picker@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
    }
   },
   "expo-eas-client@*": {
@@ -6220,27 +5783,7 @@
     }
    }
   },
-  "expo-haptics@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
   "expo-image-manipulator@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-image-picker@*": {
    "peerDependencies": {
     "expo-modules-core": "*"
    },
@@ -6253,14 +5796,10 @@
   "expo-image@*": {
    "peerDependencies": {
     "expo-app-metrics": "*",
-    "expo-modules-core": "*",
     "expo-observe": "*"
    },
    "peerDependenciesMeta": {
     "expo-app-metrics": {
-     "optional": true
-    },
-    "expo-modules-core": {
      "optional": true
     },
     "expo-observe": {
@@ -6279,23 +5818,8 @@
    }
   },
   "expo-linking@*": {
-   "peerDependencies": {
+   "dependencies": {
     "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-localization@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
    }
   },
   "expo-location@*": {
@@ -6304,6 +5828,16 @@
    },
    "peerDependenciesMeta": {
     "expo-modules-core": {
+     "optional": true
+    }
+   }
+  },
+  "expo-modules-autolinking@*": {
+   "peerDependencies": {
+    "expo-modules-macros": "*"
+   },
+   "peerDependenciesMeta": {
+    "expo-modules-macros": {
      "optional": true
     }
    }
@@ -6320,49 +5854,15 @@
   },
   "expo-router@*": {
    "peerDependencies": {
-    "expo-modules-core": "*",
     "react-native-tab-view": "*"
    },
    "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    },
     "react-native-tab-view": {
      "optional": true
     }
    }
   },
-  "expo-secure-store@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-sharing@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
   "expo-splash-screen@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-system-ui@*": {
    "peerDependencies": {
     "expo-modules-core": "*"
    },
@@ -6383,16 +5883,6 @@
    }
   },
   "expo-video@*": {
-   "peerDependencies": {
-    "expo-modules-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "expo-modules-core": {
-     "optional": true
-    }
-   }
-  },
-  "expo-web-browser@*": {
    "peerDependencies": {
     "expo-modules-core": "*"
    },
@@ -6739,6 +6229,16 @@
     }
    }
   },
+  "google-gax@*": {
+   "peerDependencies": {
+    "long": "*"
+   },
+   "peerDependenciesMeta": {
+    "long": {
+     "optional": true
+    }
+   }
+  },
   "got@<11": {
    "dependencies": {
     "@types/responselike": "^1.0.0",
@@ -6972,14 +6472,10 @@
   },
   "jest-expo@*": {
    "peerDependencies": {
-    "babel-preset-expo": "*",
-    "jest": "*"
+    "babel-preset-expo": "*"
    },
    "peerDependenciesMeta": {
     "babel-preset-expo": {
-     "optional": true
-    },
-    "jest": {
      "optional": true
     }
    }
@@ -7008,12 +6504,26 @@
     }
    }
   },
+  "jest-pnp-resolver@*": {
+   "peerDependencies": {
+    "pnpapi": "*"
+   },
+   "peerDependenciesMeta": {
+    "pnpapi": {
+     "optional": true
+    }
+   }
+  },
   "jest-preset-angular@*": {
    "peerDependencies": {
-    "@jest/transform": "*"
+    "@jest/transform": "*",
+    "tslib": "*"
    },
    "peerDependenciesMeta": {
     "@jest/transform": {
+     "optional": true
+    },
+    "tslib": {
      "optional": true
     }
    }
@@ -7198,35 +6708,17 @@
   "langsmith@*": {
    "peerDependencies": {
     "@jest/globals": "*",
-    "@jest/reporters": "*",
     "@langchain/core": "*",
-    "@opentelemetry/context-async-hooks": "*",
     "vitest": "*"
    },
    "peerDependenciesMeta": {
     "@jest/globals": {
      "optional": true
     },
-    "@jest/reporters": {
-     "optional": true
-    },
     "@langchain/core": {
      "optional": true
     },
-    "@opentelemetry/context-async-hooks": {
-     "optional": true
-    },
     "vitest": {
-     "optional": true
-    }
-   }
-  },
-  "lerna@*": {
-   "peerDependencies": {
-    "chalk": "*"
-   },
-   "peerDependenciesMeta": {
-    "chalk": {
      "optional": true
     }
    }
@@ -7264,16 +6756,6 @@
    },
    "peerDependenciesMeta": {
     "puppeteer": {
-     "optional": true
-    }
-   }
-  },
-  "livekit-client@*": {
-   "peerDependencies": {
-    "@livekit/throws-transformer": "*"
-   },
-   "peerDependenciesMeta": {
-    "@livekit/throws-transformer": {
      "optional": true
     }
    }
@@ -7441,16 +6923,6 @@
     }
    }
   },
-  "metro-source-map@*": {
-   "peerDependencies": {
-    "@babel/core": "*"
-   },
-   "peerDependenciesMeta": {
-    "@babel/core": {
-     "optional": true
-    }
-   }
-  },
   "metro-transform-plugins@*": {
    "peerDependencies": {
     "@babel/types": "*"
@@ -7463,9 +6935,13 @@
   },
   "metro@*": {
    "peerDependencies": {
+    "@babel/runtime": "*",
     "metro-babel-register": "*"
    },
    "peerDependenciesMeta": {
+    "@babel/runtime": {
+     "optional": true
+    },
     "metro-babel-register": {
      "optional": true
     }
@@ -7483,19 +6959,11 @@
   },
   "miniflare@*": {
    "peerDependencies": {
-    "@cloudflare/config": "*",
-    "@cloudflare/workers-shared": "*",
     "@cloudflare/workers-types": "*",
     "@puppeteer/browsers": "*",
     "zod": "*"
    },
    "peerDependenciesMeta": {
-    "@cloudflare/config": {
-     "optional": true
-    },
-    "@cloudflare/workers-shared": {
-     "optional": true
-    },
     "@cloudflare/workers-types": {
      "optional": true
     },
@@ -7523,20 +6991,6 @@
    },
    "peerDependenciesMeta": {
     "moment": {
-     "optional": true
-    }
-   }
-  },
-  "monocart-coverage-reports@*": {
-   "peerDependencies": {
-    "bufferutil": "*",
-    "utf-8-validate": "*"
-   },
-   "peerDependenciesMeta": {
-    "bufferutil": {
-     "optional": true
-    },
-    "utf-8-validate": {
      "optional": true
     }
    }
@@ -7651,41 +7105,15 @@
    }
   },
   "nitro@*": {
-   "dependencies": {
-    "croner": "*",
-    "scule": "*",
-    "ufo": "*",
-    "unctx": "*"
-   },
    "peerDependencies": {
-    "defu": "*",
-    "destr": "*",
-    "get-port-please": "*",
-    "rendu": "*",
-    "source-map": "*",
-    "youch": "*",
-    "youch-core": "*"
+    "db0": "*",
+    "unstorage": "*"
    },
    "peerDependenciesMeta": {
-    "defu": {
+    "db0": {
      "optional": true
     },
-    "destr": {
-     "optional": true
-    },
-    "get-port-please": {
-     "optional": true
-    },
-    "rendu": {
-     "optional": true
-    },
-    "source-map": {
-     "optional": true
-    },
-    "youch": {
-     "optional": true
-    },
-    "youch-core": {
+    "unstorage": {
      "optional": true
     }
    }
@@ -7694,7 +7122,8 @@
    "peerDependencies": {
     "@cloudflare/workers-types": "*",
     "@scalar/api-reference": "*",
-    "firebase-functions": "*"
+    "firebase-functions": "*",
+    "rolldown": "*"
    },
    "peerDependenciesMeta": {
     "@cloudflare/workers-types": {
@@ -7704,6 +7133,9 @@
      "optional": true
     },
     "firebase-functions": {
+     "optional": true
+    },
+    "rolldown": {
      "optional": true
     }
    }
@@ -7762,16 +7194,6 @@
     }
    }
   },
-  "node-llama-cpp@*": {
-   "peerDependencies": {
-    "electron": "*"
-   },
-   "peerDependenciesMeta": {
-    "electron": {
-     "optional": true
-    }
-   }
-  },
   "node-pre-gyp@*": {
    "peerDependencies": {
     "node-gyp": "*",
@@ -7809,8 +7231,7 @@
     "nx-cloud": "*",
     "oxfmt": "*",
     "prettier": "*",
-    "ts-node": "*",
-    "typescript": "*"
+    "ts-node": "*"
    },
    "peerDependenciesMeta": {
     "@angular-devkit/build-angular": {
@@ -7851,15 +7272,7 @@
     },
     "ts-node": {
      "optional": true
-    },
-    "typescript": {
-     "optional": true
     }
-   }
-  },
-  "object.hasown@*": {
-   "dependencies": {
-    "call-bind": "*"
    }
   },
   "ofetch@*": {
@@ -7868,16 +7281,6 @@
    },
    "peerDependenciesMeta": {
     "undici": {
-     "optional": true
-    }
-   }
-  },
-  "openclaw@*": {
-   "peerDependencies": {
-    "esbuild": "*"
-   },
-   "peerDependenciesMeta": {
-    "esbuild": {
      "optional": true
     }
    }
@@ -7898,20 +7301,28 @@
   },
   "oxc-minify@*": {
    "peerDependencies": {
-    "@oxc-minify/binding-wasm32-wasi": "*"
+    "@oxc-minify/binding-wasm32-wasi": "*",
+    "@oxc-minify/binding-wasm32-wasip1": "*"
    },
    "peerDependenciesMeta": {
     "@oxc-minify/binding-wasm32-wasi": {
+     "optional": true
+    },
+    "@oxc-minify/binding-wasm32-wasip1": {
      "optional": true
     }
    }
   },
   "oxc-parser@*": {
    "peerDependencies": {
-    "@oxc-parser/binding-wasm32-wasi": "*"
+    "@oxc-parser/binding-wasm32-wasi": "*",
+    "@oxc-parser/binding-wasm32-wasip1": "*"
    },
    "peerDependenciesMeta": {
     "@oxc-parser/binding-wasm32-wasi": {
+     "optional": true
+    },
+    "@oxc-parser/binding-wasm32-wasip1": {
      "optional": true
     }
    }
@@ -7928,10 +7339,14 @@
   },
   "oxc-transform@*": {
    "peerDependencies": {
-    "@oxc-transform/binding-wasm32-wasi": "*"
+    "@oxc-transform/binding-wasm32-wasi": "*",
+    "@oxc-transform/binding-wasm32-wasip1": "*"
    },
    "peerDependenciesMeta": {
     "@oxc-transform/binding-wasm32-wasi": {
+     "optional": true
+    },
+    "@oxc-transform/binding-wasm32-wasip1": {
      "optional": true
     }
    }
@@ -7949,6 +7364,16 @@
   "parcel@*": {
    "peerDependenciesMeta": {
     "@parcel/core": {
+     "optional": true
+    }
+   }
+  },
+  "parse-url@*": {
+   "peerDependencies": {
+    "normalize-url": "*"
+   },
+   "peerDependenciesMeta": {
+    "normalize-url": {
      "optional": true
     }
    }
@@ -7977,7 +7402,6 @@
    "peerDependencies": {
     "bufferutil": "*",
     "chromium-bidi": "*",
-    "electron": "*",
     "kerberos": "*",
     "utf-8-validate": "*",
     "zod": "*"
@@ -7987,9 +7411,6 @@
      "optional": true
     },
     "chromium-bidi": {
-     "optional": true
-    },
-    "electron": {
      "optional": true
     },
     "kerberos": {
@@ -8021,12 +7442,32 @@
     }
    }
   },
+  "pnp-webpack-plugin@*": {
+   "peerDependencies": {
+    "pnpapi": "*"
+   },
+   "peerDependenciesMeta": {
+    "pnpapi": {
+     "optional": true
+    }
+   }
+  },
   "postcss-import@*": {
    "peerDependencies": {
     "sugarss": "*"
    },
    "peerDependenciesMeta": {
     "sugarss": {
+     "optional": true
+    }
+   }
+  },
+  "postcss-normalize-positions@*": {
+   "peerDependencies": {
+    "@csstools/css-tokenizer": "*"
+   },
+   "peerDependenciesMeta": {
+    "@csstools/css-tokenizer": {
      "optional": true
     }
    }
@@ -8307,16 +7748,6 @@
     "react": ">=16.3.0"
    }
   },
-  "react-i18next@*": {
-   "peerDependencies": {
-    "babel-plugin-macros": "*"
-   },
-   "peerDependenciesMeta": {
-    "babel-plugin-macros": {
-     "optional": true
-    }
-   }
-  },
   "react-instantsearch-core@<=6.7.0": {
    "peerDependencies": {
     "algoliasearch": ">= 3.1 < 5"
@@ -8505,7 +7936,8 @@
   "reactcss@*": {
    "peerDependencies": {
     "react": "*"
-   }
+   },
+   "peerDependenciesMeta": {}
   },
   "rebass@*": {
    "peerDependencies": {
@@ -8544,22 +7976,10 @@
   },
   "redoc@*": {
    "peerDependencies": {
-    "call-me-maybe": "*",
-    "fast-safe-stringify": "*",
-    "null": "*",
-    "yaml": "*"
+    "@redocly/markdoc": "*"
    },
    "peerDependenciesMeta": {
-    "call-me-maybe": {
-     "optional": true
-    },
-    "fast-safe-stringify": {
-     "optional": true
-    },
-    "null": {
-     "optional": true
-    },
-    "yaml": {
+    "@redocly/markdoc": {
      "optional": true
     }
    }
@@ -8689,16 +8109,6 @@
    },
    "peerDependenciesMeta": {
     "request": {
-     "optional": true
-    }
-   }
-  },
-  "rolldown-plugin-dts@*": {
-   "peerDependencies": {
-    "@vue/language-core": "*"
-   },
-   "peerDependenciesMeta": {
-    "@vue/language-core": {
      "optional": true
     }
    }
@@ -8921,15 +8331,11 @@
   },
   "storybook@*": {
    "peerDependencies": {
-    "@storybook/react": "*",
     "react": "*",
     "react-dom": "*",
     "valibot": "*"
    },
    "peerDependenciesMeta": {
-    "@storybook/react": {
-     "optional": true
-    },
     "react": {
      "optional": true
     },
@@ -8951,11 +8357,6 @@
     }
    }
   },
-  "string.prototype.codepointat@*": {
-   "dependencies": {
-    "define-properties": "*"
-   }
-  },
   "stylus-loader@*": {
    "peerDependencies": {
     "schema-utils": "*"
@@ -8968,14 +8369,10 @@
   },
   "svelte-check@*": {
    "peerDependencies": {
-    "picomatch": "*",
-    "prettier-plugin-svelte": "*"
+    "picomatch": "*"
    },
    "peerDependenciesMeta": {
     "picomatch": {
-     "optional": true
-    },
-    "prettier-plugin-svelte": {
      "optional": true
     }
    }
@@ -9046,6 +8443,16 @@
     }
    }
   },
+  "synckit@*": {
+   "peerDependencies": {
+    "pnpapi": "*"
+   },
+   "peerDependenciesMeta": {
+    "pnpapi": {
+     "optional": true
+    }
+   }
+  },
   "systeminformation@*": {
    "peerDependencies": {
     "macos-temperature-sensor": "*",
@@ -9077,16 +8484,6 @@
     "@babel/runtime": "^7.12.5"
    }
   },
-  "tmcp@*": {
-   "peerDependencies": {
-    "json-schema": "*"
-   },
-   "peerDependenciesMeta": {
-    "json-schema": {
-     "optional": true
-    }
-   }
-  },
   "toml-eslint-parser@*": {
    "peerDependencies": {
     "eslint": "*"
@@ -9098,6 +8495,16 @@
    }
   },
   "ts-node-dev@*": {
+   "peerDependencies": {
+    "pnpapi": "*"
+   },
+   "peerDependenciesMeta": {
+    "pnpapi": {
+     "optional": true
+    }
+   }
+  },
+  "ts-pnp@*": {
    "peerDependencies": {
     "pnpapi": "*"
    },
@@ -9132,22 +8539,26 @@
     "available-typed-arrays": "*"
    }
   },
-  "typed-array-byte-offset@*": {
-   "peerDependencies": {
-    "possible-typed-array-names": "*"
-   },
-   "peerDependenciesMeta": {
-    "possible-typed-array-names": {
-     "optional": true
-    }
-   }
-  },
   "typedoc-plugin-markdown@*": {
    "peerDependencies": {
     "prettier": "*"
    },
    "peerDependenciesMeta": {
     "prettier": {
+     "optional": true
+    }
+   }
+  },
+  "typeorm@*": {
+   "peerDependencies": {
+    "expo-sqlite": "*",
+    "react-native-sqlite-storage": "*"
+   },
+   "peerDependenciesMeta": {
+    "expo-sqlite": {
+     "optional": true
+    },
+    "react-native-sqlite-storage": {
      "optional": true
     }
    }
@@ -9242,14 +8653,20 @@
   },
   "unplugin@*": {
    "peerDependencies": {
-    "@rsbuild/core": "*",
     "bun": "*"
    },
    "peerDependenciesMeta": {
-    "@rsbuild/core": {
-     "optional": true
-    },
     "bun": {
+     "optional": true
+    }
+   }
+  },
+  "unrs-resolver@*": {
+   "peerDependencies": {
+    "@unrs/resolver-binding-wasm32-wasi": "*"
+   },
+   "peerDependenciesMeta": {
+    "@unrs/resolver-binding-wasm32-wasi": {
      "optional": true
     }
    }
@@ -9325,6 +8742,16 @@
    },
    "peerDependenciesMeta": {
     "@verdaccio/types": {
+     "optional": true
+    }
+   }
+  },
+  "vite-plugin-checker@*": {
+   "peerDependencies": {
+    "@vitejs/devtools-kit": "*"
+   },
+   "peerDependenciesMeta": {
+    "@vitejs/devtools-kit": {
      "optional": true
     }
    }
@@ -9411,14 +8838,10 @@
   },
   "vitest@*": {
    "peerDependencies": {
-    "@vitest/expect": "*",
     "bufferutil": "*",
     "utf-8-validate": "*"
    },
    "peerDependenciesMeta": {
-    "@vitest/expect": {
-     "optional": true
-    },
     "bufferutil": {
      "optional": true
     },
@@ -9457,16 +8880,6 @@
    },
    "peerDependenciesMeta": {
     "typescript": {
-     "optional": true
-    }
-   }
-  },
-  "vscode-languageclient@*": {
-   "peerDependencies": {
-    "vscode": "*"
-   },
-   "peerDependenciesMeta": {
-    "vscode": {
      "optional": true
     }
    }
