@@ -13,9 +13,9 @@
 //! It is a strict superset — a gate in that project fails the build if any Yarn
 //! rule is weakened — so the two layers agree wherever they overlap.
 //!
-//! **This diverges from pnpm deliberately.** For 25 packages the extra rules
+//! **This diverges from pnpm deliberately.** For 24 packages the extra rules
 //! carry a hard `dependencies` edge, so `nub install` materializes a package
-//! `pnpm install` does not; the remaining ~629 are optional peers, which install
+//! `pnpm install` does not; the remaining ~590 are optional peers, which install
 //! nothing on their own and instead repair resolution under a strict layout
 //! (Yarn PnP with no fallback, pnpm with hoisting off). `ignoreCompatibilityDb`
 //! declines the whole thing, both layers together.
