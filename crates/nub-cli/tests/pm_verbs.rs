@@ -1242,6 +1242,207 @@ fn warm_exact_re_pin_skips_the_network_while_a_range_still_resolves() {
     );
 }
 
+/// A gzipped `@yarnpkg/cli-dist@4.18.1` stand-in: `package/package.json` plus
+/// `package/bin/yarn.js` holding [`BERRY_YARN_JS`]. Inline, like `init_cmd.rs`'s
+/// fixtures, so the registry needs no test-only archive dependency.
+const BERRY_TGZ_B64: &str = "H4sIAAAAAAAC/+3T0UrDMBTG8VzvKWa8UdCmcWkRvfFVahdKXU1Ksw1k7N09q1Ok11IG/n83JzkJyUXy9VW9qRpv+q+avaUY1B/LRencWMW05tYVP+Oxb235UKplrmawS9tqkOvV/3TQoXr3+km/fFRD6DeNqbv2ft2mrb7Tez+kNgZZdZl9zKy0XluZHvRps7RlZk5D+Taydj5h0j8eFwqX6px78+vF1Nz5z4vVNP/OFuR/DtdXZpeG8fl92C9DXPtFHUOKnc+62Nx8J//2mRQDAAAAAAAAAAAAAABcok+kkaIfACgAAA==";
+const BERRY_YARN_JS: &str = "#!/usr/bin/env node\nconsole.log(\"4.18.1\");\n";
+
+/// A loopback registry serving that release as npm does: the version manifest
+/// (for `4.18.1` and for `latest`) and the tarball, plus the `yarn` package's
+/// `berry` tag, which names 2.4.3 as on the public registry. Each connection
+/// closes gracefully — `init_cmd.rs`'s `serve_one` explains why an abortive
+/// close fails the client on every OS.
+fn serve_berry_release() -> String {
+    use base64::Engine as _;
+    use sha2::{Digest as _, Sha512};
+    use std::io::{Read as _, Write as _};
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let tgz = std::sync::Arc::new(b64.decode(BERRY_TGZ_B64).unwrap());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let manifest = std::sync::Arc::new(
+        serde_json::json!({
+            "name": "@yarnpkg/cli-dist",
+            "version": "4.18.1",
+            "bin": { "yarn": "bin/yarn.js", "yarnpkg": "bin/yarn.js" },
+            "dist": {
+                "tarball": format!("{base}/cli-dist-4.18.1.tgz"),
+                "integrity": format!("sha512-{}", b64.encode(Sha512::digest(tgz.as_slice()))),
+            },
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    let berry_tag = std::sync::Arc::new(
+        serde_json::json!({
+            "name": "yarn",
+            "version": "2.4.3",
+            "bin": { "yarn": "./bin/yarn.js" },
+            "dist": {
+                "tarball": format!("{base}/yarn-2.4.3.tgz"),
+                "integrity": format!("sha512-{}", b64.encode(Sha512::digest(b"unserved"))),
+            },
+        })
+        .to_string()
+        .into_bytes(),
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let (tgz, manifest, berry_tag) = (tgz.clone(), manifest.clone(), berry_tag.clone());
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(10)));
+                let (mut request, mut buf) = (Vec::new(), [0u8; 4096]);
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let head = String::from_utf8_lossy(&request);
+                let (status, body) = match head.split_whitespace().nth(1).unwrap_or_default() {
+                    "/@yarnpkg/cli-dist/4.18.1" | "/@yarnpkg/cli-dist/latest" => {
+                        ("200 OK", manifest.as_slice())
+                    }
+                    "/yarn/berry" => ("200 OK", berry_tag.as_slice()),
+                    "/cli-dist-4.18.1.tgz" => ("200 OK", tgz.as_slice()),
+                    _ => ("404 Not Found", b"{}".as_slice()),
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(body);
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                while stream.read(&mut buf).is_ok_and(|n| n > 0) {}
+            });
+        }
+    });
+    base
+}
+
+/// `nub pm use yarn@<2+>` and `nub pm update` pin Yarn 2+ from
+/// `@yarnpkg/cli-dist` with the hash Corepack writes: over the extracted
+/// `yarn.js` (Corepack downloads that single file), not over the tarball, so a
+/// Berry pin either tool wrote verifies in the other. A committed `yarnPath`
+/// outranks the new pin, so `use` says so. A tag that only turns out to be
+/// Berry once resolved (`yarn@berry`) still gets Berry's lockfile refusal.
+#[test]
+fn berry_use_and_update_pin_cli_dist_with_the_corepack_hash() {
+    use sha2::{Digest as _, Sha512};
+    let registry = serve_berry_release();
+    let (data, cache) = (pm_tmpdir("berry-data"), pm_tmpdir("berry-cache"));
+    let spawn = |dir: &Path, args: &[&str]| -> Output {
+        let out = Command::new(nub_binary())
+            .args(args)
+            .current_dir(dir)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("NO_PROXY", "127.0.0.1")
+            .env("no_proxy", "127.0.0.1")
+            .env_remove("npm_config_registry")
+            .output()
+            .expect("failed to spawn nub");
+        Output {
+            stdout: String::from_utf8_lossy(&out.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&out.stderr).to_string(),
+            code: out.status.code().unwrap_or(-1),
+        }
+    };
+    // A Berry yarn.lock already in place keeps `use` declaration-only.
+    let project = |tag: &str, manifest: &str| {
+        let dir = pm_tmpdir(tag);
+        std::fs::write(dir.join("package.json"), manifest).unwrap();
+        std::fs::write(dir.join(".npmrc"), format!("registry={registry}/\n")).unwrap();
+        std::fs::write(dir.join("yarn.lock"), "__metadata:\n  version: 8\n").unwrap();
+        dir
+    };
+    let pinned = |dir: &Path| -> String {
+        let manifest: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap())
+                .unwrap();
+        manifest["packageManager"].as_str().unwrap().to_string()
+    };
+    let corepack_pin = format!(
+        "yarn@4.18.1+sha512.{}",
+        hex::encode(Sha512::digest(BERRY_YARN_JS))
+    );
+
+    let dir = project(
+        "berry-use",
+        r#"{"name":"app","packageManager":"yarn@1.22.19"}"#,
+    );
+    std::fs::create_dir_all(dir.join(".yarn/releases")).unwrap();
+    std::fs::write(dir.join(".yarn/releases/yarn-4.2.2.cjs"), "// committed\n").unwrap();
+    std::fs::write(
+        dir.join(".yarnrc.yml"),
+        "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
+    )
+    .unwrap();
+    let out = spawn(&dir, &["pm", "use", "yarn@4.18.1"]);
+    assert_eq!(
+        out.code,
+        0,
+        "use yarn@4.18.1 must pin Berry:\n{}",
+        out.combined()
+    );
+    assert_eq!(pinned(&dir), corepack_pin, "the pin hash covers yarn.js");
+    assert!(
+        cache
+            .join("nub/pm/yarn-berry/4.18.1/package/bin/yarn.js")
+            .is_file(),
+        "Berry is installed into its own store dir:\n{}",
+        out.combined()
+    );
+    assert!(
+        out.stderr.contains("yarnPath still points at"),
+        "a committed yarnPath shadowing the new pin must be named:\n{}",
+        out.combined()
+    );
+    out.assert_brand_clean();
+
+    let dir = project(
+        "berry-update",
+        r#"{"name":"app","packageManager":"yarn@4.17.0"}"#,
+    );
+    let out = spawn(&dir, &["pm", "update"]);
+    assert_eq!(
+        out.code,
+        0,
+        "update must move a Berry pin:\n{}",
+        out.combined()
+    );
+    assert_eq!(
+        pinned(&dir),
+        corepack_pin,
+        "update re-pins to latest with the same hash rule"
+    );
+
+    let dir = pm_tmpdir("berry-tag");
+    let manifest = r#"{"name":"app","version":"1.0.0"}"#;
+    let npm_lock = r#"{"name":"app","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"app","version":"1.0.0"}}}"#;
+    std::fs::write(dir.join("package.json"), manifest).unwrap();
+    std::fs::write(dir.join("package-lock.json"), npm_lock).unwrap();
+    std::fs::write(dir.join(".npmrc"), format!("registry={registry}/\n")).unwrap();
+    let out = spawn(&dir, &["pm", "use", "yarn@berry"]);
+    assert!(
+        out.code != 0 && out.stderr.contains("can't convert package-lock.json"),
+        "yarn@berry resolves to Berry, which refuses to convert npm's lockfile:\n{}",
+        out.combined()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("package.json")).unwrap(),
+        manifest
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("package-lock.json")).unwrap(),
+        npm_lock
+    );
+    assert!(!dir.join("yarn.lock").exists());
+}
+
 /// Brand boundary on the not-a-command front door. pnpm 10.15 delegates its
 /// own "not implemented" set (`access`/`edit`/`issues`/`profile`/`team`/…) to
 /// the npm CLI, so `pnpm access` prints `npm error code EUSAGE`. nub must NOT

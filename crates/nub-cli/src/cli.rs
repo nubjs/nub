@@ -10452,24 +10452,17 @@ fn run_pm(args: &[String]) -> Result<i32> {
             for w in &res.warnings {
                 eprintln!("{w}");
             }
+            let source = res.source;
             let (path, provenance) = match res.target {
-                PmTarget::YarnPath(release) => (
-                    release,
-                    format!(
-                        "resolved from {}",
-                        res.source.expect("YarnPath carries a source")
-                    ),
-                ),
+                PmTarget::YarnPath(release) => (release, format!("resolved from {source}")),
                 PmTarget::Provision(pin) => {
                     let store = pm_store_root()?;
-                    let source = res.source.expect("Provision carries a source");
                     let prov =
                         provision_pm_humanized(&pin, &store, &cwd, Some(&source.to_string()))?;
                     let provenance =
                         format!("resolved from {source} ({}@{})", pin.pm, prov.version);
                     (prov.bin, provenance)
                 }
-                PmTarget::BerryNoYarnPath => bail!(berry_no_yarn_path_msg()),
             };
             println!("{}", path.display());
             std::io::stdout().flush().ok();
@@ -10513,9 +10506,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
             // below would dead-end the user: they already declared it, and
             // `nub pm use <name>` can't provision it either. Name the real
             // identity and its own update path instead. Excludes nub (its own
-            // manager) and Berry (which resolves below — the YarnBerry arm owns
-            // that message). Mirrors the `which` verb's declared-unprovisionable
-            // branch.
+            // manager) and Berry (provisionable; a committed `yarnPath` with no
+            // pin field has nothing to update). Mirrors the `which` verb's
+            // declared-unprovisionable branch.
             if let Some(id) = resolve::project_pm_identity(&cwd)
                 && id.name != "nub"
                 && !id.berry
@@ -10534,13 +10527,6 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 eprintln!("{w}");
             }
             let pin = res.pin;
-            if pin.pm == Pm::YarnBerry {
-                bail!(
-                    "the pinned yarn is Berry (yarn 2+) — nub can't provision or update Berry \
-                     releases. Use `yarn set version <v>` (it manages the committed release), \
-                     or pin classic yarn@1."
-                );
-            }
             let name = pin.pm.to_string();
             let range = dev_engines_range(&cwd, &name);
             let spec = range.clone().unwrap_or_else(|| "latest".to_string());
@@ -10559,7 +10545,15 @@ fn run_pm(args: &[String]) -> Result<i32> {
             // A nub-shaped devEngines range moves with the pin (same writer as
             // `use`, onFail:"warn"); a hand-written one is the user's stated
             // constraint update floats WITHIN — never rewritten.
-            let (version, _) = resolve_provision_declare(&name, &spec, &cwd, !keep_dev_engines)?;
+            let (version, _) = resolve_provision_declare(
+                &name,
+                &spec,
+                &cwd,
+                !keep_dev_engines,
+                pin.pm == Pm::YarnBerry,
+                |_| Ok(()),
+            )?;
+            warn_if_yarn_path_shadows_pin(&cwd, &name);
             match current {
                 Some(cur) if cur == version => eprintln!(
                     "{name} is already on the newest version ({version}); pin hash refreshed."
@@ -10618,33 +10612,16 @@ fn run_pm(args: &[String]) -> Result<i32> {
     }
 }
 
-/// The shared "a bare Berry pin can't be provisioned" error: nub can't synthesize
-/// a Yarn Berry release, so the project must commit one (`.yarn/releases/*.cjs` +
-/// a `yarnPath:` in `.yarnrc.yml`) or pin classic `yarn@1`.
-fn berry_no_yarn_path_msg() -> String {
-    "yarn 2+ (Berry) requires a committed release — nub can't provision it. \
-     Commit a release (\".yarn/releases/yarn-<v>.cjs\" + \"yarnPath:\" in .yarnrc.yml), \
-     or pin classic yarn@1."
-        .to_string()
-}
-
-/// The Berry refusal for `use`/`update`, aware of whether a `yarnPath` release is
-/// ALREADY committed. Without one, the standard message applies (commit a release
-/// or pin classic). With one, that message would instruct the user to do what
-/// they already did — instead, point at `yarn set version`, the tool that
-/// actually manages the committed release nub defers to. The refusal itself
-/// stands in both cases: nub doesn't provision Berry, so it can't compute an
-/// honest `+sha512` for the pin (`package-manager-provisioning` (no such document)
-/// §What pin writes).
-fn berry_pin_refusal(cwd: &Path) -> String {
-    match nub_core::pm::resolve::committed_yarn_path(cwd) {
-        Some(release) => format!(
-            "this project runs yarn Berry from its committed release ({}) — nub doesn't \
-             provision Berry, so it can't pin a Berry version. Use `yarn set version <v>` \
-             (it updates the committed release and the packageManager field).",
+/// A committed Berry release outranks `packageManager` in resolution, and
+/// `use`/`update` never edit settings files (`.yarnrc.yml`), so a pin they just
+/// wrote is shadowed until `yarnPath` goes. Say so rather than leave it silent.
+fn warn_if_yarn_path_shadows_pin(cwd: &Path, name: &str) {
+    if let Some(release) = nub_core::pm::resolve::committed_yarn_path(cwd) {
+        eprintln!(
+            "nub: .yarnrc.yml yarnPath still points at {} — it outranks packageManager; \
+             remove it for the {name} pin to take effect.",
             release.display()
-        ),
-        None => berry_no_yarn_path_msg(),
+        );
     }
 }
 
@@ -10714,18 +10691,25 @@ fn split_pm_arg(arg: &str) -> Result<(&str, Option<&str>)> {
 ///      only the resolved record advances) and true on nub's own ^<exact>
 ///      shape, which moves with the pin.
 ///
-/// yarn >= 2 (Berry) refuses before anything is written — berry isn't the npm
-/// `yarn` tarball, so a pin nub can't provision would be a lie. A cold-cache run
-/// downloads the tarball EXACTLY ONCE: [`fetch_verify_and_hash_tarball`] fetches +
-/// verifies it for the pin hash, and [`provision::provision_pm_from_tarball`]
-/// installs from that same verified file rather than re-downloading (the prior
-/// double download — hash fetch + provision's own fetch — was a real cold-cache
-/// bug, fixed 2026-06-11).
+/// yarn 2+ (Berry) is `berry`: chosen by the caller (the current pin on
+/// `update`, the lockfile on `use`) or by a spec that names a 2+ major. It
+/// resolves from `@yarnpkg/cli-dist`, and its pin hash is over the extracted
+/// `yarn.js`, as Corepack writes it. A cold-cache run downloads the tarball
+/// EXACTLY ONCE: [`fetch_verify_and_hash_tarball`] fetches + verifies it for the
+/// pin hash, and [`provision::provision_pm_from_tarball`] installs from that
+/// same verified file rather than re-downloading (the prior double download —
+/// hash fetch + provision's own fetch — was a real cold-cache bug, fixed
+/// 2026-06-11).
+///
+/// `check_family` sees the manager the spec resolved to before anything is
+/// fetched or written: a dist-tag (`yarn@berry`) only shows it is Berry then.
 fn resolve_provision_declare(
     name: &str,
     spec: &str,
     cwd: &Path,
     maintain_dev_engines: bool,
+    berry: bool,
+    check_family: impl FnOnce(Option<nub_core::pm::Pm>) -> Result<()>,
 ) -> Result<(String, nub_core::pm::resolve::DeclaredPmWrite)> {
     use nub_core::pm::{Pm, provision, registry, resolve};
 
@@ -10739,12 +10723,19 @@ fn resolve_provision_declare(
         );
     }
 
-    // Refuse Berry before the network when the spec itself names a 2+ major
-    // (`yarn@4.2.2`): the registry's `yarn` package is classic-only, so the
-    // resolve would otherwise die with an unhelpful "no version satisfies".
-    if name == "yarn" && leading_major(spec).is_some_and(|m| m >= 2) {
-        bail!(berry_pin_refusal(cwd));
-    }
+    // Berry is a different package from classic yarn, so split before the
+    // network: a spec naming a 2+ major (`yarn@4.2.2`, `yarn@^4`) is Berry.
+    let berry =
+        name == "yarn" && (berry || resolve::yarn_range_major(spec).is_some_and(|m| m >= 2));
+    let pm = match name {
+        "npm" => Some(Pm::Npm),
+        "pnpm" => Some(Pm::Pnpm),
+        "yarn" if berry => Some(Pm::YarnBerry),
+        "yarn" => Some(Pm::Yarn),
+        // bun: declaration + lockfile only — no provisioning, no shim target.
+        "bun" => None,
+        other => unreachable!("split_pm_arg admits only npm/pnpm/yarn/bun, got {other}"),
+    };
 
     // Warm exact re-pin short-circuit: when the user asks for the EXACT version
     // the manifest already pins (with a `+sha512.<hex>` suffix nub itself wrote)
@@ -10757,19 +10748,9 @@ fn resolve_provision_declare(
     // semver (ranges/dist-tags still resolve+fetch — they might point somewhere
     // new), the committed pin must name the SAME pm@version with a hash, and the
     // store must be warm (a cold store still needs bytes to install). bun is
-    // excluded — it has no store, so its `short_circuit_pm` is `None` and the
-    // declaration-only path below handles it. yarn@>=2 already bailed above.
-    let short_circuit_pm = match name {
-        "npm" => Some(Pm::Npm),
-        "pnpm" => Some(Pm::Pnpm),
-        // yarn@>=2 (Berry) already bailed above; only yarn classic reaches here.
-        // A defensive `None` (not `unreachable!`) keeps a future gate change from
-        // turning a Berry exact into a panic — it just declines the short-circuit.
-        "yarn" if leading_major(spec).is_some_and(|m| m >= 2) => None,
-        "yarn" => Some(Pm::Yarn),
-        _ => None,
-    };
-    if let Some(pm) = short_circuit_pm {
+    // excluded — it has no store, so its `pm` is `None` and the declaration-only
+    // path below handles it.
+    if let Some(pm) = pm {
         if semver::Version::parse(spec).is_ok() {
             if let Some((decl_name, decl_version, decl_hex)) =
                 resolve::declared_package_manager_exact_hash(cwd)
@@ -10798,22 +10779,20 @@ fn resolve_provision_declare(
     // no-auth caller of the registry stack, 401ing against private mirrors that
     // every other path (shim provision, update) already authenticated against.
     let cfg = registry::registry_config(cwd);
-    let dist = registry::resolve_version_authed(&cfg, name, spec)
-        .map_err(|e| humanize_transport_error(e, &cfg.base))?;
-
-    let pm = match name {
-        "npm" => Some(Pm::Npm),
-        "pnpm" => Some(Pm::Pnpm),
-        // A tag/range only resolves to a concrete major now — re-apply the
-        // classic/Berry split on the resolved version.
-        "yarn" if leading_major(&dist.version).is_some_and(|m| m >= 2) => {
-            bail!(berry_pin_refusal(cwd))
+    let dist = match pm {
+        Some(pm) => provision::resolve_pm_dist(&cfg, pm, spec),
+        None => registry::resolve_version_authed(&cfg, name, spec),
+    }
+    .map_err(|e| humanize_transport_error(e, &cfg.base))?;
+    // The `yarn` package's `berry` dist-tag names 2.4.3, a Berry release it
+    // published itself (cli-dist never did), so that tarball is used as-is.
+    let pm = match pm {
+        Some(Pm::Yarn) if resolve::yarn_range_major(&dist.version).is_some_and(|m| m >= 2) => {
+            Some(Pm::YarnBerry)
         }
-        "yarn" => Some(Pm::Yarn),
-        // bun: declaration + lockfile only — no provisioning, no shim target.
-        "bun" => None,
-        other => unreachable!("split_pm_arg admits only npm/pnpm/yarn/bun, got {other}"),
+        pm => pm,
     };
+    check_family(pm)?;
 
     // ONE download serves both the pin hash and the store install: fetch + verify
     // the tarball here, compute the sha512 from the verified bytes, then hand that
@@ -10826,7 +10805,7 @@ fn resolve_provision_declare(
     let fetched =
         fetch_verify_and_hash_tarball(name, &dist, registry::auth_for_tarball(&cfg, &dist.tarball))
             .map_err(|e| humanize_transport_error(e, &cfg.base))?;
-    let hex = &fetched.hex;
+    let mut hex = fetched.hex.clone();
 
     if let Some(pm) = pm {
         let store = pm_store_root()?;
@@ -10835,12 +10814,24 @@ fn resolve_provision_declare(
         // check here would compare the file to its own digest. The provisioner
         // extracts from `fetched.path` and prints nothing — the `Fetching…` line
         // above is the whole install announce.
-        provision::provision_pm_from_tarball(pm, &dist, &fetched.path, &store)
+        let prov = provision::provision_pm_from_tarball(pm, &dist, &fetched.path, &store)
             .map_err(|e| humanize_transport_error(e, &cfg.base))?;
+        // Corepack's Berry pin hash is over the single-file `yarn.js` (it fetches
+        // that file, not a tarball), so a Berry pin either tool wrote verifies in
+        // the other.
+        if pm == Pm::YarnBerry {
+            hex = sha512_file_hex(&prov.bin)?;
+        }
     }
 
-    let write = resolve::write_declared_pm(name, &dist.version, hex, cwd, maintain_dev_engines)?;
+    let write = resolve::write_declared_pm(name, &dist.version, &hex, cwd, maintain_dev_engines)?;
     Ok((dist.version, write))
+}
+
+fn sha512_file_hex(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha512};
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(nub_core::pm::hex_lower(&Sha512::digest(&bytes)))
 }
 
 /// `nub pm use <pm>[@<spec>]` — the four spec'd steps, in refuse-early order:
@@ -10880,7 +10871,15 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
         return crate::pm_engine::use_nub::run_use_nub(&root, exact_pin);
     }
 
-    let plan = use_align::plan_alignment(&root, name)?;
+    // Yarn 2+ (Berry) is a separate package from classic yarn: a spec naming a
+    // 2+ major picks it, and so does a bare `use yarn` (no major) in a project
+    // whose yarn.lock is already Berry, rather than downgrading it to v1.
+    let berry = name == "yarn"
+        && match resolve::yarn_range_major(spec) {
+            Some(major) => major >= 2,
+            None => aube_lockfile::yarn::is_berry_path(&root.join("yarn.lock")),
+        };
+    let mut plan = use_align::plan_alignment(&root, name, berry)?;
 
     // Refuse a conversion the target format can't faithfully represent
     // (today: `use yarn` over a `workspace:`-protocol graph) BEFORE touching
@@ -10891,18 +10890,15 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     crate::pm_engine::engine_brand_preflight();
     use_align::refuse_unconvertible(&root, name, &plan)?;
 
-    let (version, write) = resolve_provision_declare(name, spec, cwd, true)?;
-
-    // A committed Berry release outranks packageManager in resolution —
-    // `use` never edits settings files (.yarnrc.yml), so say so out loud
-    // instead of leaving the declaration silently shadowed.
-    if let Some(release) = resolve::committed_yarn_path(cwd) {
-        eprintln!(
-            "nub: .yarnrc.yml yarnPath still points at {} — it outranks packageManager; \
-             remove it to complete the move to {name}.",
-            release.display()
-        );
-    }
+    let (version, write) = resolve_provision_declare(name, spec, cwd, true, berry, |pm| {
+        // A tag with no major (`yarn@berry`) can land on Yarn 2+: plan again
+        // for Berry so its refusals still fire before anything is written.
+        if !berry && pm == Some(nub_core::pm::Pm::YarnBerry) {
+            plan = use_align::plan_alignment(&root, name, true)?;
+        }
+        Ok(())
+    })?;
+    warn_if_yarn_path_shadows_pin(cwd, name);
 
     // Step 4 — the file-by-file summary (stdout). Nothing silent.
     println!("using {name}@{version}");
@@ -11148,14 +11144,6 @@ fn fetch_verify_and_hash_tarball(
     })
 }
 
-/// The leading numeric major of a version/spec (`4.2.2` → 4, `9` → 9; `^9` /
-/// `latest` → None). The yarn classic-vs-Berry gate: only a spec that *names* a
-/// concrete major can be classified before resolution.
-fn leading_major(spec: &str) -> Option<u32> {
-    let digits: String = spec.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
-}
-
 /// `devEngines.packageManager.version` from the root manifest, when the field
 /// names the same PM as the pin — `nub pm update`'s re-resolve constraint (a
 /// user-stated range nub reads but never writes; Axiom 3). `None` (field
@@ -11194,7 +11182,11 @@ fn list_pm_cache(pm_cache: &Path) -> Vec<String> {
         if !pm_entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
-        let pm_name = pm_entry.file_name().to_string_lossy().into_owned();
+        let mut pm_name = pm_entry.file_name().to_string_lossy().into_owned();
+        // Berry has its own store dir but prints as `yarn`, like everywhere else.
+        if pm_name == nub_core::pm::Pm::YarnBerry.store_dir() {
+            pm_name = nub_core::pm::Pm::YarnBerry.to_string();
+        }
         let Ok(versions) = std::fs::read_dir(pm_entry.path()) else {
             continue;
         };
@@ -11819,19 +11811,14 @@ fn shim_plan_at(
         ShimDecision::RefuseNubPinned { provenance } => Ok(ShimPlan::Refuse {
             message: shim_nub_refusal_message(invoked, provenance, args),
         }),
-        // A Berry pin never provisions: exec the committed `yarnPath` release
-        // under the project's Node, or surface the no-release error.
-        ShimDecision::RunPinned {
-            pm: Pm::YarnBerry, ..
-        } => {
-            let Some(PmTarget::YarnPath(release)) = target else {
-                bail!(berry_no_yarn_path_msg());
-            };
-            exec_under_project_node(cwd, release, args)
-        }
         ShimDecision::RunPinned { bin_entry, .. } => {
-            let Some(PmTarget::Provision(mut pin)) = target else {
-                unreachable!("RunPinned with a provisionable pm implies a Provision target")
+            let mut pin = match target {
+                // A committed Berry release runs as-is under the project's Node.
+                Some(PmTarget::YarnPath(release)) => {
+                    return exec_under_project_node(cwd, release, args);
+                }
+                Some(PmTarget::Provision(pin)) => pin,
+                None => unreachable!("RunPinned implies a resolved target"),
             };
             // A name-only pin (devEngines.packageManager without a version)
             // constrains the NAME, not the version — prefer the user's own
@@ -11849,10 +11836,10 @@ fn shim_plan_at(
                         env: Vec::new(),
                     });
                 }
-                pin.version = Some(
-                    lockfile_family(pin.pm, &shim_lockfile_root(cwd))
-                        .unwrap_or_else(|| "latest".to_string()),
-                );
+                pin = lockfile_family(pin.pm, &shim_lockfile_root(cwd)).unwrap_or(resolve::PmPin {
+                    pm: pin.pm,
+                    version: Some("latest".to_string()),
+                });
             }
             // Cache-first: an exact pin already in the store is zero-network.
             // The corepack-style notice (a dim, stderr-only `pnpm@9.5.0 (via nub
@@ -11890,16 +11877,13 @@ fn shim_plan_at(
             // call resolves and execs with zero network, and the install path
             // prints its own Installing…/Installed… lines when it does run.
             let root = shim_lockfile_root(cwd);
-            let (spec, why) = dynamic_default_spec(invoked.pm(), &root)?;
+            let (pin, why) = dynamic_default_pin(invoked.pm(), &root)?;
             eprintln!(
-                "nub: no {} on PATH — using {}@{spec} ({why}); one-time default, no pin written",
+                "nub: no {} on PATH — using {}@{} ({why}); one-time default, no pin written",
                 invoked.as_str(),
-                invoked.pm()
+                invoked.pm(),
+                pin.version.as_deref().unwrap_or_default()
             );
-            let pin = resolve::PmPin {
-                pm: invoked.pm(),
-                version: Some(spec),
-            };
             let prov = nub_core::pm::provision::provision_pm(&pin, &pm_store_root()?, cwd, None)?;
             let bin = shim::sibling_bin(&prov.bin, invoked.bin_entry())?;
             exec_under_project_node(cwd, bin, args)
@@ -11944,13 +11928,6 @@ fn shim_pin_state(
         },
         Some(PmTarget::Provision(pin)) => PinState::Pinned {
             pm: pin.pm,
-            provenance: field_pin_provenance(cwd),
-        },
-        // Berry pinned by field, no committed release: still a yarn pin at the
-        // name level (npm/pnpm refuse; invoked yarn surfaces the no-release
-        // error from the RunPinned arm).
-        Some(PmTarget::BerryNoYarnPath) => PinState::Pinned {
-            pm: Pm::YarnBerry,
             provenance: field_pin_provenance(cwd),
         },
     }
@@ -12046,27 +12023,36 @@ fn shim_lockfile_root(cwd: &Path) -> PathBuf {
     }
 }
 
-/// The lockfile-implied version family of `pm` itself, when the committed
-/// lockfile belongs to that PM (`lockfile_version::infer`); `None` otherwise
-/// (no lockfile, or it belongs to a different PM — bun included). The single
-/// home for the name-level family rule (Display collapses classic/Berry yarn);
-/// both the name-only-pin PATH miss in [`shim_plan_at`] and [`dynamic_default_spec`]
-/// route their "same PM → its range" branch through here so the comparison can't
-/// drift.
-fn lockfile_family(pm: nub_core::pm::Pm, root: &Path) -> Option<String> {
+/// The lockfile-implied pin for `pm`, when the committed lockfile belongs to that
+/// PM at the NAME level (`lockfile_version::infer`); `None` otherwise (no
+/// lockfile, or it belongs to a different PM — bun included). The lockfile also
+/// settles classic vs Berry yarn, so the returned pin's `pm` can differ from
+/// `pm` there. The single home for the name-level family rule: both the
+/// name-only-pin PATH miss in [`shim_plan_at`] and [`dynamic_default_pin`]
+/// route their "same PM → its range" branch through here so the comparison
+/// can't drift.
+fn lockfile_family(pm: nub_core::pm::Pm, root: &Path) -> Option<nub_core::pm::resolve::PmPin> {
     use nub_core::pm::lockfile_version::{LockfileHint, infer};
     match infer(root) {
-        Some(LockfileHint::Pm(hint)) if hint.pm.to_string() == pm.to_string() => Some(hint.range),
+        Some(LockfileHint::Pm(hint)) if hint.pm.to_string() == pm.to_string() => {
+            Some(nub_core::pm::resolve::PmPin {
+                pm: hint.pm,
+                version: Some(hint.range),
+            })
+        }
         _ => None,
     }
 }
 
-/// The dynamic-default spec for a PATH miss (decision 3): the lockfile-implied
+/// The dynamic-default pin for a PATH miss (decision 3): the lockfile-implied
 /// family of the invoked PM, else the registry `latest`; a bun lockfile errors
-/// naming bun (nub never provisions bun). Returns `(spec, why)` — `why` feeds
+/// naming bun (nub never provisions bun). Returns `(pin, why)` — `why` feeds
 /// the stderr announcement. Layers the bun-bail and the why-strings on top of
 /// the shared [`lockfile_family`] name rule.
-fn dynamic_default_spec(pm: nub_core::pm::Pm, root: &Path) -> Result<(String, String)> {
+fn dynamic_default_pin(
+    pm: nub_core::pm::Pm,
+    root: &Path,
+) -> Result<(nub_core::pm::resolve::PmPin, String)> {
     use nub_core::pm::lockfile_version::{LockfileHint, infer};
     // The bun lockfile is a hard error before the name rule: nub never
     // provisions bun, so we refuse rather than silently fall to `latest`.
@@ -12077,9 +12063,10 @@ fn dynamic_default_spec(pm: nub_core::pm::Pm, root: &Path) -> Result<(String, St
         );
     }
     Ok(match lockfile_family(pm, root) {
-        Some(range) => {
+        Some(pin) => {
+            let range = pin.version.as_deref().unwrap_or_default();
             let why = format!("the committed lockfile implies {pm} {range}");
-            (range, why)
+            (pin, why)
         }
         None => {
             // No lockfile, or one belonging to a different PM — both land on
@@ -12091,7 +12078,11 @@ fn dynamic_default_spec(pm: nub_core::pm::Pm, root: &Path) -> Result<(String, St
                 ),
                 _ => "no lockfile to infer a version from; using the registry latest".to_string(),
             };
-            ("latest".to_string(), why)
+            let pin = nub_core::pm::resolve::PmPin {
+                pm,
+                version: Some("latest".to_string()),
+            };
+            (pin, why)
         }
     })
 }
@@ -14421,58 +14412,6 @@ mod tests {
     }
 
     #[test]
-    fn use_and_update_refuse_berry_pointing_at_the_committed_release_tool() {
-        // `use yarn@<2+>` refuses before anything is written — nub can't
-        // provision Berry, so a pin it can't honestly hash would be a lie.
-        let before = r#"{"packageManager":"yarn@1.22.19"}"#;
-        let dir = offline_project("use-berry", before);
-        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn@4.2.2".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("Berry") && err.contains("committed release"),
-            "use yarn@4.2.2 must refuse with the berry message, got: {err}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("package.json")).unwrap(),
-            before,
-            "a refused berry use must write nothing"
-        );
-
-        // With a yarnPath already committed, the refusal must NOT instruct the
-        // user to commit one (they did) — it points at `yarn set version`, the
-        // tool that manages the committed release.
-        let dir = offline_project("berry-has-yarnpath", r#"{"packageManager":"yarn@4.2.2"}"#);
-        std::fs::write(
-            dir.join(".yarnrc.yml"),
-            "yarnPath: .yarn/releases/yarn-4.2.2.cjs\n",
-        )
-        .unwrap();
-        let err = with_cwd(&dir, || run_pm(&["use".into(), "yarn@4.9.0".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("yarn set version") && err.contains("committed release"),
-            "the with-yarnPath refusal must point at `yarn set version`, got: {err}"
-        );
-        assert!(
-            !err.contains("Commit a release"),
-            "must not instruct committing a release that already exists, got: {err}"
-        );
-
-        // `update` on a Berry-pinned project refuses too, pointing at the tool
-        // that actually manages committed releases.
-        let dir = offline_project("update-berry", r#"{"packageManager":"yarn@4.2.2"}"#);
-        let err = with_cwd(&dir, || run_pm(&["update".into()]))
-            .unwrap_err()
-            .to_string();
-        assert!(
-            err.contains("yarn set version"),
-            "update on a Berry pin must point at `yarn set version`, got: {err}"
-        );
-    }
-
-    #[test]
     fn use_args_error_naming_the_form_the_supported_set_and_the_gated_nub() {
         let dir = offline_project("pm-args", r#"{"name":"app"}"#);
         let run = |args: &[&str]| {
@@ -14604,11 +14543,16 @@ mod tests {
             std::fs::create_dir_all(pm.join("pnpm").join(v).join("package")).unwrap();
         }
         std::fs::create_dir_all(pm.join("pnpm").join(".tmp-9.9.9-123")).unwrap(); // work dir
+        std::fs::create_dir_all(pm.join("yarn-berry/4.18.1/package")).unwrap();
         let node = root.join("node/22.0.0");
         std::fs::create_dir_all(&node).unwrap();
 
-        // Listing is sorted `<pm>@<version>`, work dirs excluded.
-        assert_eq!(list_pm_cache(&pm), vec!["pnpm@10.0.0", "pnpm@9.1.0"]);
+        // Listing is sorted `<pm>@<version>`, work dirs excluded; Berry's own
+        // store dir lists as `yarn`.
+        assert_eq!(
+            list_pm_cache(&pm),
+            vec!["pnpm@10.0.0", "pnpm@9.1.0", "yarn@4.18.1"]
+        );
 
         // Clear removes the pm dir; the sibling node/ dir survives untouched.
         std::fs::remove_dir_all(&pm).unwrap();
@@ -15104,14 +15048,19 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_default_spec_follows_the_lockfile_and_errors_on_bun() {
+    fn dynamic_default_pin_follows_the_lockfile_and_errors_on_bun() {
         use nub_core::pm::Pm;
+        let version = |pm, dir: &Path| dynamic_default_pin(pm, dir).unwrap().0.version.unwrap();
 
         // Matching lockfile → the implied family (pnpm-lock 6.0 → pnpm 8).
         let dir = pm_tmpdir("dyndef-pnpm");
         std::fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: '6.0'\n").unwrap();
-        let (spec, why) = dynamic_default_spec(Pm::Pnpm, &dir).unwrap();
-        assert_eq!(spec, "8", "lockfileVersion 6.0 implies the pnpm 8 family");
+        let (pin, why) = dynamic_default_pin(Pm::Pnpm, &dir).unwrap();
+        assert_eq!(
+            pin.version.as_deref(),
+            Some("8"),
+            "lockfileVersion 6.0 implies the pnpm 8 family"
+        );
         assert!(
             why.contains("pnpm 8"),
             "the announcement names the family: {why}"
@@ -15119,8 +15068,8 @@ mod tests {
 
         // A DIFFERENT PM's lockfile → the invoked PM's latest, never the
         // lockfile owner's (decision 3).
-        let (spec, why) = dynamic_default_spec(Pm::Npm, &dir).unwrap();
-        assert_eq!(spec, "latest");
+        let (pin, why) = dynamic_default_pin(Pm::Npm, &dir).unwrap();
+        assert_eq!(pin.version.as_deref(), Some("latest"));
         assert!(
             why.contains("pnpm"),
             "the why names whose lockfile it actually is: {why}"
@@ -15128,14 +15077,26 @@ mod tests {
 
         // No lockfile at all → latest.
         let bare = pm_tmpdir("dyndef-bare");
-        assert_eq!(dynamic_default_spec(Pm::Yarn, &bare).unwrap().0, "latest");
+        assert_eq!(version(Pm::Yarn, &bare), "latest");
+
+        // `yarn` over a Berry yarn.lock runs the Berry releases that write its
+        // format, not classic (which would rewrite the lockfile as v1).
+        let dir = pm_tmpdir("dyndef-berry");
+        std::fs::write(
+            dir.join("yarn.lock"),
+            "__metadata:\n  version: 8\n  cacheKey: 10c0\n",
+        )
+        .unwrap();
+        let (pin, _) = dynamic_default_pin(Pm::Yarn, &dir).unwrap();
+        assert_eq!(
+            (pin.pm, pin.version.as_deref()),
+            (Pm::YarnBerry, Some(">=4.0 <4.14"))
+        );
 
         // A bun lockfile errors naming bun — nub never provisions bun.
         let dir = pm_tmpdir("dyndef-bun");
         std::fs::write(dir.join("bun.lockb"), b"\x00bun\x00").unwrap();
-        let err = dynamic_default_spec(Pm::Pnpm, &dir)
-            .unwrap_err()
-            .to_string();
+        let err = dynamic_default_pin(Pm::Pnpm, &dir).unwrap_err().to_string();
         assert!(
             err.contains("bun") && err.contains("never provisions"),
             "the bun lockfile error must name bun, got: {err}"

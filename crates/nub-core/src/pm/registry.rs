@@ -501,8 +501,8 @@ fn origin_of(url: &str) -> Option<&str> {
 
 /// Resolve `spec` against an already-fetched packument. PURE — no network, no env
 /// — so the resolution rules are unit-tested offline. Handles:
-///   - an exact `X.Y.Z` (verbatim key lookup; a typo'd version errors here rather
-///     than attempting a doomed download),
+///   - an exact `X.Y.Z` (verbatim key lookup; a typo'd version errors rather than
+///     resolving a neighbour — see [`normalize_range`]),
 ///   - a dist-tag (`latest`, `next`, …) via the `dist-tags` map,
 ///   - a semver range (`^9`, `10`, `>=9 <11`) via the highest satisfying key.
 ///
@@ -558,10 +558,16 @@ fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
 /// node-semver also allows a space between an operator and its version
 /// (`>= 9 < 10`), so an operator-only token stays attached to the token after
 /// it rather than becoming a comparator of its own.
+///
+/// A comparator with no operator means different things to the two: Cargo
+/// reads every bare version as caret, node-semver reads `9.1.0` as exactly
+/// that version and `9.1` as `9.1.x`. Those two forms get node's operator
+/// (`=`, `~`); a bare major (`10`) means `10.x` to both and stays as is.
+/// Without it an exact pin to an unpublished `9.1.0` resolved to the newest 9.x.
 pub(crate) fn normalize_range(spec: &str) -> String {
     let spec = spec.trim();
-    // Single token, or the user already comma-separated → nothing to do.
-    if spec.contains(',') || !spec.contains(char::is_whitespace) {
+    // The user already comma-separated → nothing to do.
+    if spec.contains(',') {
         return spec.to_string();
     }
     let mut comparators: Vec<String> = Vec::new();
@@ -573,7 +579,21 @@ pub(crate) fn normalize_range(spec: &str) -> String {
             _ => comparators.push(token.to_string()),
         }
     }
-    comparators.join(", ")
+    comparators
+        .iter()
+        .map(|c| {
+            let core = c.split(['-', '+']).next().unwrap_or_default();
+            let numeric = core
+                .split('.')
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+            match core.split('.').count() {
+                3 if numeric => format!("={c}"),
+                2 if numeric => format!("~{c}"),
+                _ => c.clone(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Reject a registry-declared version string before it becomes a STORE PATH
@@ -674,7 +694,11 @@ pub(crate) fn bin_subpath(meta: &Value) -> Option<PathBuf> {
         return node_bin_subpath(meta, path);
     }
     let map = bin.as_object()?;
-    let name = meta.get("name").and_then(Value::as_str);
+    // Berry's `@yarnpkg/cli-dist` names its launcher `yarn` (beside `yarnpkg`).
+    let name = match meta.get("name").and_then(Value::as_str) {
+        Some("@yarnpkg/cli-dist") => Some("yarn"),
+        other => other,
+    };
     let chosen = name
         .and_then(|n| map.get(n))
         .or_else(|| (map.len() == 1).then(|| map.values().next()).flatten())?;
@@ -1094,9 +1118,15 @@ mod tests {
         // Space-separated comparators → comma form (the only translation).
         assert_eq!(normalize_range(">=9 <11"), ">=9, <11");
         assert_eq!(normalize_range(">=9   <11"), ">=9, <11"); // runs of space collapse
-        // Single comparators and bare versions pass through untouched.
+        // Single comparators and bare majors pass through untouched.
         assert_eq!(normalize_range("^9"), "^9");
         assert_eq!(normalize_range("10"), "10");
+        // A bare full or partial version gets node-semver's meaning, not
+        // Cargo's caret: exactly `9.1.0`, and `9.1.x`.
+        assert_eq!(normalize_range("9.1.0"), "=9.1.0");
+        assert_eq!(normalize_range("9.1"), "~9.1");
+        assert_eq!(normalize_range(">=9 9.1.0"), ">=9, =9.1.0");
+        assert_eq!(normalize_range("9.1.x"), "9.1.x");
         // An already-comma'd spec is left alone (no double-comma).
         assert_eq!(normalize_range(">=9, <11"), ">=9, <11");
     }
@@ -1104,9 +1134,15 @@ mod tests {
     #[test]
     fn nonexistent_exact_and_unsatisfiable_range_error() {
         let p = packument();
-        // An exact version that isn't published isn't a valid range either, so it
-        // surfaces the range parse/resolution error rather than a doomed fetch.
-        assert!(resolve_dist(&p, "9.9.9").is_err());
+        // An unpublished exact version errors rather than resolving the newest
+        // release above it (9.5.0 here, under Cargo's caret reading of `9.1.0`),
+        // and a partial version stays within its minor.
+        for spec in ["9.1.0", "9.9.9", "9.4"] {
+            assert!(
+                resolve_dist(&p, spec).is_err(),
+                "{spec} must not resolve to a different published version"
+            );
+        }
         // A range with no matching key errors naming the spec.
         let err = resolve_dist(&p, ">=20").unwrap_err().to_string();
         assert!(
@@ -1130,6 +1166,15 @@ mod tests {
         // 8.0.0's bin map has two entries; the one keyed by the package name wins.
         let dist = resolve_dist(&packument(), "8.0.0").unwrap();
         assert_eq!(dist.bin_subpath, PathBuf::from("bin/pnpm.cjs"));
+
+        // Berry's package isn't named for its launcher; `yarn` is picked out of
+        // the two-entry map. (The published map points both entries at
+        // `bin/yarn.js`; distinct paths here show which entry won.)
+        let berry = serde_json::json!({
+            "name": "@yarnpkg/cli-dist",
+            "bin": { "yarn": "bin/yarn.js", "yarnpkg": "bin/yarnpkg.js" }
+        });
+        assert_eq!(bin_subpath(&berry), Some(PathBuf::from("bin/yarn.js")));
     }
 
     #[test]

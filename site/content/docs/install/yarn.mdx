@@ -80,7 +80,7 @@ Imported 2 packages from yarn.lock to pnpm-lock.yaml
 ```
 
 <Callout title="Pinning Yarn is a separate command">
-The [meta-manager](/docs/pm) command `nub pm use yarn` pins classic (v1) Yarn in `packageManager` and converts a foreign lockfile to a classic `yarn.lock`. It refuses an existing Berry `yarn.lock`, a binary `bun.lockb`, and a `workspace:`-protocol graph. The install engine on this page never rewrites an existing `yarn.lock`.
+The [meta-manager](/docs/pm#nub-pm-use) command `nub pm use yarn` pins Yarn in `packageManager`. Pinning classic Yarn converts a foreign lockfile to a classic `yarn.lock`, while pinning Berry (`nub pm use yarn@4`) keeps an existing `yarn.lock` and converts nothing. The install engine on this page never rewrites an existing `yarn.lock`.
 </Callout>
 
 ## `.yarnrc.yml`

@@ -37,8 +37,8 @@ pub enum LockfileHint {
 }
 
 /// Infer the PM-version family from the lockfile at `root` (no walk-up; pass
-/// the workspace root). `None` means no recognized lockfile, an unknown format
-/// version, or a yarn Berry lockfile (see [`yarn_hint`]). The first lockfile in
+/// the workspace root). `None` means no recognized lockfile or an unknown pnpm
+/// or npm format version (see [`yarn_hint`] for yarn's). The first lockfile in
 /// precedence order (pnpm, yarn, bun, npm — same order as the CLI's
 /// `detect_package_manager`) claims the project: a parse miss on it returns
 /// `None` rather than falling through to a stray sibling lockfile, which would
@@ -121,15 +121,31 @@ fn npm_range(json: &str) -> Option<String> {
     Some(range.to_string())
 }
 
-/// `yarn.lock` content → classic hint, or `None` for Berry. Classic always
-/// writes the `# yarn lockfile v1` header comment; Berry writes a top-level
-/// `__metadata:` block instead. Berry returns `None` because nub doesn't
-/// provision Berry — it defers to the committed `yarnPath` release, and a bare
-/// Berry project is `BerryNoYarnPath` (see
-/// `package-manager-provisioning` (no such document) §"yarn-berry specifics");
-/// the caller's fall-through (PATH yarn, or the Berry error) handles it.
+/// `yarn.lock` content → yarn family. Classic always writes the
+/// `# yarn lockfile v1` header comment; Berry writes a top-level `__metadata:`
+/// block with its `LOCKFILE_VERSION` and cache key. A Yarn that writes the file
+/// differently rewrites it, which fails `yarn install --immutable`, so each
+/// format maps to exactly the releases that write it. Formats only change at a
+/// minor, and one changed without a `version` bump: 4.1 started prefixing each
+/// checksum with the cache key (`10c0/…`).
+///
+/// | `version` | `cacheKey` | checksums | written by |
+/// |---|---|---|---|
+/// | 4 | 5–7 | | 2.x (the 2.3–2.4 cache key is 7) |
+/// | 4 | 8 | | 3.0 |
+/// | 5 | 8 | | 3.1 |
+/// | 6 | 8 | | 3.2–3.8 |
+/// | 8 | `10c…` | bare | 4.0 |
+/// | 8 | `10c…` | prefixed | 4.1–4.13 |
+/// | 9 | `10c…` | prefixed | 4.14 |
+/// | 10 | `10c…` | prefixed | 4.15–4.18 |
+///
+/// The newest range stops at the next unreleased minor, which may change the
+/// format again: extend it once that release's `LOCKFILE_VERSION` is checked.
+/// An unknown or missing version takes the newest Berry.
 fn yarn_hint(content: &str) -> Option<PmVersionHint> {
-    for line in content.lines() {
+    let mut lines = content.lines();
+    while let Some(line) = lines.next() {
         if line.trim() == "# yarn lockfile v1" {
             return Some(PmVersionHint {
                 pm: Pm::Yarn,
@@ -137,7 +153,46 @@ fn yarn_hint(content: &str) -> Option<PmVersionHint> {
             });
         }
         if line.starts_with("__metadata:") {
-            return None; // Berry — not provisioned.
+            let metadata: Vec<&str> = lines
+                .take_while(|l| l.starts_with(char::is_whitespace))
+                .map(str::trim)
+                .collect();
+            // `cacheKey` is a number through Yarn 3 and `10c0`-shaped in Yarn 4;
+            // only its leading cache version tells releases apart.
+            let field = |key: &str| {
+                let value = metadata.iter().find_map(|l| l.strip_prefix(key))?;
+                super::resolve::strip_yaml_value(value)
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<u32>()
+                    .ok()
+            };
+            let range = match (field("version:"), field("cacheKey:")) {
+                (Some(4), Some(7)) => ">=2.3 <3",
+                (Some(4), Some(8)) => "~3.0",
+                (Some(..=4), _) => "2",
+                (Some(5), _) => "~3.1",
+                (Some(6), _) => ">=3.2 <4",
+                (Some(8), _) => {
+                    // No dependency, no checksum: 4.0 and 4.1+ write the same file.
+                    match content
+                        .lines()
+                        .find_map(|l| l.trim().strip_prefix("checksum:"))
+                    {
+                        Some(sum) if !sum.contains('/') => "~4.0",
+                        Some(_) => ">=4.1 <4.14",
+                        None => ">=4.0 <4.14",
+                    }
+                }
+                (Some(9), _) => "~4.14",
+                (Some(10), _) => ">=4.15 <4.19",
+                _ => ">=2",
+            };
+            return Some(PmVersionHint {
+                pm: Pm::YarnBerry,
+                range: range.to_string(),
+            });
         }
     }
     None // Neither marker (empty/truncated file): no honest inference.
@@ -222,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn yarn_classic_header_infers_v1_and_berry_metadata_infers_nothing() {
+    fn yarn_classic_header_infers_v1_and_berry_metadata_infers_its_major() {
         let classic = "# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.\n\
                        # yarn lockfile v1\n\n\nleft-pad@^1.0.0:\n  version \"1.3.0\"\n";
         assert_eq!(
@@ -233,10 +288,43 @@ mod tests {
             })
         );
 
-        // Berry → None: nub doesn't provision Berry (committed yarnPath or bust).
-        let berry = "# This file is generated by running \"yarn install\".\n\n\
-                     __metadata:\n  version: 8\n  cacheKey: 10c0\n";
-        assert_eq!(yarn_hint(berry), None);
+        let berry = |metadata: &str| {
+            yarn_hint(&format!(
+                "# This file is generated by running \"yarn install\".\n\n\
+                 __metadata:\n{metadata}\n\"left-pad@npm:^1.0.0\":\n  version: 1.3.0\n  \
+                 checksum: 10c0/3fb59c76\n"
+            ))
+        };
+        // Each format maps to only the releases that write it: a newer minor
+        // in the same major rewrites the metadata and fails an immutable install.
+        for (metadata, range) in [
+            ("  version: 4\n  cacheKey: 7", ">=2.3 <3"),
+            ("  version: 4\n  cacheKey: 8", "~3.0"),
+            ("  version: 5\n  cacheKey: 8", "~3.1"),
+            ("  version: 6\n  cacheKey: 8", ">=3.2 <4"),
+            // The key order is Berry's own, but the scan doesn't depend on it.
+            ("  cacheKey: 10c0\n  version: 8", ">=4.1 <4.14"),
+            ("  version: 9\n  cacheKey: 10c0", "~4.14"),
+            ("  version: 10\n  cacheKey: 10c0", ">=4.15 <4.19"),
+            // A format newer than any known release: the newest Berry, never
+            // classic (which would rewrite the file as v1).
+            ("  version: 99", ">=2"),
+        ] {
+            assert_eq!(
+                berry(metadata),
+                Some(PmVersionHint {
+                    pm: Pm::YarnBerry,
+                    range: range.to_string()
+                }),
+                "{metadata:?}"
+            );
+        }
+        // Format 8 alone spans 4.0–4.13; 4.0 is the release whose checksums
+        // carry no cache-key prefix.
+        let bare = "__metadata:\n  version: 8\n  cacheKey: 10c0\n\n\"left-pad@npm:1.3.0\":\n  checksum: 3fb59c76\n";
+        assert_eq!(yarn_hint(bare).unwrap().range, "~4.0");
+        let no_deps = "__metadata:\n  version: 8\n  cacheKey: 10c0\n";
+        assert_eq!(yarn_hint(no_deps).unwrap().range, ">=4.0 <4.14");
         assert_eq!(yarn_hint(""), None, "empty yarn.lock: no honest inference");
     }
 
