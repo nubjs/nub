@@ -1,0 +1,122 @@
+---
+title: "Nub 0.11.0"
+description: Nub preloads TypeScript 7.1 content mappers, saves type packages on add, installs one copy of a package where pnpm does, and removes the canary channel.
+author: The Nub Team
+date: 2026-11-12
+---
+
+Nub 0.11.0 preloads TypeScript 7.1 content mappers, adds `nub add --save-types`, installs one copy of a package where pnpm does, and removes the canary channel. It also fixes a broad set of correctness bugs in the runtime, the package manager and `nub run`.
+
+<NubIntro />
+
+## Content mappers
+
+TypeScript 7.1's [content mappers](https://github.com/microsoft/typescript-go/pull/4712) type-check other file types, but TypeScript never runs them. Nub now preloads the `./register` export of every package the tsconfig lists, with no `--import` and no `nub.jsonc` entry ([#1082](https://github.com/nubjs/nub/pull/1082)).
+
+```jsonc title="tsconfig.json"
+{
+  // ...
+  "contentMappers": [
+    { "package": "motherload", "extensions": [".toml", ".yaml"] }
+  ]
+}
+```
+
+```ts title="main.ts"
+import config from "./config.yaml"; // loaded by motherload/register
+```
+
+`extends` and `references` are followed, the longest extension answers first, and an entry's `options` reach its register in `CONTENT_MAPPER_OPTIONS`.
+
+## Type packages on add
+
+`nub add --save-types <pkg>` also saves the DefinitelyTyped package to `devDependencies` for each registry package whose installed version ships no types, picking the newest `@types` release on that package's major ([#1110](https://github.com/nubjs/nub/pull/1110), fixes [#1016](https://github.com/nubjs/nub/issues/1016)).
+
+```sh
+nub add --save-types express
+```
+
+A package with no `@types` release, or only a deprecated stub, prints `skipped @types/<name>: <reason>`. An `@types` entry the project already lists is kept.
+
+## Breaking changes
+
+- - **The canary channel is gone.** `nub upgrade --canary` and `--stable` are unknown flags, and `install.sh` and `install.ps1` no longer accept `canary`. An existing canary install keeps working, and `nub upgrade --stable` still moves it to a release ([#1102](https://github.com/nubjs/nub/pull/1102))
+- - **A lockfile missing a required entry is broken.** `nub ci` and `nub install --frozen-lockfile` exit 16 and name the entry, and a plain `nub install` repairs it. Both exited 0 and left a tree that could not load ([#1105](https://github.com/nubjs/nub/pull/1105))
+- - **`nub add <pkg>@<tag>` saves a prerelease exact**, as pnpm does. A stable tag still saves with `^` ([#1096](https://github.com/nubjs/nub/pull/1096))
+- - **Some lockfiles change once.** A local or URL package keeps its peers on its key, and a tree that held duplicate copies of a package collapses them on its next fresh resolve ([#1093](https://github.com/nubjs/nub/pull/1093), [#1089](https://github.com/nubjs/nub/pull/1089))
+- - **The first install after upgrading relinks once**, because the dependency scan's cache was reset ([#1113](https://github.com/nubjs/nub/pull/1113))
+
+## Bug fixes
+
+### Package manager
+
+| PR | What changed |
+| --- | --- |
+| [#1089](https://github.com/nubjs/nub/pull/1089) | **Duplicate copies.** A package installs once where pnpm installs it once. The Nuxt starter went from 17 duplicate copies to 0, and workspace members no longer get two module objects for one package. |
+| [#1093](https://github.com/nubjs/nub/pull/1093) | **Peers of local packages.** A `file:`, URL or git package consumed with two sets of peers loads the right peer after a lockfile install. One entry served both consumers, with no error. |
+| [#1081](https://github.com/nubjs/nub/pull/1081) | **Edges to workspace members.** A registry package whose peer a workspace member satisfies links to the member, as pnpm writes it. The install succeeded and `require` failed with `Cannot find module`. |
+| [#1072](https://github.com/nubjs/nub/pull/1072), [#1109](https://github.com/nubjs/nub/pull/1109), fixes [#1108](https://github.com/nubjs/nub/issues/1108) | **Local packages from a pnpm lockfile.** `file:` and `link:` packages read back from `nub.lock` or `pnpm-lock.yaml` get the graph a fresh resolve gives. A root peer pinned to a tarball URL no longer fails every resolve after the first with `ERR_NUB_BLOCKED_EXOTIC_SUBDEP`. |
+| [#1111](https://github.com/nubjs/nub/pull/1111) | **Failed adds.** A failed `nub add` or `nub install <pkg>` restores `package.json`, the lockfiles and the workspace yaml. The new dependency stayed in `package.json`. |
+| [#1091](https://github.com/nubjs/nub/pull/1091), refs [#1087](https://github.com/nubjs/nub/issues/1087) | **`--fix-lockfile`.** `nub install --fix-lockfile` rewrites the lockfile, keeping its pinned versions. It repairs a `package-lock.json` written with the dev-optional flags 0.10.0 fixed. |
+| [#1112](https://github.com/nubjs/nub/pull/1112) | **`bun.lock` local paths.** A member's `file:` directory and a hoisted tarball install under `nub ci` and `--frozen-lockfile`, and a `bun.lock` Nub writes spells local packages as bun does, which `bun install --frozen-lockfile` accepts. |
+| [#1121](https://github.com/nubjs/nub/pull/1121), fixes [#1120](https://github.com/nubjs/nub/issues/1120) | **Filtered installs.** `nub install --prod`, `--dev` and `--no-optional` download only the dependencies they link. Every package in the graph was downloaded into the store. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`pnpm-workspace.yaml`.** A `# comment` after a pattern or after `packages:`, and the flow form `packages: ['a/*', 'b/*']`, are read. Each found no workspace members. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **Repeated `.npmrc` keys.** The last `script-shell`, `ignore-scripts` or `node-mirror:release` wins, as in npm. The first won. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`packageManager` paths.** A version that walks out of its package, such as `pnpm@../npm/10.9.0`, fails to resolve. It installed the other package into the store under the requested name. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`nub pm use`.** `nub pm use nub` keeps `catalog` and `nohoist` from an object-form `workspaces`, and `nub pm use pnpm` keeps the other keys under `workspaces`. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **Dependency scan.** `require('buffer/')`, a directory with a `main`, a template-literal `require` and `import x = require()` resolve as Node resolves them, and `.d.mts` and `.d.cts` files are not scanned. |
+
+### Running files
+
+| PR | What changed |
+| --- | --- |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **Node's permission model.** `nub --permission --allow-addons app.js` starts, `--permission` in `NODE_OPTIONS` gets the same `--allow-addons` message as the flag, and the last of `--permission` and `--no-permission` decides, as in Node. The first two failed with `ERR_ACCESS_DENIED` on Nub's own runtime. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **Flags after the entry.** `nub app.js --permission` passes `--permission` to the program. It was read as Node's own flag. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`.env`.** `PASSWORD="foo\$bar"` loads `foo$bar`, and a variable that refers back to itself, such as `A=x$A`, expands that reference to nothing. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **Node version pins.** `engines.node: "20.11.0 \|\| 22.1.0"` matches those exact versions, a `v` in a range is read as node-semver reads it, and a `#` comment in `.nvmrc` or `.node-version` is read as nvm reads it. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **tsx as a loader.** `--import tsx` runs on Node 24.11.1, 25.0 and 25.1. It failed with `ERR_METHOD_NOT_IMPLEMENTED`. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **Native addon.** A panic in Nub's addon throws a catchable error. It aborted the process. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`nub node install`.** With Nub's `node` shim on `PATH`, it installs only the version asked for. |
+| [#1117](https://github.com/nubjs/nub/pull/1117) | **Home-folder projects.** A stray `package.json` and `node_modules` in the home folder no longer hang every run under it on macOS. The pre-run dependency scan skips a project rooted at the home folder and gives up after 500 ms. |
+| [#1107](https://github.com/nubjs/nub/pull/1107) | **Windows scripts.** Script bodies and lifecycle scripts keep backslashes in environment values, so `os.homedir()` reads `C:\Users\…` inside a script and Nub's preload is injected once. |
+
+### Runtime
+
+| PR | What changed |
+| --- | --- |
+| [#1097](https://github.com/nubjs/nub/pull/1097) | **Node 27 language changes.** `Intl.Locale#variants` is polyfilled and typed in `@nubjs/types`. `Iterator.zip` and `Iterator.zipKeyed` close every input on an early return or a failure. On Node 27, its native versions of these are used. A Test262 subset now runs against the polyfills. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **Polyfill shapes.** `Promise.withResolvers`, `Iterator.from`, `URL.parse`, the `Uint8Array` base64 methods and 23 others have no `prototype` and refuse `new`, like the builtins. `Float16Array` and `URLPattern` are non-enumerable, `RegExp.escape` escapes lone surrogates, and `ErrorEvent` before Node 25 reads its fields from prototype getters. |
+| [#1099](https://github.com/nubjs/nub/pull/1099) | **Replaced built-ins.** Nub's runtime helpers keep working after application code replaces a global or a prototype method. |
+| [#1098](https://github.com/nubjs/nub/pull/1098) | **`--experimental-web-worker`.** With Node's own `Worker` global enabled, Nub keeps it and its worker scope instead of installing its polyfill. |
+| [#1106](https://github.com/nubjs/nub/pull/1106), [#1113](https://github.com/nubjs/nub/pull/1113) | **`Worker`.** `nub --max-old-space-size=4096 app.mjs` no longer makes the global `Worker` throw `ERR_WORKER_INVALID_EXEC_ARGV`, and a worker that throws `null` delivers its `error` event. |
+| [#1101](https://github.com/nubjs/nub/pull/1101) | **A foreign `registerHooks`.** On Node 22.15 to 24.11, an `--import` that calls `module.registerHooks`, such as `amaro/strip`, no longer makes every CommonJS file throw `ERR_INVALID_RETURN_PROPERTY_VALUE`. |
+
+### Scripts and config
+
+| PR | What changed |
+| --- | --- |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`nub exec -r`.** A shell-script bin runs in each member's directory. It ran in the invoking directory. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`--sequential`, `--parallel`.** A regex run outside any workspace runs that package's scripts, as pnpm 9, 10 and 11 do. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **Flags before the verb.** `--cwd=<dir>`, `--if-present` and `--reporter-hide-prefix` are accepted there. They failed with `node: bad option`. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`PATH`.** An entry that is not UTF-8 no longer leaves scripts with an empty `PATH`. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`nub config set`.** Writes through a symlinked `nub.jsonc` instead of replacing the link. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`nub init`.** Skips `git init` in a subfolder of a repository. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`nubx` prompt.** Answering **Never** beside `dlx.consent: "prompt"` stays off. |
+
+### Install and upgrade
+
+| PR | What changed |
+| --- | --- |
+| [#1102](https://github.com/nubjs/nub/pull/1102) | **Canary channel.** Removed, with `nub upgrade --canary` and `--stable`. `nub-version: canary` in the `setup-node` action no longer installs. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`install.sh`.** Detects musl through `ldd` on systems other than Alpine. |
+| [#1113](https://github.com/nubjs/nub/pull/1113) | **`setup-node` action.** Reads `.tool-versions` and an absolute `package.json` as a `node-version-file`, and `.nvmrc` and `.node-version` as nvm reads them. |
+
+### Security
+
+Nub's Rust network clients reject the compromised eMudhra certificate chains ([#1019](https://github.com/nubjs/nub/pull/1019)). JavaScript running under Node still relies on Node's own certificate store.
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.11.0) list every change in this release.
+
+## Get started
+
+<GetStarted />
