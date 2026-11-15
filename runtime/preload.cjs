@@ -223,12 +223,15 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   // not leaked onto the user's stderr — on every entry above nub is forced onto
   // module.register (require(esm) off, foreign-loader composition, or registerHooks
   // absent outright), so the user has no action to take. See registerLoaderWorker.
-  common.installAsyncTierCjsSource();
-  common.registerLoaderWorker(
-    "./preload-async-hooks.mjs",
-    pathToFileURL(__filename).href,
-    common.loaderWorkerOptions(),
-  );
+  // Entry 1 on Node 28+ has no `module.register` either; see loaderWorkerAvailable.
+  if (common.loaderWorkerAvailable()) {
+    common.installAsyncTierCjsSource();
+    common.registerLoaderWorker(
+      "./preload-async-hooks.mjs",
+      pathToFileURL(__filename).href,
+      common.loaderWorkerOptions(),
+    );
+  }
 
   // Entry 3 only. `module.register` is ESM-loader-only, so without this a
   // `require('./x.ts')` on 23.0–23.4 reaches Node raw and dies on the first type

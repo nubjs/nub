@@ -28,6 +28,7 @@ try {
   require("./loader-platform.cjs").ensureAddonEnv(require);
   const { pathToFileURL } = require("node:url");
   const common = require("./preload-common.cjs");
+  if (!common.loaderWorkerAvailable()) return;
   common.installAsyncTierCjsSource();
   common.registerLoaderWorker(
     "./preload-async-hooks.mjs",

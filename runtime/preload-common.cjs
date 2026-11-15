@@ -587,6 +587,21 @@ function registerLoaderWorker(specifier, parentURL, options) {
   }
 }
 
+// Node 28 removed `module.register()` (nodejs/node#67090). The only loader-worker
+// path still reachable there is the one `--no-experimental-require-module` forces,
+// where transform-core cannot load synchronously either, so no hook surface is left
+// at all. Run unhooked rather than die at startup on `register is not a function`:
+// Node's own type stripping still runs erasable TypeScript.
+function loaderWorkerAvailable() {
+  if (typeof module_.register === "function") return true;
+  process.stderr.write(
+    "Nub: TypeScript transforms and resolution hooks are off. " +
+      "--no-experimental-require-module disables require(esm), and this Node has no " +
+      "module.register() to fall back to. Node's built-in type stripping still runs.\n",
+  );
+  return false;
+}
+
 // Is this error Node's "an async `module.register` loader cannot service a SYNCHRONOUS
 // resolve/load" stub? On Node 22.15–~24.11 the async-hooks proxy's `resolveSync`/
 // `loadSync` are stubs that unconditionally `throw new ERR_METHOD_NOT_IMPLEMENTED(...)`.
@@ -2654,6 +2669,7 @@ module.exports = {
   installWatchReporting,
   installAsyncTierCjsSource,
   registerLoaderWorker,
+  loaderWorkerAvailable,
   makeHooks,
   shouldAutoAsyncTierAtPreload,
   // Consumed by the standalone loader entry (loader-entry.mjs), whose foreign-

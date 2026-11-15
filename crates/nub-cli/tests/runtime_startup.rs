@@ -54,3 +54,48 @@ fn load_hook_survives_a_deleted_array_iterator() {
         r#"{"ok":true}"#
     );
 }
+
+/// With require(esm) off and no `module.register()`, both `--require` entries start
+/// the program unhooked instead of dying in the preload. That is Node 28 under
+/// `--no-experimental-require-module`: the flag leaves the preload no synchronous way
+/// to load its transform core, and the loader worker it fell back to is gone. A shim
+/// required first deletes `register` so any Node in the matrix can stand in for 28.
+#[test]
+fn preloads_start_unhooked_without_require_esm_or_module_register() {
+    let major: u32 = node_version().split('.').next().unwrap().parse().unwrap();
+    if major < 22 {
+        eprintln!("skipping: Node {major} predates --no-experimental-require-module");
+        return;
+    }
+    let entry = repo_file("tests/fixtures/runtime-startup/entry.js");
+    for preload in ["runtime/preload.cjs", "runtime/loader-register.cjs"] {
+        let output = Command::new("node")
+            .arg("--no-experimental-require-module")
+            .arg("--require")
+            .arg(repo_file(
+                "tests/fixtures/runtime-startup/no-module-register.cjs",
+            ))
+            .arg("--require")
+            .arg(repo_file(preload))
+            .arg(&entry)
+            .current_dir(entry.parent().unwrap())
+            .env_remove("NODE_OPTIONS")
+            .output()
+            .expect("failed to spawn node");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.success(),
+            "{preload}: node exited {:?}\nstderr: {stderr}",
+            output.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            r#"{"ok":true}"#,
+            "{preload}: stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("no module.register() to fall back to"),
+            "{preload}: the unhooked start must say why; stderr: {stderr}"
+        );
+    }
+}
