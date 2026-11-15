@@ -1,7 +1,7 @@
 {
  "_source": "@nubjs/extensions",
- "_version": "1.0.52",
- "_generated": "2026-11-13",
+ "_version": "1.0.54",
+ "_generated": "2026-11-15",
  "_refresh": "node scripts/sync-package-extensions.mjs",
  "packageExtensions": {
   "@acemir/cssom@*": {
@@ -194,16 +194,22 @@
     "graphql": "^14.2.1 || ^15.0.0"
    }
   },
-  "@appium/types@*": {
+  "@appium/base-driver@*": {
    "peerDependencies": {
-    "express": "*",
-    "ws": "*"
+    "express": "*"
    },
    "peerDependenciesMeta": {
     "express": {
      "optional": true
-    },
-    "ws": {
+    }
+   }
+  },
+  "@appium/docutils@*": {
+   "peerDependencies": {
+    "@appium/types": "*"
+   },
+   "peerDependenciesMeta": {
+    "@appium/types": {
      "optional": true
     }
    }
@@ -5738,15 +5744,16 @@
   },
   "expo-constants@*": {
    "peerDependencies": {
-    "expo-manifests": "*"
+    "expo-manifests": "*",
+    "expo-modules-core": "*"
    },
    "peerDependenciesMeta": {
     "expo-manifests": {
      "optional": true
+    },
+    "expo-modules-core": {
+     "optional": true
     }
-   },
-   "dependencies": {
-    "expo-modules-core": "*"
    }
   },
   "expo-eas-client@*": {
@@ -5818,8 +5825,13 @@
    }
   },
   "expo-linking@*": {
-   "dependencies": {
+   "peerDependencies": {
     "expo-modules-core": "*"
+   },
+   "peerDependenciesMeta": {
+    "expo-modules-core": {
+     "optional": true
+    }
    }
   },
   "expo-location@*": {
