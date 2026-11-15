@@ -10,7 +10,14 @@
       "removeWhen": "The snapshot moves to a released Node that carries the flag; the snapshot then records it directly and this entry is inert."
     }
   },
-  "removed": {},
+  "removed": {
+    "--experimental-loader": {
+      "firstSeen": "v28.0.0-nightly20261115c07db8c5c1",
+      "vetted": "2026-11-15",
+      "why": "Node removed module.register(), --experimental-loader and its --loader alias for 28 only (nodejs/node#67090, marked dont-land on 22, 24 and 26). feature_matrix.rs never injects the flag and the spawn path emits neither form; the runtime only scans for it in a user's own flags, and on 28 Node itself rejects it as a bad option.",
+      "removeWhen": "The snapshot moves to a released Node 28; the snapshot then simply lacks the flag and this entry is inert."
+    }
+  },
   "changed": {
     "--experimental-repl-await": {
       "from": "kBoolean, env=0",
