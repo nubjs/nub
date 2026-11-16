@@ -1,0 +1,7819 @@
+{
+  "timestamp": "2026-11-16T06:18:09.540Z",
+  "github_releases": [
+    {
+      "tag": "v0.11.1",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 40
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 51
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 49
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 214
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 195
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 22
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 45
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "packslip.sigstore.json",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.11.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 243
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 62
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 30
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 31
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 15
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 423
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 384
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 41
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 19
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3287
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 3123
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 42
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 13
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 364
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 89
+        },
+        {
+          "name": "packslip.sigstore.json",
+          "download_count": 22
+        }
+      ]
+    },
+    {
+      "tag": "v0.10.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 721
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 399
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 70
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 24
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 8
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 105
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 48
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 1416
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 1087
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 88
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 56
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 13185
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 12464
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 141
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 91
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 974
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 736
+        },
+        {
+          "name": "packslip.sigstore.json",
+          "download_count": 22
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.7",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1062
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 601
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 91
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 28
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 8
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 9
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 383
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 260
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 8845
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8391
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 274
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 235
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 44348
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 39994
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 302
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 244
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 1715
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1352
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.6",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1808
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 471
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 78
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 12
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 10
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 8
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 11
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 279
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 177
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 5631
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5260
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 223
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 191
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 48412
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 44715
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 122
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 26
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 1697
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 716
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.5",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 614
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 152
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 32
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 86
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 83
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3677
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 2889
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 120
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 93
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 14580
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 12889
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 112
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 32
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 601
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 330
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.3",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1136
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 826
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 40
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 29
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 8
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 249
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 258
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 5129
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5097
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 279
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 284
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 15013
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 14919
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 125
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 48
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 840
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 568
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.2",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 470
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 192
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 40
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 38
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 10
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 146
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 140
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 784
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 753
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 155
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 150
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 7784
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 7532
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 110
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 15
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 557
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 250
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.1",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 159
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 67
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 56
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 51
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 40
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 30
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 62
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 58
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 1802
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 1771
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 99
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 225
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 50
+        }
+      ]
+    },
+    {
+      "tag": "v0.9.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 616
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 335
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 34
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 17
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 106
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 105
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 660
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 636
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 127
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 122
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 22146
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 21905
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 118
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 687
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 354
+        }
+      ]
+    },
+    {
+      "tag": "v0.8.3",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 854
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 369
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 51
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 30
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 117
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 115
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 18
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 16
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 12
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 100
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 101
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 546
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 112
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 119
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 104
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 5361
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 3782
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 121
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 26
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 459
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 212
+        }
+      ]
+    },
+    {
+      "tag": "v0.8.2",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 187
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 63
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 63
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 17
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 124
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 33
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 19
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.8.1",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 189
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 22
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 22
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 6
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 416
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 336
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 16
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 8
+        }
+      ]
+    },
+    {
+      "tag": "v0.8.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 161
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 10
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-darwin-arm64",
+          "download_count": 34
+        },
+        {
+          "name": "nub-launcher-darwin-arm64.sha256",
+          "download_count": 34
+        },
+        {
+          "name": "nub-launcher-darwin-x64",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-darwin-x64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-arm64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64",
+          "download_count": 5
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-linux-x64-musl.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-linux-x64.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-arm64.exe.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe",
+          "download_count": 4
+        },
+        {
+          "name": "nub-launcher-win32-x64.exe.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 124
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 46
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.5",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1000
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 354
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 161
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 82
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 358
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 361
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 220
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 79
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 444
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 427
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 18581
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 17464
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 187
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 39
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 1633
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 276
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.4",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 114
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 44
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 23
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 24
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 28
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 28
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 31
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 24
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 6965
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6942
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 134
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 241
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 18
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.3",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 84
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 23
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 14
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 43
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 33
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 113
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 169
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 17
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.2",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 179
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 49
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 25
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 26
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 30
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 90
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 19
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 29
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 29
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3560
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 3483
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 137
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 256
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 23
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.1",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 203
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 45
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 20
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 39
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 34
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 20
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 17
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 39
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 35
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 175
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 142
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 138
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 241
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 40
+        }
+      ]
+    },
+    {
+      "tag": "v0.7.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 168
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 88
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 14
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 23
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 21
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 13
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3803
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 2242
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 139
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 12
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 227
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 57
+        }
+      ]
+    },
+    {
+      "tag": "v0.6.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1147
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 556
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 78
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 24
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 284
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 260
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 74
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 44
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 310
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 282
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 17388
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 15678
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 148
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 13
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 992
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 496
+        }
+      ]
+    },
+    {
+      "tag": "v0.5.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 267
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 81
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 36
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 24
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 55
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 50
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 36
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 26
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 102
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 97
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 5179
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 283
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 155
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 20
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 288
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 53
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.13",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1696
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1431
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 44
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 103
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 97
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 46
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 23
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 111
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 109
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 576
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 485
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 156
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 314
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 46
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.12",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 164
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 37
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 43
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 43
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 47
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 44
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 211
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 77
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 156
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 259
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 12
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.11",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 354
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 108
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 27
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 14
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 23
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 23
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 27
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 19
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 34
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 31
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 1080
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 874
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 190
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 273
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 13
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.10",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 17
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 161
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 172
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.9",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 167
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 178
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.8",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 112
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 21
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 17
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 21
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 136
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 20
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 164
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 225
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 7
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.7",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 209
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 70
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 10
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 77
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 71
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 242
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 88
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 160
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 262
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 9
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.6",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 21
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 707
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 706
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 15
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.5",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 419
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 294
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 852
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 808
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 55
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.4",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 50
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 14
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 25
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 12
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 26
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.3",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 17
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 16
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 13
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.2",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 72
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 14
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 47
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 28
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 56
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.1",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 23
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 13
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 23
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 5
+        }
+      ]
+    },
+    {
+      "tag": "v0.4.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 19
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 15
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 12
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.3.1",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 19
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 34
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 26
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 11
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.3.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 20
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 13
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.10",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 408
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 67
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 43
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 61
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 37
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 446
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 194
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 195
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 8
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.9",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 114
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 15
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 16
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 17
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 89
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 20
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 55
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 5
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.8",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 27
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 49
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 19
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.7",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 39
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 12
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 10
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 122
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 106
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 34
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.6",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 38
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 28
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 23
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.5",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 102
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 17
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 21
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 93
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 64
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 24
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 90
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 10
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.4",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 14
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 10
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.3",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 65
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 27
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 25
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 163
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 108
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 18
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 5
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.2",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 92
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 16
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 14
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 60
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 13
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 26
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 5
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.1",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 33
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 10
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 10
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.2.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 171
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 67
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 13
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 1961
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 1719
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 653
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 507
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 66
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 5
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.14",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 132
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 35
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 19
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 17
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 16
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 181
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 17
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 18
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 1244
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 26
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 12
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 41
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 12
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.13",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 40
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 24
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 35
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 38
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 38
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 58
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 33
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 48
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 4
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.12",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 26
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 69
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 122
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 19
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.11",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 22
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3975
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 2435
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 21
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.10",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 87
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 18
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 12
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 12
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 208
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 122
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 50
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.9",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 37
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 30
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 19
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.8",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 10
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 9
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.7",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 13
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 16
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 8
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.6",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 41
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 8
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 63
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 27
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 23
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 5
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.5",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 47
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 8
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 52
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 20
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.4",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 57
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 44
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 11
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 25
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.3",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 18
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 11
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.2",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 19
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 16
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.1",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 269
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 215
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 278
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 246
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 28
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.1.0",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 9
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 7
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 160
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 175
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.49",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.48",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.47",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 69
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 68
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 78
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 78
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 74
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 74
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.46",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.45",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.44",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.42",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.41",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 1
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 1
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.40",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.39",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.38",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 1
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.37",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.36",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.35",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.34",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.33",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.32",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.31",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.30",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.29",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.28",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 1
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.27",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 0
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 1
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 1
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.26",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.25",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.24",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.23",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.22",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.21",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 3
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.20",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.19",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 1
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.18",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.17",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.16",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 0
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 7
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.15",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 4
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.14",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 6
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 5
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    },
+    {
+      "tag": "v0.0.13",
+      "assets": [
+        {
+          "name": "nub-darwin-arm64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-darwin-arm64.tar.gz.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-darwin-x64.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-arm64.tar.gz.sha256",
+          "download_count": 4
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz",
+          "download_count": 3
+        },
+        {
+          "name": "nub-linux-x64-musl.tar.gz.sha256",
+          "download_count": 1
+        },
+        {
+          "name": "nub-linux-x64.tar.gz",
+          "download_count": 5
+        },
+        {
+          "name": "nub-linux-x64.tar.gz.sha256",
+          "download_count": 6
+        },
+        {
+          "name": "nub-win32-arm64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-arm64.zip.sha256",
+          "download_count": 2
+        },
+        {
+          "name": "nub-win32-x64.zip",
+          "download_count": 3
+        },
+        {
+          "name": "nub-win32-x64.zip.sha256",
+          "download_count": 2
+        }
+      ]
+    }
+  ],
+  "npm": {
+    "downloads": 257236,
+    "start": "2026-10-17",
+    "end": "2026-11-15",
+    "package": "@nubjs/nub"
+  }
+}
