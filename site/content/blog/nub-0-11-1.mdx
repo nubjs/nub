@@ -1,0 +1,42 @@
+---
+title: "Nub 0.11.1"
+description: Nub provisions Yarn 2 and later pins without a committed release, refreshes its packageExtensions database, and starts on Node builds without module.register().
+author: The Nub Team
+date: 2026-11-15
+---
+
+Nub 0.11.1 provisions Yarn 2+ (Berry) pins without a committed release, refreshes the bundled packageExtensions database, and starts on Node builds that have removed `module.register()`.
+
+<NubIntro />
+
+## Yarn Berry pins
+
+A `packageManager` or `devEngines.packageManager` pin to Yarn 2 or later now downloads and runs like a pnpm, npm or Yarn 1 pin ([#1124](https://github.com/nubjs/nub/pull/1124), fixes [#1029](https://github.com/nubjs/nub/issues/1029)). It failed with "yarn 2+ (Berry) requires a committed release" unless the project committed one and set `yarnPath`.
+
+```sh
+nub pm use yarn@4
+```
+
+| Area | What changed |
+| --- | --- |
+| Download | Berry comes from `@yarnpkg/cli-dist` on the configured registry, from 2.4.1 on. A committed `yarnPath` release still takes precedence. |
+| Pin hashes | A `+sha512` hash is checked against `yarn.js`, the file Corepack hashes, so a pin either tool wrote verifies in both. |
+| Writing pins | `nub pm use yarn@4` and `nub pm update` write Berry pins. Converting another manager's lockfile to Berry's format is refused. |
+| Unpinned projects | With no pin and no `yarn` on `PATH`, a Berry `yarn.lock` selects only Yarn releases that write that lockfile format. |
+
+## Breaking changes
+
+- **An exact package-manager pin to a version that was never published now errors.** A pin such as `pnpm@9.1.0` resolved the newest release in that major ([#1124](https://github.com/nubjs/nub/pull/1124))
+
+## Bug fixes
+
+| PR | What changed |
+| --- | --- |
+| [#1125](https://github.com/nubjs/nub/pull/1125) | **packageExtensions database.** Refreshed to `@nubjs/extensions` 1.0.54. `nitro` no longer gains `croner`, `scule`, `ufo` and `unctx`, which it now declares, and the `object.hasown` and `string.prototype.codepointat` rules are gone. Existing lockfiles do not change. |
+| [#1127](https://github.com/nubjs/nub/pull/1127) | **Node without `module.register()`.** With `--no-experimental-require-module` on a Node 28 nightly, which removes `module.register()`, every process crashed at startup with `TypeError: module_.register is not a function`. Nub now prints one line saying its hooks are off and runs the program on plain Node. |
+
+The [full release notes](https://github.com/nubjs/nub/releases/tag/v0.11.1) list every change in this release.
+
+## Get started
+
+<GetStarted />
