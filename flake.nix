@@ -11,7 +11,9 @@
       # package metadata; read it from the same source to avoid a manual sync point.
       version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
-      systems = [
+      # Nixpkgs 26.11 dropped x86_64-darwin and refuses to evaluate for it, so keep
+      # only the systems the nixpkgs in use still exposes.
+      systems = builtins.filter (s: builtins.elem s nixpkgs.lib.systems.flakeExposed) [
         "x86_64-linux"
         "aarch64-linux"
         "x86_64-darwin"
