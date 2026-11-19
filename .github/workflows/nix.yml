@@ -61,8 +61,8 @@ jobs:
         with:
           node-version: "24"
 
-      # Evaluate every system's outputs (the locked flake must evaluate for all
-      # four targets, including the Darwin ones that cannot build on this runner).
+      # Evaluate every system's outputs (the locked flake must evaluate for every
+      # target it exposes, including Darwin, which cannot build on this runner).
       - name: nix flake check
         run: nix flake check --all-systems --print-build-logs
 

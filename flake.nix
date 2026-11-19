@@ -11,7 +11,9 @@
       # package metadata; read it from the same source to avoid a manual sync point.
       version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
-      systems = [
+      # Nixpkgs 26.11 dropped x86_64-darwin and refuses to evaluate for it, so keep
+      # only the systems the nixpkgs in use still exposes.
+      systems = builtins.filter (s: builtins.elem s nixpkgs.lib.systems.flakeExposed) [
         "x86_64-linux"
         "aarch64-linux"
         "x86_64-darwin"
@@ -165,14 +167,21 @@
             cargoLock.lockFile = ./Cargo.lock;
             buildAndTestSubdir = "crates/nub-cli";
 
-            # The hermetic Nix sandbox ships no system tools, so the C-building
-            # crates in nub's graph need their build tools declared explicitly:
-            # aws-lc-sys (via aube → sigstore) and libz-ng-sys (via flate2's
-            # zlib-ng feature) both compile through cmake. Every existing CI runner
-            # ships cmake preinstalled, which is why this surfaces only under Nix.
+            # nixpkgs' cargoSetupHook (since NixOS/nixpkgs#537108) sets
+            # AWS_LC_SYS_USE_SYSTEM=1 and ZSTD_SYS_USE_PKG_CONFIG=1, so aws-lc-sys
+            # (via aube's rcgen) and zstd-sys (embed-runtime's compressor) must find
+            # nixpkgs' libraries through pkg-config or the build fails. On an older
+            # nixpkgs neither variable is set: zstd-sys builds its vendored copy, and
+            # aws-lc-sys rejects an aws-lc older than 5.7 and builds from source,
+            # which is what cmake and perl are for.
             nativeBuildInputs = [
+              pkgs.pkg-config
               pkgs.cmake
               pkgs.perl
+            ];
+            buildInputs = [
+              pkgs.aws-lc
+              pkgs.zstd
             ];
 
             # Single self-contained binary: embed the staged runtime/ tree. nub-core's
