@@ -3563,6 +3563,24 @@ fn run_nubr() -> Result<i32> {
     }
     let cwd = env::current_dir().context("could not determine the current directory")?;
     let node = nub_core::node::discovery::discover_or_provision_node(&cwd)?;
+
+    // A startup snapshot can contain its own deserialize entrypoint, so it does
+    // not need the JavaScript runner. Keep this as a native dispatch fast path:
+    // Node owns blob validation, diagnostics, and the final exit status.
+    if args.first().is_some_and(|arg| {
+        arg == "--snapshot-blob" || arg.starts_with("--snapshot-blob=")
+    }) {
+        let mut cmd = std::process::Command::new(node.path.as_str());
+        nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
+        cmd.args(&args)
+            .stdin(std::process::Stdio::inherit())
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
+        let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)
+            .with_context(|| format!("nubr: failed to spawn {}", node.path))?;
+        return Ok(nub_core::node::spawn::exit_code_from_status(&status));
+    }
+
     nub_core::node::discovery::check_min_version(&node)?;
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
