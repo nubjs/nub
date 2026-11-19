@@ -3548,10 +3548,10 @@ fn dispatch_subcommand(rest: Vec<String>) -> Result<i32> {
 /// `nubr` — the unified runner: a file, a `package.json` script, or an installed
 /// bin, resolved most-specific-first under one name. It is the command
 /// `@nubjs/runner` ships, and this arm runs the SAME `runtime/nubr.mjs` out of the
-/// embedded runtime on the resolved Node, so the binary alias and the npm package
-/// behave identically by construction; nothing about resolution or the spawn is
-/// reimplemented here. The full CLI keeps its three verbs (`nub <file>`, `nub
-/// run`, `nubx`) — this is the one-bin shape, not a change to them.
+/// embedded runtime on the resolved Node. A standalone `--snapshot-blob` launch
+/// goes directly to Node to load the blob. The full CLI keeps its three verbs
+/// (`nub <file>`, `nub run`, `nubx`) — this is the one-bin shape, not a change to
+/// them.
 fn run_nubr() -> Result<i32> {
     let args: Vec<String> = env::args().skip(1).collect();
     // `nubr.mjs` reads its version from the package.json beside it, which the
@@ -3563,22 +3563,42 @@ fn run_nubr() -> Result<i32> {
     }
     let cwd = env::current_dir().context("could not determine the current directory")?;
     let node = nub_core::node::discovery::discover_or_provision_node(&cwd)?;
-    nub_core::node::discovery::check_min_version(&node)?;
-    let nub_binary = nub_core::node::spawn::current_nub_binary()?;
-    let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
-        .context("nubr: the nub runtime could not be located")?;
+
     let mut cmd = std::process::Command::new(node.path.as_str());
     nub_core::node::discovery::mark_node_launch(&mut cmd, node.path.as_std_path());
     let watch_flags = nub_core::node::spawn::lift_inherited_watch_flags(&mut cmd);
-    cmd.args(watch_flags)
-        .arg(runtime.join("nubr.mjs"))
-        .args(&args)
-        .stdin(std::process::Stdio::inherit())
+
+    // A snapshot with no entry argument can start itself without the JS runner.
+    // Keep mixed Node options and file runs on the runner path, which applies
+    // Nub's loader and child-mode handling. Inherited watch flags also need that
+    // path's handling to avoid starting nested Node supervisors.
+    let standalone_snapshot = is_standalone_snapshot_args(&args);
+    if standalone_snapshot && watch_flags.is_empty() {
+        cmd.args(&args);
+    } else {
+        nub_core::node::discovery::check_min_version(&node)?;
+        let nub_binary = nub_core::node::spawn::current_nub_binary()?;
+        let runtime = nub_core::node::spawn::find_runtime_dir(&nub_binary)
+            .context("nubr: the nub runtime could not be located")?;
+        cmd.args(watch_flags)
+            .arg(runtime.join("nubr.mjs"))
+            .args(&args);
+    }
+    cmd.stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
     let status = nub_core::node::spawn::status_forwarding_signals(&mut cmd)
         .with_context(|| format!("nubr: failed to spawn {}", node.path))?;
     Ok(nub_core::node::spawn::exit_code_from_status(&status))
+}
+
+fn is_standalone_snapshot_args(args: &[String]) -> bool {
+    match args {
+        // Keep malformed forms on Node too, so it owns the native diagnostic.
+        [flag] => flag == "--snapshot-blob" || flag.starts_with("--snapshot-blob="),
+        [flag, blob] => flag == "--snapshot-blob" && !blob.starts_with('-'),
+        _ => false,
+    }
 }
 
 fn run_nubx() -> Result<i32> {
@@ -12225,6 +12245,32 @@ fn resolution_source(cwd: &Path, node: &nub_core::node::discovery::ResolvedNode)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nubr_standalone_snapshot_detection_keeps_node_as_the_error_source() {
+        let args = |items: &[&str]| items.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert!(is_standalone_snapshot_args(&args(&[
+            "--snapshot-blob",
+            "app.blob"
+        ])));
+        assert!(is_standalone_snapshot_args(&args(&[
+            "--snapshot-blob=app.blob"
+        ])));
+        assert!(is_standalone_snapshot_args(&args(&["--snapshot-blob"])));
+        assert!(!is_standalone_snapshot_args(&args(&[
+            "--snapshot-blob",
+            "app.blob",
+            "main.js"
+        ])));
+        assert!(!is_standalone_snapshot_args(&args(&[
+            "--snapshot-blob",
+            "--trace-warnings"
+        ])));
+        assert!(!is_standalone_snapshot_args(&args(&[
+            "--inspect",
+            "--snapshot-blob=app.blob"
+        ])));
+    }
+
     use super::*;
 
     fn parse<'a>(args: &[&'a str]) -> Result<Cli, usage_rs::Error<'static, 'a>> {
