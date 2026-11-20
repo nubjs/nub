@@ -530,7 +530,15 @@ runs:
         pin_dir="."
         if [ -n "$want" ]; then
           pin_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/nub-pin.XXXXXX")"
-          printf '%s\n' "$want" > "$pin_dir/.node-version"
+          case "$want" in
+            # A semver range (^24, >=22 <23, 24.x): only devEngines.runtime reads
+            # one, so pin it there and install with a bare `nub node install`,
+            # which resolves the range against the Node index.
+            *[!0-9.vV]*)
+              want_json="${want//\\/\\\\}"; want_json="${want_json//\"/\\\"}"
+              printf '{"devEngines":{"runtime":{"name":"node","version":"%s"}}}\n' "$want_json" > "$pin_dir/package.json" ;;
+            *) printf '%s\n' "$want" > "$pin_dir/.node-version" ;;
+          esac
         fi
         # nub's resolver takes a Node already on PATH whenever it satisfies the
         # pin: `nub node which` answers with it and `nub node install` skips it.
@@ -564,7 +572,11 @@ runs:
         if [ -z "$resolved" ]; then
           if [ -n "$want" ]; then
             echo "Installing Node ${want}"
-            nub_pin node install "$want" || { echo "::error::nub node install ${want} failed"; exit 1; }
+            if [ -e "$pin_dir/package.json" ]; then
+              (cd "$pin_dir" && nub_pin node install) || { echo "::error::nub node install ${want} failed"; exit 1; }
+            else
+              nub_pin node install "$want" || { echo "::error::nub node install ${want} failed"; exit 1; }
+            fi
           else
             echo "Installing the project's pinned Node"
             nub node install || { echo "::error::The project's Node pin could not be provisioned. Set provision-node: false to run on the runner's Node ${runner_ver:-(none)} instead."; exit 1; }
