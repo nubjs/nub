@@ -532,9 +532,29 @@ runs:
           pin_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/nub-pin.XXXXXX")"
           printf '%s\n' "$want" > "$pin_dir/.node-version"
         fi
+        # nub's resolver takes a Node already on PATH whenever it satisfies the
+        # pin: `nub node which` answers with it and `nub node install` skips it.
+        # For an explicit version that left the runner's root-owned Node in place
+        # (ubuntu-26.04 ships 24.x in /usr/local/bin), where `npm install -g npm`
+        # fails with EACCES; setup-node always fronts its own copy. So an explicit
+        # version resolves and installs on a PATH with every dir holding a `node`
+        # removed, and only nub's cache can answer. The project's pin keeps
+        # taking a satisfying runner Node, as documented.
+        nub_bin="$(command -v nub)"
+        nub_pin() { "$nub_bin" "$@"; }
+        if [ -n "$want" ]; then
+          nodeless_path=""
+          IFS=':' read -ra path_dirs <<< "$PATH"
+          for d in "${path_dirs[@]}"; do
+            [ -n "$d" ] || continue
+            if [ -e "$d/node" ] || [ -e "$d/node.exe" ]; then continue; fi
+            nodeless_path="${nodeless_path:+$nodeless_path:}$d"
+          done
+          nub_pin() { PATH="$nodeless_path" "$nub_bin" "$@"; }
+        fi
         why="${RUNNER_TEMP:-/tmp}/nub-why.$$"
         resolve() {
-          resolved="$( (cd "$pin_dir" && nub node which) 2>"$why" )" || resolved=""
+          resolved="$( (cd "$pin_dir" && nub_pin node which) 2>"$why" )" || resolved=""
           reason="$(tr -d '\r' < "$why" 2>/dev/null || true)"
           # Windows prints backslashes and CRLF.
           resolved="$(printf '%s' "$resolved" | tr -d '\r')"
@@ -544,7 +564,7 @@ runs:
         if [ -z "$resolved" ]; then
           if [ -n "$want" ]; then
             echo "Installing Node ${want}"
-            nub node install "$want" || { echo "::error::nub node install ${want} failed"; exit 1; }
+            nub_pin node install "$want" || { echo "::error::nub node install ${want} failed"; exit 1; }
           else
             echo "Installing the project's pinned Node"
             nub node install || { echo "::error::The project's Node pin could not be provisioned. Set provision-node: false to run on the runner's Node ${runner_ver:-(none)} instead."; exit 1; }
@@ -567,7 +587,7 @@ runs:
             if [ -z "$resolved_ver" ]; then
               echo "::error::No Node satisfies this project's pin after provisioning: ${reason}"
               exit 1
-            elif [ "$resolved_ver" = "$runner_ver" ]; then
+            elif [ -z "$want" ] && [ "$resolved_ver" = "$runner_ver" ]; then
               echo "The runner's Node ${runner_ver} satisfies the pin (${src}); nothing installed or fronted."
             else
               dirname "$resolved" >> "$GITHUB_PATH"
