@@ -139,7 +139,8 @@ jobs:
   # Node, which left the image's Node in place, where `npm install -g npm` hits
   # EACCES. `exact` asks for the runner's own version, which `nub node install`
   # would otherwise skip as already on PATH; `range` takes the range-aware
-  # devEngines.runtime path, as `.node-version` reads no range.
+  # devEngines.runtime path, as `.node-version` reads no range; `padded` is a
+  # range carrying the whitespace a `node-version: |` block scalar adds.
   runner-node-satisfies:
     if: github.event_name != 'pull_request' || github.event.label.name == 'ci' || github.event.label.name == 'ci-full'
     permissions:
@@ -149,7 +150,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, ubuntu-26.04]
-        spec: [major, exact, range]
+        spec: [major, exact, range, padded]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
@@ -168,8 +169,9 @@ jobs:
             major) want="$major" ;;
             exact) want="$(node -p 'process.versions.node')" ;;
             range) want="^${major}.0.0" ;;
+            padded) want=$'\n  >='"${major}"$'.0.0\t<'"$((major + 1))"$'.0.0\n' ;;
           esac
-          { echo "major=$major"; echo "want=$want"; } >> "$GITHUB_OUTPUT"
+          { echo "major=$major"; echo "want<<WANT_EOF"; printf '%s\n' "$want"; echo "WANT_EOF"; } >> "$GITHUB_OUTPUT"
       - uses: ./setup-node
         with:
           node-version: ${{ steps.runner.outputs.want }}

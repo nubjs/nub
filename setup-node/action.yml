@@ -498,6 +498,12 @@ runs:
             *)      want="$(LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "") } $0 != "" { sub(/^v/, ""); print; exit }' "$NODE_VERSION_FILE")" ;;
           esac
         fi
+        # A version input can carry whitespace a YAML block scalar or a file adds
+        # (`node-version: |` ends in a newline; ranges may use tabs). Fold it to
+        # single spaces and trim, so the pin written below is one clean line.
+        want="$(printf '%s' "$want" | tr '\t\r\n' '   ' | tr -s ' ')"
+        want="${want# }"; want="${want% }"
+
         # nvm-style aliases, as setup-node reads them: lts/*, lts/<codename>, node,
         # latest and current resolve through the dist index to a version nub pins.
         # The index is newest-first and every entry carries its lts field, so
