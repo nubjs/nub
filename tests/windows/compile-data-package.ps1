@@ -28,7 +28,9 @@ Push-Location $work
 try {
   '26.5.0' | Set-Content -NoNewline .node-version
   npm init -y | Out-Null
-  npm i pdfkit --no-audit --no-fund --silent
+  # Pinned: 0.21.0 moved its standard fonts from js/data/*.afm into JS modules,
+  # so a later pdfkit ships no data file for this gate to reach.
+  npm i pdfkit@0.20.2 --no-audit --no-fund --silent
   if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
 
   @'
