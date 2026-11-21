@@ -732,3 +732,28 @@ fn an_unusable_port_names_its_source() {
     assert_eq!(code, 1, "stderr: {stderr}");
     assert!(stderr.contains("PORT must be an integer"), "got {stderr:?}");
 }
+
+/// A blank `PORT` is unset rather than `Number("")`, which is the ephemeral port 0.
+/// Asked of the parser directly because the default, 3000, is a fixed port.
+#[test]
+fn a_blank_port_means_the_default() {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let adapter = Path::new(&manifest).join("../../runtime/fetch-serve.cjs");
+    let script = r#"
+        const { listenOptions } = require(process.argv[1]);
+        const ports = ["", " ", "\t", "0", " 8080 "].map((PORT) => listenOptions({ PORT }).port);
+        console.log(ports.join());
+    "#;
+    let out = Command::new("node")
+        .args(["-e", script])
+        .arg(&adapter)
+        .output()
+        .expect("failed to spawn node");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "3000,3000,3000,0,8080",
+        "blank values take the default, while an explicit 0 and a padded port are kept"
+    );
+}
