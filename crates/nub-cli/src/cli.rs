@@ -3580,7 +3580,7 @@ fn run_nubr() -> Result<i32> {
     if is_standalone_snapshot_args(&args) && watch_flags.is_empty() {
         let register = runtime.join("loader-register.mjs");
         cmd.arg("--import")
-            .arg(nub_core::node::spawn::file_url_for(
+            .arg(nub_core::node::spawn::file_url_for_path(
                 &register.to_string_lossy(),
             ))
             .args(&args);
@@ -4239,7 +4239,7 @@ fn prepare_preload_chain(
         tokened.map(|(flag, path)| nub_core::node::spawn::PreloadInjection {
             flag,
             value: if flag == "--import" {
-                nub_core::node::spawn::file_url_for(&path.to_string_lossy())
+                nub_core::node::spawn::file_url_for_path(&path.to_string_lossy())
             } else {
                 path.to_string_lossy().into_owned()
             },

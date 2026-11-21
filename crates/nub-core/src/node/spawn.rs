@@ -3537,11 +3537,36 @@ pub fn file_url_for(path: &str) -> String {
     to_file_url(path, cfg!(windows))
 }
 
+/// [`file_url_for`] for a path known to name a file on disk, such as a runtime or
+/// generated module, rather than an import specifier a user wrote.
+pub fn file_url_for_path(path: &str) -> String {
+    path_to_file_url(path, cfg!(windows))
+}
+
+/// Keeps the spelling of an absolute specifier a user wrote for Node, such as an
+/// inherited `--import /tmp/a%20b.mjs?mode=test`: Node reads that as a URL, so its
+/// escapes and query must reach the loader as written.
 fn to_file_url(path: &str, windows: bool) -> String {
+    file_url(path, windows, false)
+}
+
+/// For a path on disk, where every character is literal; see [`escape_url_path`].
+fn path_to_file_url(path: &str, windows: bool) -> String {
+    file_url(path, windows, true)
+}
+
+fn file_url(path: &str, windows: bool, escape: bool) -> String {
+    let encode = |p: &str| {
+        if escape {
+            escape_url_path(p, windows)
+        } else {
+            p.to_owned()
+        }
+    };
     if !windows {
-        return format!("file://{}", escape_url_path(path, false));
+        return format!("file://{}", encode(path));
     }
-    let forward = escape_url_path(&strip_verbatim(path, true).replace('\\', "/"), true);
+    let forward = encode(&strip_verbatim(path, true).replace('\\', "/"));
     if forward.starts_with("//") {
         // UNC: //server/share/... -> file://server/share/...
         format!("file:{forward}")
@@ -3954,7 +3979,7 @@ fn preload_injection_for(
             .map(|dir| format!("{dir}{THREADPOOL_SNAPSHOT_SIDECAR}"));
         PreloadInjection {
             flag: "--import",
-            value: to_file_url(preload_mjs, windows),
+            value: path_to_file_url(preload_mjs, windows),
             sidecar,
         }
     }
@@ -7228,14 +7253,18 @@ mod tests {
     }
 
     #[test]
-    fn file_url_escapes_characters_the_url_parser_would_reinterpret() {
+    fn file_url_escapes_a_disk_path_but_keeps_a_specifier_as_written() {
         assert_eq!(
-            to_file_url("/c#1/100%/a?b/x\\y/preload.mjs", false),
+            path_to_file_url("/c#1/100%/a?b/x\\y/preload.mjs", false),
             "file:///c%231/100%25/a%3Fb/x%5Cy/preload.mjs"
         );
         assert_eq!(
-            to_file_url(r"C:\Users\a#b\preload.mjs", true),
+            path_to_file_url(r"\\?\C:\Users\a#b\preload.mjs", true),
             "file:///C:/Users/a%23b/preload.mjs"
+        );
+        assert_eq!(
+            to_file_url("/tmp/hello%20world.mjs?mode=test", false),
+            "file:///tmp/hello%20world.mjs?mode=test"
         );
     }
 
