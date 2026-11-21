@@ -3501,6 +3501,28 @@ fn is_absolute_path(spec: &str, windows: bool) -> bool {
         && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
+/// Escape what the URL parser would otherwise read as syntax rather than as part
+/// of the path: `#` starts a fragment, `?` a query, `%` an escape, and the parser
+/// drops tabs and newlines. A Unix path may also hold a backslash, which a `file:`
+/// URL reads as a separator. The same set `url.pathToFileURL` escapes, so a cache
+/// directory under such a name still loads.
+fn escape_url_path(path: &str, windows: bool) -> String {
+    let mut out = String::with_capacity(path.len());
+    for ch in path.chars() {
+        match ch {
+            '%' => out.push_str("%25"),
+            '#' => out.push_str("%23"),
+            '?' => out.push_str("%3F"),
+            '\t' => out.push_str("%09"),
+            '\n' => out.push_str("%0A"),
+            '\r' => out.push_str("%0D"),
+            '\\' if !windows => out.push_str("%5C"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// Convert a filesystem path to a `file://` URL Node's loader accepts on every
 /// platform. On Windows a path is `C:\a\b` (or a canonicalized `\\?\C:\a\b`); a
 /// naive `format!("file://{path}")` yields `file://C:\a\b`, which Node's
@@ -3517,9 +3539,9 @@ pub fn file_url_for(path: &str) -> String {
 
 fn to_file_url(path: &str, windows: bool) -> String {
     if !windows {
-        return format!("file://{path}");
+        return format!("file://{}", escape_url_path(path, false));
     }
-    let forward = strip_verbatim(path, true).replace('\\', "/");
+    let forward = escape_url_path(&strip_verbatim(path, true).replace('\\', "/"), true);
     if forward.starts_with("//") {
         // UNC: //server/share/... -> file://server/share/...
         format!("file:{forward}")
@@ -7202,6 +7224,18 @@ mod tests {
         assert_eq!(
             to_file_url("/opt/nub/runtime/preload.mjs", false),
             "file:///opt/nub/runtime/preload.mjs"
+        );
+    }
+
+    #[test]
+    fn file_url_escapes_characters_the_url_parser_would_reinterpret() {
+        assert_eq!(
+            to_file_url("/c#1/100%/a?b/x\\y/preload.mjs", false),
+            "file:///c%231/100%25/a%3Fb/x%5Cy/preload.mjs"
+        );
+        assert_eq!(
+            to_file_url(r"C:\Users\a#b\preload.mjs", true),
+            "file:///C:/Users/a%23b/preload.mjs"
         );
     }
 
