@@ -175,6 +175,9 @@ pub fn install_from_pin(store: &Path, cwd: &Path) -> Result<InstallOutcome> {
     for warning in &chain.warnings {
         eprintln!("{warning}");
     }
+    if let Some(ignored) = &chain.ignored_pin {
+        eprintln!("{}", ignored.warning());
+    }
     let Some((raw, pin, source)) = chain.pin else {
         bail!(
             "nub node install: no version given and no Node pin (devEngines.runtime, \
@@ -311,18 +314,82 @@ pub fn pin(spec: &str, cwd: &Path) -> Result<PinResult> {
     if spec.is_empty() {
         bail!("nub node pin requires a version (e.g. 22, lts, 22.13.0)");
     }
+
+    let dir = pin_target_dir(cwd);
+    // `devEngines.runtime` outranks every pin file, so writing `.node-version`
+    // beside a node entry there would change nothing the next run resolves.
+    // Edit the entry the chain actually reads instead.
+    if dev_engines_node_entry(&dir.join("package.json")) {
+        return pin_dev_engines(spec, cwd);
+    }
+
     // Reject only obvious garbage — a pin legitimately holds aliases (`lts`, `22`),
     // so anything that parses as a VersionPin is accepted without a network check.
     if spec.parse::<VersionPin>().is_err() {
         bail!("nub node pin: \"{spec}\" is not a valid Node version or alias");
     }
 
-    let dir = pin_target_dir(cwd);
     let file = pin_target_file(&dir);
     std::fs::write(&file, format!("{spec}\n"))
         .with_context(|| format!("writing {}", file.display()))?;
 
     let path = std::fs::canonicalize(&file).unwrap_or(file);
+    Ok(PinResult {
+        path,
+        spec: spec.to_string(),
+    })
+}
+
+/// Whether `manifest`'s `devEngines.runtime` (object or array form) carries an
+/// entry named `node`. An unreadable or non-JSON manifest counts as no entry, so
+/// `pin` falls back to the pin file rather than failing on someone else's syntax.
+fn dev_engines_node_entry(manifest: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(manifest) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(crate::strip_utf8_bom(&raw)) else {
+        return false;
+    };
+    match json.get("devEngines").and_then(|d| d.get("runtime")) {
+        Some(serde_json::Value::Array(items)) => items.iter().any(is_node_entry),
+        Some(entry) => is_node_entry(entry),
+        None => false,
+    }
+}
+
+fn is_node_entry(entry: &serde_json::Value) -> bool {
+    entry.get("name").and_then(|n| n.as_str()) == Some("node")
+}
+
+/// Set the `version` of the `node` entry in `devEngines.runtime`, through the
+/// same format-preserving, atomic manifest writer `nub pm` pins use. The field
+/// takes the `engines.node` grammar, so a range is accepted; an nvm alias is not
+/// (npm rejects `devEngines.runtime` versions like `lts`).
+fn pin_dev_engines(spec: &str, cwd: &Path) -> Result<PinResult> {
+    match VersionPin::parse_allowing_ranges(spec) {
+        Ok(VersionPin::Alias(_)) => bail!(
+            "nub node pin: \"{spec}\" is an alias, and this project pins Node in \
+             package.json#devEngines.runtime, which takes a version or range (e.g. 24, ^24, 24.11.0)"
+        ),
+        Ok(_) => {}
+        Err(_) => bail!("nub node pin: \"{spec}\" is not a valid Node version or range"),
+    }
+    let path = crate::pm::resolve::edit_root_manifest(cwd, |obj| {
+        let Some(runtime) = obj.get_mut("devEngines").and_then(|d| d.get_mut("runtime")) else {
+            return;
+        };
+        let entry = match runtime {
+            serde_json::Value::Array(items) => items.iter_mut().find(|e| is_node_entry(e)),
+            entry => Some(entry).filter(|e| is_node_entry(e)),
+        };
+        if let Some(serde_json::Value::Object(entry)) = entry {
+            entry.insert(
+                "version".to_string(),
+                serde_json::Value::String(spec.to_string()),
+            );
+        }
+    })?;
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
     Ok(PinResult {
         path,
         spec: spec.to_string(),
@@ -545,6 +612,49 @@ mod tests {
             !root.join(".node-version").exists(),
             "no shadowing .node-version is created"
         );
+    }
+
+    #[test]
+    fn pin_updates_the_dev_engines_node_entry_it_would_otherwise_lose_to() {
+        // devEngines.runtime outranks every pin file, so pin edits its node entry
+        // (object and array forms) instead of writing a .node-version that the
+        // next run would ignore.
+        let root = tmpdir("pin-devengines");
+        std::fs::write(
+            root.join("package.json"),
+            "{\n\t\"devEngines\": {\n\t\t\"runtime\": {\"name\": \"node\", \"version\": \"22.14.0\"}\n\t}\n}\n",
+        )
+        .unwrap();
+        let result = pin("^24", &root).expect("pin writes");
+        assert_eq!(result.path.file_name().unwrap(), "package.json");
+        let written = std::fs::read_to_string(root.join("package.json")).unwrap();
+        assert!(
+            written.contains("\t\"devEngines\""),
+            "tab indent kept: {written}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(json["devEngines"]["runtime"]["version"], "^24");
+        assert!(!root.join(".node-version").exists());
+        let (_, _, source) = discovery::resolve_pin_chain(&root).unwrap().pin.unwrap();
+        assert_eq!(source, "package.json#devEngines.runtime");
+
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"devEngines":{"runtime":[{"name":"bun","version":"^1"},{"name":"node","version":"20.x"}]}}"#,
+        )
+        .unwrap();
+        pin("24.11.0", &root).expect("pin writes the array form");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            json["devEngines"]["runtime"][0]["version"], "^1",
+            "bun untouched"
+        );
+        assert_eq!(json["devEngines"]["runtime"][1]["version"], "24.11.0");
+
+        let err = pin("lts", &root).expect_err("devEngines takes no aliases");
+        assert!(err.to_string().contains("alias"), "{err}");
     }
 
     #[test]
