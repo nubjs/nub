@@ -12682,6 +12682,84 @@ fn pm_which_without_a_pin_errors_through_the_binary() {
     );
 }
 
+/// A range in `packageManager` is named as the problem, with the fix, rather
+/// than reported as "no package manager is pinned".
+#[test]
+fn pm_which_names_a_range_in_package_manager() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"packageManager":"yarn@^4"}"#).unwrap();
+    let out = Command::new(nub_binary())
+        .args(["pm", "which"])
+        .current_dir(&dir)
+        .env("XDG_CACHE_HOME", unique_test_cache())
+        .output()
+        .expect("spawn nub pm which");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        stderr.contains(r#"packageManager "yarn@^4""#)
+            && stderr.contains("is not an exact version")
+            && stderr.contains("devEngines.packageManager")
+            && !stderr.contains("no package manager is pinned"),
+        "the error must name the range and point at devEngines: {stderr}"
+    );
+}
+
+/// The package-manager download reads the registry from the same places the
+/// install engine does: the `.npmrc` `NPM_CONFIG_USERCONFIG` names, and
+/// `NPM_CONFIG_REGISTRY` in either case. Each points at a dead local port, so
+/// the error proves which registry was asked (and nothing reaches the network).
+#[test]
+fn pm_download_follows_userconfig_and_uppercase_registry_env() {
+    let work = unique_test_cache();
+    let home = work.join("home");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    let rc = work.join("ci-npmrc");
+    std::fs::write(&rc, "registry=http://127.0.0.1:1/userconfig/\n").unwrap();
+
+    let run = |envs: &[(&str, &str)]| {
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(["pm", "use", "pnpm@10.0.0"])
+            .current_dir(&proj)
+            .env("HOME", &home)
+            .env("XDG_CACHE_HOME", work.join("cache"));
+        for var in [
+            "npm_config_registry",
+            "NPM_CONFIG_REGISTRY",
+            "npm_config_userconfig",
+            "NPM_CONFIG_USERCONFIG",
+            "COREPACK_NPM_REGISTRY",
+        ] {
+            cmd.env_remove(var);
+        }
+        cmd.envs(envs.iter().copied());
+        let out = cmd.output().expect("spawn nub pm use");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (code, stderr) = run(&[("NPM_CONFIG_USERCONFIG", rc.to_str().unwrap())]);
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("127.0.0.1:1/userconfig"),
+        "NPM_CONFIG_USERCONFIG's registry must be used: {stderr}"
+    );
+
+    let (code, stderr) = run(&[("NPM_CONFIG_REGISTRY", "http://127.0.0.1:1/upper/")]);
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("127.0.0.1:1/upper"),
+        "NPM_CONFIG_REGISTRY must be used: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 // ── Section 8: exec/nubx workspace flags (-r / --filter / --parallel) ───
 //
 // Unix-only: the `.bin` entries are POSIX-shebang node scripts created at

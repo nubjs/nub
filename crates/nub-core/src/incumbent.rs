@@ -8,7 +8,7 @@
 //! arrays, so nub-core asks through this probe instead. The CLI registers it once
 //! at startup, before anything reads project state.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::workspace::npmrc::MemberNpmrc;
@@ -21,6 +21,12 @@ pub struct IncumbentProbe {
     pub declared_pm_name: fn(&Path) -> Option<String>,
     /// Whether a member's own `.npmrc` layers over the workspace root's.
     pub member_npmrc: fn(&Path) -> MemberNpmrc,
+    /// The user-level `.npmrc` the engine reads (`NPM_CONFIG_USERCONFIG` or
+    /// `~/.npmrc`), so the package-manager download reads the same file.
+    pub user_npmrc: fn() -> Option<PathBuf>,
+    /// The default registry the environment sets, by the engine's rules
+    /// (`npm_config_registry` in either case, and the incumbent's own variables).
+    pub env_registry: fn() -> Option<String>,
 }
 
 static PROBE: OnceLock<IncumbentProbe> = OnceLock::new();
@@ -41,4 +47,21 @@ pub(crate) fn member_npmrc(dir: &Path) -> MemberNpmrc {
     PROBE
         .get()
         .map_or(MemberNpmrc::Layered, |p| (p.member_npmrc)(dir))
+}
+
+/// See [`IncumbentProbe::user_npmrc`]. Unregistered, `~/.npmrc`.
+pub(crate) fn user_npmrc() -> Option<PathBuf> {
+    match PROBE.get() {
+        Some(p) => (p.user_npmrc)(),
+        None => dirs_next::home_dir().map(|h| h.join(".npmrc")),
+    }
+}
+
+/// See [`IncumbentProbe::env_registry`]. Unregistered, `npm_config_registry`.
+pub(crate) fn env_registry() -> Option<String> {
+    match PROBE.get() {
+        Some(p) => (p.env_registry)(),
+        None => std::env::var("npm_config_registry").ok(),
+    }
+    .filter(|v| !v.trim().is_empty())
 }

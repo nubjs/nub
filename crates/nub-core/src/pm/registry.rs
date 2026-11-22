@@ -111,7 +111,7 @@ pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
         .unwrap_or((None, false));
     let user_registry = home_npmrc().and_then(|p| read_npmrc_key(&p, "registry"));
     let base = resolve_base(
-        env_nonempty("npm_config_registry"),
+        crate::incumbent::env_registry(),
         project_registry,
         user_registry,
         project_trusted,
@@ -179,9 +179,10 @@ fn auth_file_trusts_project(configured: &str, cwd: &Path, project_rc: &Path) -> 
     }
 }
 
-/// The user-level `~/.npmrc` path, if a home directory resolves.
+/// The user-level `.npmrc`: `NPM_CONFIG_USERCONFIG` when set, else `~/.npmrc` —
+/// the file the install engine reads (asked through [`crate::incumbent`]).
 fn home_npmrc() -> Option<PathBuf> {
-    dirs_next::home_dir().map(|h| h.join(".npmrc"))
+    crate::incumbent::user_npmrc()
 }
 
 /// Read a single `key=value` setting from ONE `.npmrc` file — no project→user
@@ -445,10 +446,15 @@ fn strip_scheme(url: &str) -> &str {
 /// (or a replicating mirror) often hardcodes to the public registry even when the
 /// packument was served by a private mirror — so a mirrored/air-gapped install
 /// would otherwise download the tarball from the wrong (often unreachable) host.
-/// npm/pnpm rewrite the origin: keep the path + query, swap scheme+host+port to
-/// the configured registry's. Only rewritten when a NON-public registry is
-/// configured; a public-registry config leaves the URL untouched (the common
-/// case, and the safe one — never redirect a public tarball).
+/// The origin is swapped to the configured registry's, and a registry that
+/// lives under a path (`https://host/artifactory/api/npm/npm`) keeps that path:
+/// `…/pnpm/-/pnpm-10.0.0.tgz` on the public registry becomes
+/// `https://host/artifactory/api/npm/npm/pnpm/-/pnpm-10.0.0.tgz`, as corepack
+/// rewrites it (npm's origin-only swap drops the prefix and 404s there). A tarball
+/// path that already starts with the registry's path keeps it as is. Only
+/// rewritten when a NON-public registry is configured; a public-registry config
+/// leaves the URL untouched (the common case, and the safe one — never redirect a
+/// public tarball).
 fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
     // No rewrite when the configured registry is the public one.
     if origin_of(registry_base) == Some(origin_of(PUBLIC_REGISTRY).unwrap()) {
@@ -461,9 +467,16 @@ fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
     if reg_origin == tar_origin {
         return tarball.to_string(); // already on the mirror
     }
-    // Swap the origin (scheme+host[+port]); keep the rest of the URL verbatim.
     let rest = &tarball[tar_origin.len()..];
-    format!("{reg_origin}{rest}")
+    let prefix = registry_base[reg_origin.len()..].trim_end_matches('/');
+    let under_prefix = rest
+        .strip_prefix(prefix)
+        .is_some_and(|after| after.is_empty() || after.starts_with('/'));
+    if prefix.is_empty() || under_prefix {
+        format!("{reg_origin}{rest}")
+    } else {
+        format!("{reg_origin}{prefix}{rest}")
+    }
 }
 
 /// The registry credential to present when DOWNLOADING `tarball_url` — `cfg.auth`,
@@ -1426,6 +1439,30 @@ mod tests {
             auth_for_tarball(&no_auth, "https://registry.npmjs.org/x/-/x-1.0.0.tgz"),
             None
         );
+    }
+
+    #[test]
+    fn tarball_rewrite_keeps_the_registry_path_prefix() {
+        let public = "https://registry.npmjs.org/pnpm/-/pnpm-10.0.0.tgz";
+        let base = "https://npm.corp.test/artifactory/api/npm/npm";
+        assert_eq!(
+            rewrite_tarball_origin(public, base),
+            "https://npm.corp.test/artifactory/api/npm/npm/pnpm/-/pnpm-10.0.0.tgz"
+        );
+        // A foreign host already under the same path keeps a single prefix.
+        assert_eq!(
+            rewrite_tarball_origin(
+                "https://old.corp.test/artifactory/api/npm/npm/pnpm/-/pnpm-10.0.0.tgz",
+                base
+            ),
+            "https://npm.corp.test/artifactory/api/npm/npm/pnpm/-/pnpm-10.0.0.tgz"
+        );
+        // A root-path mirror swaps only the origin; the public registry rewrites nothing.
+        assert_eq!(
+            rewrite_tarball_origin(public, "http://127.0.0.1:4873"),
+            "http://127.0.0.1:4873/pnpm/-/pnpm-10.0.0.tgz"
+        );
+        assert_eq!(rewrite_tarball_origin(public, PUBLIC_REGISTRY), public);
     }
 
     #[test]

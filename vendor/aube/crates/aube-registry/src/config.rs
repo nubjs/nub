@@ -14,8 +14,8 @@ mod tests;
 
 pub use fetch::FetchPolicy;
 pub use load::{
-    SplitNpmrcEntries, load_npmrc_entries, load_npmrc_entries_split, load_project_npmrc_entries,
-    load_user_npmrc_entries,
+    SplitNpmrcEntries, env_default_registry, load_npmrc_entries, load_npmrc_entries_split,
+    load_project_npmrc_entries, load_user_npmrc_entries, user_npmrc_path,
 };
 pub use types::{AuthConfig, NpmConfig, TlsConfig};
 pub use url::{normalize_registry_url_pub, registry_uri_key_pub};

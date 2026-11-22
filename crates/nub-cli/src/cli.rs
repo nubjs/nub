@@ -10444,6 +10444,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 eprintln!("» this project uses nub (resolved from {field})");
                 return Ok(0);
             }
+            if let Some(err) = unusable_pin_error(&cwd) {
+                return Err(err);
+            }
             // A project may DECLARE a manager nub doesn't provision (bun — and
             // any name outside nub's provisioning scope). The install path
             // honors the declared identity (`declared_pm_raw`); `which` must
@@ -10527,6 +10530,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // shape; a hand-written range is the user's intent and stays verbatim.
         "update" | "up" => {
             check_manifest_json(&cwd)?;
+            if let Some(err) = unusable_pin_error(&cwd) {
+                return Err(err);
+            }
             // A project may DECLARE a manager nub doesn't provision (bun, or any
             // name outside npm/pnpm/yarn). `resolve_pin_with_source` reads such a
             // pin as unresolvable, so the generic "no pin — declare one" context
@@ -10556,19 +10562,29 @@ fn run_pm(args: &[String]) -> Result<i32> {
             let pin = res.pin;
             let name = pin.pm.to_string();
             let range = dev_engines_range(&cwd, &name);
-            let spec = range.clone().unwrap_or_else(|| "latest".to_string());
+            let current = pin
+                .version
+                .as_deref()
+                .map(|v| v.split_once('+').map_or(v, |(bare, _)| bare).to_string());
+            // A devEngines version that repeats the pin (the pnpm 11 shape) is
+            // not a range to float within: it moves with the pin inside its major.
+            let repeats_pin = range
+                .as_deref()
+                .zip(pin.version.as_deref())
+                .is_some_and(|(r, p)| resolve::dev_engines_repeats_pin(r, p));
+            let spec = match (&current, repeats_pin) {
+                (Some(cur), true) => format!("^{cur}"),
+                _ => range.clone().unwrap_or_else(|| "latest".to_string()),
+            };
             // The pair semantics: devEngines = intent, packageManager = resolved
             // record. A nub-shaped range (^x.y.z — what pin/update themselves
             // write) is re-derived from the new exact; a hand-written one
             // (">=9 <10", "~9.2") survives untouched. The update just resolved
             // WITHIN that range, so the new exact satisfies it by construction.
-            let keep_dev_engines = range
-                .as_deref()
-                .is_some_and(|r| !resolve::nub_shaped_range(r));
-            let current = pin
-                .version
-                .as_deref()
-                .map(|v| v.split_once('+').map_or(v, |(bare, _)| bare).to_string());
+            let keep_dev_engines = !repeats_pin
+                && range
+                    .as_deref()
+                    .is_some_and(|r| !resolve::nub_shaped_range(r));
             // A nub-shaped devEngines range moves with the pin (same writer as
             // `use`, onFail:"warn"); a hand-written one is the user's stated
             // constraint update floats WITHIN — never rewritten.
@@ -10929,7 +10945,8 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
 
     // Step 4 — the file-by-file summary (stdout). Nothing silent.
     println!("using {name}@{version}");
-    println!("  package.json: packageManager = {name}@{version} (+sha512)");
+    let hashed = if write.pin_hashed { " (+sha512)" } else { "" };
+    println!("  package.json: packageManager = {name}@{version}{hashed}");
     if let Some(range) = &write.dev_engines_range {
         println!(
             "  package.json: devEngines.packageManager = {{ name: \"{name}\", version: \"{range}\", onFail: \"warn\" }}"
@@ -11169,6 +11186,20 @@ fn fetch_verify_and_hash_tarball(
         path,
         _dir: dir,
     })
+}
+
+/// The error for a pin field that names npm, pnpm or Yarn but can't be used (a
+/// range in the exact-only `packageManager`): the field, its value and why,
+/// instead of the generic "no package manager is pinned".
+fn unusable_pin_error(cwd: &Path) -> Option<anyhow::Error> {
+    match nub_core::pm::resolve::unusable_pin(cwd)? {
+        nub_core::pm::resolve::PinWarning::Ignored {
+            field,
+            spec,
+            reason,
+        } => Some(anyhow::anyhow!("{field} \"{spec}\": {reason}")),
+        _ => None,
+    }
 }
 
 /// `devEngines.packageManager.version` from the root manifest, when the field
@@ -11780,6 +11811,13 @@ fn shim_plan_at(
     use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
 
     let target = resolve::resolve_target(cwd);
+    // A pin field nub can't use (a range in `packageManager`) runs the project
+    // unpinned, as pnpm does — but says so, naming the field and the fix.
+    if target.is_none()
+        && let Some(w) = resolve::unusable_pin(cwd)
+    {
+        eprintln!("{w}");
+    }
     let pin_state = shim_pin_state(cwd, target.as_ref());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the

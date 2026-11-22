@@ -1687,6 +1687,8 @@ pub(crate) fn register_incumbent_probe() {
         member_npmrc: |dir| {
             workspace_npmrc_model(&resolve_config_surface(dir), declared_pnpm_major_in(dir))
         },
+        user_npmrc: aube_registry::config::user_npmrc_path,
+        env_registry: aube_registry::config::env_default_registry,
     });
 }
 

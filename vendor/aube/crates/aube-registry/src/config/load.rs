@@ -1021,6 +1021,35 @@ pub(super) fn home_dir() -> Option<PathBuf> {
     aube_util::env::home_dir()
 }
 
+/// The user-level `.npmrc` the engine reads: a `*_CONFIG_USERCONFIG` override,
+/// else `$HOME/.npmrc`. For an embedder that reads the user rc itself (nub's
+/// package-manager download) and must agree with the engine on which file it is.
+pub fn user_npmrc_path() -> Option<PathBuf> {
+    resolve_user_rc_path(home_dir().as_deref())
+}
+
+/// The default registry the process environment sets, with the engine's
+/// precedence: Yarn env (when Yarn mirroring is on), then `npm_config_registry`
+/// / `NPM_CONFIG_REGISTRY` (and pnpm 11's `pnpm_config_registry` when enabled),
+/// then Bun's `BUN_CONFIG_REGISTRY` (when Bun mirroring is on) — last wins, as in
+/// the tagged loader above. `None` when no environment variable sets one.
+pub fn env_default_registry() -> Option<String> {
+    let env: Vec<(String, String)> = std::env::vars().collect();
+    let mut entries = Vec::new();
+    if aube_util::engine_context().read_yarn_config {
+        entries.extend(yarnrc::yarn_env_entries_from(&env));
+    }
+    entries.extend(npm_config_env_entries_from(&env));
+    if aube_util::engine_context().read_bun_config {
+        entries.extend(bun_env_entries_from(&env));
+    }
+    entries
+        .into_iter()
+        .rev()
+        .find(|(k, v)| k == "registry" && !v.trim().is_empty())
+        .map(|(_, v)| v)
+}
+
 /// Resolve the builtin + global `npmrc` paths the way npm does, reading
 /// only the npm-compat env vars (`NPM_CONFIG_GLOBALCONFIG`,
 /// `NPM_CONFIG_PREFIX`/`PREFIX`) via the supplied lookup. npm's rules:
