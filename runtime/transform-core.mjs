@@ -607,11 +607,13 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
 // same config its `paths` come from. The CLI also passes the entry's set as
 // `--conditions`, which covers the whole process; this covers an importer whose
 // tsconfig is a different one, and the standalone loader, which has no CLI to read
-// a tsconfig first. A dependency's
-// imports get none, as with `paths`.
+// a tsconfig first. A dependency's imports get none, as with `paths`, and nor do
+// nub's own runtime modules.
 function tsconfigConditionsFor(parentURL) {
   const parent = String(parentURL || "");
-  if (!parent.startsWith("file:") || isDependency(parent)) return null;
+  if (!parent.startsWith("file:") || isDependency(parent) || isNubInternalParent(parent)) {
+    return null;
+  }
   const conditions = getTsconfigForDir(dirname(fileURLToPath(parent))).customConditions;
   return conditions && conditions.length > 0 ? conditions : null;
 }

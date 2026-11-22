@@ -4675,8 +4675,15 @@ pub(crate) fn runtime_node_options_with(
         // other config-derived behavior. The lifecycle path (`BestEffort`) is the one
         // exception, and it takes the same "guess at nothing" line: no conditions at
         // all from a config it cannot read.
-        if tsconfig_gate == TsconfigGate::Required {
-            ensure_tsconfig_parses(&cwd, explicit)?;
+        match tsconfig_gate {
+            TsconfigGate::Required => ensure_tsconfig_parses(&cwd, explicit)?,
+            // Settled quietly even with a file entry: the addon in the child reads
+            // the config under Node's spelling of the path, which on Windows keeps
+            // the CWD's 8.3 short form (`RUNNER~1`) where the entry directory is
+            // canonical, so the CWD spelling has to be in `REPORTED_ENV` too.
+            TsconfigGate::BestEffort => {
+                nub_tsconfig::probe_diagnostics(&cwd, explicit);
+            }
         }
         // With a file entry, the entry's own tsconfig supplies the conditions, alone:
         // `nub app/main.ts` from the root resolves the way `cd app && nub main.ts`
