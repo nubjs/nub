@@ -614,6 +614,18 @@ pub(crate) fn run_node_gyp_bootstrap(args: &[String]) -> Result<i32> {
 /// convert, rename) writes only the project document. Returns the version
 /// recorded, `None` when the lockfile already pins it or the pin is one
 /// pnpm does not record (pnpm 10 and below).
+/// The integrity `<dir>/pnpm-lock.yaml`'s env document records for the pinned
+/// `pnpm` at `version` — the digest a cold pnpm 11+ download is checked against
+/// when the pin carries no `+sha512` hash of its own. Only the leading
+/// document is read.
+pub(crate) fn pnpm_lockfile_integrity(dir: &Path, version: &str) -> Option<String> {
+    let file = std::fs::File::open(dir.join("pnpm-lock.yaml")).ok()?;
+    let env = aube_lockfile::pnpm::read_env_document(file).ok()??;
+    aube_lockfile::pnpm::EnvLockfile::parse(&env)?
+        .package_manager_integrity("pnpm", version)
+        .map(str::to_string)
+}
+
 pub(crate) fn sync_pnpm_package_manager_pin(root: &Path) -> Result<Option<String>> {
     let session = engine_session_quiet(Some(root))?;
     session
@@ -1687,6 +1699,15 @@ pub(crate) fn register_incumbent_probe() {
         member_npmrc: |dir| {
             workspace_npmrc_model(&resolve_config_surface(dir), declared_pnpm_major_in(dir))
         },
+        user_npmrc: || {
+            ensure_engine_config_policy();
+            aube_registry::config::user_npmrc_path()
+        },
+        env_config: || {
+            ensure_engine_config_policy();
+            aube_registry::config::env_config_entries()
+        },
+        pnpm_lockfile_integrity,
     });
 }
 
@@ -2298,6 +2319,29 @@ fn identity_error(err: aube_lockfile::Error) -> anyhow::Error {
 /// workspace config transitively (see the ordering note on
 /// [`engine_session`]). Every seam is idempotent.
 pub(crate) fn engine_brand_preflight() {
+    let surface = apply_engine_config_policy();
+    warn_on_ignored_config(surface);
+}
+
+/// Set once [`apply_engine_config_policy`] has run in this process.
+static CONFIG_POLICY_APPLIED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The project's config policy for a package-manager download that runs
+/// before any engine verb (`nub pm which`, `nub pm update`, a cold shim): the
+/// same engine context [`engine_brand_preflight`] sets, so the download reads
+/// the registry and user rc an install in this project would, without the
+/// preflight's ignored-config warnings. A no-op once the policy is applied.
+fn ensure_engine_config_policy() {
+    if !CONFIG_POLICY_APPLIED.load(std::sync::atomic::Ordering::Acquire) {
+        apply_engine_config_policy();
+    }
+}
+
+/// The context half of [`engine_brand_preflight`]: registers the identity and
+/// sets the config-surface fields of the engine context for the cwd's project.
+/// Returns the surface for the caller's warnings.
+fn apply_engine_config_policy() -> ConfigSurface {
     // Static identity FIRST, before anything reads project state or branding.
     // The whole compile-time profile — name, `nub/<ver>` UA, `nub.lock`
     // canonical lockfile, `["nub"]`/`["pnpm"]` detection names, and the five
@@ -2469,6 +2513,14 @@ pub(crate) fn engine_brand_preflight() {
         // the vendored catalogs by the one `ignoreCompatibilityDb` escape hatch.
         c.bundled_package_extensions = Some(compat_db::bundled_package_extensions().clone());
     });
+    CONFIG_POLICY_APPLIED.store(true, std::sync::atomic::Ordering::Release);
+    surface
+}
+
+/// The one-line warnings for a project's config another tool owns: a stray
+/// `pnpm-workspace.yaml` under nub identity, a default pnpmfile under a non-pnpm
+/// incumbent.
+fn warn_on_ignored_config(surface: ConfigSurface) {
     match surface {
         ConfigSurface::NubIdentity(dir) => {
             // A stray pnpm-workspace.yaml under nub identity (branch merge,

@@ -20,10 +20,10 @@ There is no corepack `enable` step and no built-in version table, so an older Nu
 Nub reads the pin at the workspace root, in this order:
 
 1. **`.yarnrc.yml` `yarnPath`** — a committed Yarn Berry release
-2. **`package.json#/packageManager`** — the corepack field, exact only (`pnpm@9.15.4`, optionally `+sha512.<hash>`)
+2. **`package.json#/packageManager`** — the corepack field, an exact version (`pnpm@9.15.4`, optionally `+sha512.<hash>`)
 3. **`package.json#/devEngines/packageManager`** — `{ name, version }`, where the version may be a range
 
-Ranges belong in `devEngines`, because corepack, pnpm, and Yarn all reject them in `packageManager`. A lockfile never implies a pin. With no pin, `nub pm which` errors and points at [`nub pm use`](#nub-pm-use).
+Ranges belong in `devEngines`. A range in `packageManager` still resolves to the newest matching release, with a warning for pnpm 10 and later, which ignore one there. A lockfile never implies a pin. With no pin, `nub pm which` errors and points at [`nub pm use`](#nub-pm-use).
 
 ## CLI
 
@@ -53,12 +53,12 @@ A bare `nub pm use yarn` pins classic Yarn 1, unless the project's `yarn.lock` i
 Moving an npm project to pnpm:
 
 ```console
-$ nub pm use pnpm
+$ nub pm use pnpm@11.5.3
 Fetching pnpm 11.5.3 (4 MB)...
 using pnpm@11.5.3
-  package.json: packageManager = pnpm@11.5.3 (+sha512)
+  package.json: packageManager = pnpm@11.5.3
   package.json: devEngines.packageManager =
-    { name: "pnpm", version: "^11.5.3", onFail: "warn" }
+    { name: "pnpm", version: "11.5.3", onFail: "warn" }
   pnpm-lock.yaml: written (converted from package-lock.json)
   package-lock.json: removed (migrated)
   pnpm-lock.yaml: packageManagerDependencies = pnpm@11.5.3 (+integrity)
@@ -70,7 +70,7 @@ It writes three things, and rerunning it is a no-op:
 - **`package.json#/devEngines/packageManager`** — `{ name, version: "^<exact>", onFail: "warn" }`, the range-and-policy form npm and pnpm enforce
 - **The lockfile, in the new manager's format** — a lockfile in another format is converted with its resolution state and the old file removed; one already in the target format is left alone. For pnpm 11 and later, the pinned pnpm is also recorded in the lockfile's `packageManagerDependencies`, which pnpm's frozen install requires
 
-The converted lockfile passes the new manager's frozen install, such as `pnpm install --frozen-lockfile`.
+For pnpm 11 and later, both fields hold the same exact version with no hash, because pnpm 11 warns when they disagree. The integrity goes in `pnpm-lock.yaml` instead, and a fresh download is checked against it. With no lockfile to record it, `packageManager` keeps its hash. The converted lockfile passes the new manager's frozen install, such as `pnpm install --frozen-lockfile`.
 
 <Callout title="Config is not migrated">
 Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are.
@@ -107,7 +107,7 @@ It writes only the two pin fields, with no lockfile conversion or config migrati
 
 ### `nub pm update`
 
-Bump the pin to the newest version satisfying the `devEngines` range, or the registry `latest` without one. The command provisions it and rewrites `packageManager` with a fresh hash. Alias: `nub pm up`.
+Bump the pin to the newest version satisfying the `devEngines` range, or the registry `latest` without one. A `devEngines` version that repeats the pin, as Nub writes for pnpm 11, moves with it within its major. The command provisions the new version and rewrites the pin, and for pnpm 11 and later its record in `pnpm-lock.yaml`. Alias: `nub pm up`.
 
 ```console
 $ nub pm update
@@ -160,11 +160,11 @@ NUB_SELF_SHIM=0 nub install
 
 ## `.npmrc`
 
-The package-manager download goes through your `.npmrc`: `registry=` picks the mirror, and `//host/:_authToken=` authenticates.
+The package-manager download goes through your `.npmrc`: `registry=` picks the mirror, and `//host/:_authToken=` authenticates. Setting `NPM_CONFIG_USERCONFIG` moves the user file, and `npm_config_registry` or `NPM_CONFIG_REGISTRY` overrides `registry=`.
 
 ```ini title="~/.npmrc"
-registry=https://npm.corp.example
-//npm.corp.example/:_authToken=${CORP_NPM_TOKEN}
+registry=https://npm.corp.example/artifactory/api/npm/npm/
+//npm.corp.example/artifactory/api/npm/npm/:_authToken=${CORP_NPM_TOKEN}
 ```
 
 Environment placeholders (`${VAR}`) expand in your user `~/.npmrc` and in `npm_config_*` variables. A project `.npmrc` committed to the repo is read literally, so a cloned repository cannot send one of your secrets to a host it chooses. On trusted CI, set `PNPM_CONFIG_NPMRC_AUTH_FILE=.npmrc` to expand the project file too.

@@ -12765,6 +12765,552 @@ fn pm_which_without_a_pin_errors_through_the_binary() {
     );
 }
 
+/// A range in `packageManager` resolves for pnpm and Yarn alike, warning only
+/// where pnpm itself would drop it. The registry is a dead local port, so the
+/// error naming it proves nub went on to resolve the range.
+#[test]
+fn pm_which_resolves_a_range_in_package_manager() {
+    let which = |spec: &str| {
+        let dir = unique_test_cache();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            format!(r#"{{"packageManager":"{spec}"}}"#),
+        )
+        .unwrap();
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(["pm", "which"])
+            .current_dir(&dir)
+            .env("HOME", &dir)
+            .env("XDG_CACHE_HOME", dir.join("cache"));
+        for var in [
+            "npm_config_registry",
+            "npm_config_userconfig",
+            "NPM_CONFIG_USERCONFIG",
+            "COREPACK_NPM_REGISTRY",
+        ] {
+            cmd.env_remove(var);
+        }
+        let out = cmd
+            .env("NPM_CONFIG_REGISTRY", "http://127.0.0.1:1/")
+            .output()
+            .expect("spawn nub pm which");
+        let _ = std::fs::remove_dir_all(&dir);
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    };
+
+    let stderr = which("pnpm@^10");
+    assert!(
+        stderr.contains(r#"packageManager "pnpm@^10" is not an exact version"#)
+            && stderr.contains("devEngines.packageManager")
+            && stderr.contains("127.0.0.1:1"),
+        "a pnpm 10 range must warn, then resolve: {stderr}"
+    );
+
+    let stderr = which("yarn@^4");
+    assert!(
+        !stderr.contains("is not an exact version")
+            && !stderr.contains("no package manager is pinned")
+            && stderr.contains("127.0.0.1:1"),
+        "a Yarn range must resolve without a warning: {stderr}"
+    );
+}
+
+/// The package-manager download reads the registry from the same places the
+/// install engine does: the `.npmrc` `NPM_CONFIG_USERCONFIG` names, and
+/// `NPM_CONFIG_REGISTRY` in either case. Each points at a dead local port, so
+/// the error proves which registry was asked (and nothing reaches the network).
+#[test]
+fn pm_download_follows_userconfig_and_uppercase_registry_env() {
+    let work = unique_test_cache();
+    let home = work.join("home");
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    let rc = work.join("ci-npmrc");
+    std::fs::write(&rc, "registry=http://127.0.0.1:1/userconfig/\n").unwrap();
+
+    let run = |envs: &[(&str, &str)]| {
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(["pm", "use", "pnpm@10.0.0"])
+            .current_dir(&proj)
+            .env("HOME", &home)
+            .env("XDG_CACHE_HOME", work.join("cache"));
+        for var in [
+            "npm_config_registry",
+            "NPM_CONFIG_REGISTRY",
+            "npm_config_userconfig",
+            "NPM_CONFIG_USERCONFIG",
+            "COREPACK_NPM_REGISTRY",
+        ] {
+            cmd.env_remove(var);
+        }
+        cmd.envs(envs.iter().copied());
+        let out = cmd.output().expect("spawn nub pm use");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (code, stderr) = run(&[("NPM_CONFIG_USERCONFIG", rc.to_str().unwrap())]);
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("127.0.0.1:1/userconfig"),
+        "NPM_CONFIG_USERCONFIG's registry must be used: {stderr}"
+    );
+
+    let (code, stderr) = run(&[("NPM_CONFIG_REGISTRY", "http://127.0.0.1:1/upper/")]);
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("127.0.0.1:1/upper"),
+        "NPM_CONFIG_REGISTRY must be used: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// A loopback registry answering each `(path, body)` route, 404 elsewhere. The
+/// routes are built from the bound port so a manifest can point its tarball
+/// back here. The accept loop rides a detached thread for the test process.
+fn serve_registry_routes(routes: impl FnOnce(u16) -> Vec<(String, Vec<u8>)>) -> String {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let routes: std::collections::HashMap<String, Vec<u8>> = routes(port).into_iter().collect();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            let Ok(mut conn) = conn else { break };
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && conn.read(&mut byte).is_ok_and(|n| n == 1) {
+                head.push(byte[0]);
+            }
+            let head = String::from_utf8_lossy(&head);
+            let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+            let reply = match routes.get(&path) {
+                Some(body) => {
+                    let mut r = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
+                    r.extend_from_slice(body);
+                    r
+                }
+                None => b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    .to_vec(),
+            };
+            let _ = conn.write_all(&reply);
+        }
+    });
+    format!("http://127.0.0.1:{port}/")
+}
+
+/// One package-manager release a test registry serves: its package name, the
+/// bin entry's name and path, and the version.
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct PmRelease {
+    name: &'static str,
+    version: &'static str,
+    bin_name: &'static str,
+    bin: &'static str,
+}
+
+#[cfg(unix)]
+impl PmRelease {
+    fn new(name: &'static str, version: &'static str, bin: &'static str) -> Self {
+        Self {
+            name,
+            version,
+            bin_name: name,
+            bin,
+        }
+    }
+
+    fn bin_json(&self) -> String {
+        format!(r#"{{"{}":"{}"}}"#, self.bin_name, self.bin)
+    }
+
+    /// The release tarball (`package/package.json` plus its bin), packed with
+    /// the system `tar`, and its `sha512-` SRI.
+    fn pack(&self, work: &Path) -> (Vec<u8>, String) {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let root = work.join(format!(
+            "pack-{}-{}",
+            self.name.replace('/', "_"),
+            self.version
+        ));
+        let pkg = root.join("package");
+        std::fs::create_dir_all(pkg.join("bin")).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            format!(
+                r#"{{"name":"{}","version":"{}","bin":{}}}"#,
+                self.name,
+                self.version,
+                self.bin_json()
+            ),
+        )
+        .unwrap();
+        std::fs::write(pkg.join(self.bin), "console.log('stub')\n").unwrap();
+        let tgz = root.with_extension("tgz");
+        let status = Command::new("tar")
+            .args([
+                "czf",
+                tgz.to_str().unwrap(),
+                "-C",
+                root.to_str().unwrap(),
+                "package",
+            ])
+            .status()
+            .expect("spawn tar");
+        assert!(status.success());
+        let bytes = std::fs::read(&tgz).unwrap();
+        let sri = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&bytes))
+        );
+        (bytes, sri)
+    }
+
+    fn manifest(&self, port: u16, sri: &str) -> String {
+        format!(
+            r#"{{"name":"{name}","version":"{version}","bin":{bin},
+                 "dist":{{"tarball":"http://127.0.0.1:{port}/{name}-{version}.tgz","integrity":"{sri}"}}}}"#,
+            name = self.name,
+            version = self.version,
+            bin = self.bin_json(),
+        )
+    }
+}
+
+/// The routes npm serves for `releases`: each version manifest and tarball, and
+/// one packument per package listing its versions, the last one `latest`.
+#[cfg(unix)]
+fn pm_registry_routes(
+    port: u16,
+    releases: Vec<(PmRelease, Vec<u8>, String)>,
+) -> Vec<(String, Vec<u8>)> {
+    let mut routes = Vec::new();
+    let mut packuments: std::collections::BTreeMap<&str, Vec<(&str, String)>> = Default::default();
+    for (release, tgz, sri) in releases {
+        let manifest = release.manifest(port, &sri);
+        routes.push((
+            format!("/{}/{}", release.name, release.version),
+            manifest.clone().into_bytes(),
+        ));
+        routes.push((format!("/{}-{}.tgz", release.name, release.version), tgz));
+        packuments
+            .entry(release.name)
+            .or_default()
+            .push((release.version, manifest));
+    }
+    for (name, versions) in packuments {
+        let latest = versions.last().unwrap().0;
+        let entries: Vec<String> = versions
+            .iter()
+            .map(|(v, m)| format!(r#""{v}":{m}"#))
+            .collect();
+        let packument = format!(
+            r#"{{"name":"{name}","dist-tags":{{"latest":"{latest}"}},"versions":{{{}}}}}"#,
+            entries.join(",")
+        );
+        routes.push((format!("/{name}"), packument.into_bytes()));
+    }
+    routes
+}
+
+/// A test registry serving `releases`, packed under `work`.
+#[cfg(unix)]
+fn serve_pm_releases(work: &Path, releases: &[PmRelease]) -> String {
+    let packed: Vec<_> = releases
+        .iter()
+        .map(|r| {
+            let (tgz, sri) = r.pack(work);
+            (*r, tgz, sri)
+        })
+        .collect();
+    serve_registry_routes(|port| pm_registry_routes(port, packed))
+}
+
+/// `nub pm` against a project whose `.npmrc` names the test registry, with the
+/// ambient registry and userconfig variables cleared.
+fn pm_cmd(dir: &Path, args: &[&str]) -> std::process::Output {
+    let mut cmd = Command::new(nub_binary());
+    cmd.arg("pm")
+        .args(args)
+        .current_dir(dir)
+        .env("HOME", dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"));
+    for var in [
+        "npm_config_registry",
+        "NPM_CONFIG_REGISTRY",
+        "npm_config_userconfig",
+        "NPM_CONFIG_USERCONFIG",
+        "COREPACK_NPM_REGISTRY",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd.output().expect("spawn nub pm")
+}
+
+/// An unhashed pnpm 11 pin (the pair pnpm 11 reads silently) is checked on a
+/// cold download against the integrity `pnpm-lock.yaml` records, so a registry
+/// serving a different tarball with matching metadata is refused.
+#[cfg(unix)]
+#[test]
+fn pm_cold_pnpm_11_download_checks_the_lockfile_integrity() {
+    let work = unique_test_cache();
+    std::fs::create_dir_all(&work).unwrap();
+    let release = PmRelease::new("pnpm", "11.0.0", "bin/pnpm.cjs");
+    let (tgz, sri) = release.pack(&work);
+    let recorded_sri = sri.clone();
+    let registry =
+        serve_registry_routes(|port| pm_registry_routes(port, vec![(release, tgz, sri)]));
+    let sri = recorded_sri;
+    let which = |recorded: &str| {
+        let dir = unique_test_cache();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"packageManager":"pnpm@11.0.0","devEngines":{"packageManager":{"name":"pnpm","version":"11.0.0","onFail":"warn"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".npmrc"), format!("registry={registry}\n")).unwrap();
+        std::fs::write(
+            dir.join("pnpm-lock.yaml"),
+            format!(
+                "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    configDependencies: {{}}\n    \
+                 packageManagerDependencies:\n      pnpm:\n        specifier: 11.0.0\n        \
+                 version: 11.0.0\n\npackages:\n\n  pnpm@11.0.0:\n    resolution: {{integrity: {recorded}}}\n\n\
+                 snapshots:\n\n  pnpm@11.0.0: {{}}\n\n---\nlockfileVersion: '9.0'\n"
+            ),
+        )
+        .unwrap();
+        let out = pm_cmd(&dir, &["which"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    let (code, stderr) = which(&sri);
+    assert_eq!(code, Some(0), "the recorded tarball must install: {stderr}");
+
+    let tampered = "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+    let (code, stderr) = which(tampered);
+    assert_ne!(code, Some(0));
+    assert!(
+        stderr.contains("against the integrity pnpm-lock.yaml records"),
+        "a tarball the lockfile doesn't record must be refused: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&work);
+}
+
+/// With no `pnpm-lock.yaml` to carry the digest, `nub pm use pnpm@11.x` keeps
+/// the `+sha512` hash on the pin, so a cold download still has one to check.
+#[cfg(unix)]
+#[test]
+fn pm_use_keeps_the_hash_when_the_lockfile_cannot_record_pnpm() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    let registry = serve_pm_releases(&dir, &[PmRelease::new("pnpm", "11.0.0", "bin/pnpm.cjs")]);
+    std::fs::write(dir.join("package.json"), r#"{"name":"app"}"#).unwrap();
+    std::fs::write(dir.join(".npmrc"), format!("registry={registry}\n")).unwrap();
+    let out = pm_cmd(&dir, &["use", "pnpm@11.0.0"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
+    assert!(
+        manifest["packageManager"]
+            .as_str()
+            .is_some_and(|p| p.starts_with("pnpm@11.0.0+sha512.")),
+        "the pin must keep its hash: {manifest}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A cold `nub pm which` reads the registry by the project's config policy, as
+/// an install would: a pnpm 11 project takes `PNPM_CONFIG_REGISTRY`. The port is
+/// dead, so the error naming it proves which registry was asked.
+#[test]
+fn pm_which_reads_the_registry_by_the_project_config_policy() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"packageManager":"pnpm@11.0.0","devEngines":{"packageManager":{"name":"pnpm","version":"11.0.0","onFail":"warn"}}}"#,
+    )
+    .unwrap();
+    let mut cmd = Command::new(nub_binary());
+    cmd.args(["pm", "which"])
+        .current_dir(&dir)
+        .env("HOME", &dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"));
+    for var in [
+        "npm_config_registry",
+        "NPM_CONFIG_REGISTRY",
+        "pnpm_config_registry",
+        "COREPACK_NPM_REGISTRY",
+    ] {
+        cmd.env_remove(var);
+    }
+    let out = cmd
+        .env("PNPM_CONFIG_REGISTRY", "http://127.0.0.1:1/pnpm11/")
+        .output()
+        .expect("spawn nub pm which");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("127.0.0.1:1/pnpm11"),
+        "a pnpm 11 project's PNPM_CONFIG_REGISTRY must be used: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An exact `devEngines.packageManager` version that is not the pnpm 11 pair is
+/// the user's constraint: `nub pm update` keeps it and its `onFail`.
+#[cfg(unix)]
+#[test]
+fn pm_update_keeps_an_exact_dev_engines_constraint() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    let registry = serve_pm_releases(&dir, &[PmRelease::new("npm", "10.9.2", "bin/npm-cli.js")]);
+    let constraint = serde_json::json!({ "name": "npm", "version": "10.9.2", "onFail": "error" });
+    std::fs::write(
+        dir.join("package.json"),
+        serde_json::json!({ "devEngines": { "packageManager": constraint } }).to_string(),
+    )
+    .unwrap();
+    std::fs::write(dir.join(".npmrc"), format!("registry={registry}\n")).unwrap();
+    let out = pm_cmd(&dir, &["update"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("package.json")).unwrap()).unwrap();
+    assert_eq!(
+        manifest["devEngines"]["packageManager"], constraint,
+        "update must leave the exact constraint and its onFail alone"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An exact pin is answered by that version or refused: a registry whose
+/// version manifest reports another one is not installed as the pin.
+#[cfg(unix)]
+#[test]
+fn pm_refuses_a_registry_answering_an_exact_pin_with_another_version() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    let other = PmRelease::new("pnpm", "11.0.1", "bin/pnpm.cjs");
+    let (tgz, sri) = other.pack(&dir);
+    let registry = serve_registry_routes(|port| {
+        let manifest = other.manifest(port, &sri);
+        vec![
+            ("/pnpm/11.0.0".to_string(), manifest.into_bytes()),
+            ("/pnpm-11.0.1.tgz".to_string(), tgz),
+        ]
+    });
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"packageManager":"pnpm@11.0.0"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join(".npmrc"), format!("registry={registry}\n")).unwrap();
+    let out = pm_cmd(&dir, &["which"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        stderr.contains("answered pnpm@11.0.0 with version 11.0.1"),
+        "a different version must be refused: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A Yarn range spanning Classic and Berry takes the newest match across both
+/// packages, and provisions a Berry pick as Berry.
+#[cfg(unix)]
+#[test]
+fn pm_yarn_range_spanning_classic_and_berry_takes_the_newest() {
+    let dir = unique_test_cache();
+    std::fs::create_dir_all(&dir).unwrap();
+    let registry = serve_pm_releases(
+        &dir,
+        &[
+            PmRelease::new("yarn", "1.22.22", "bin/yarn.js"),
+            PmRelease::new("yarn", "2.4.3", "bin/yarn.js"),
+            PmRelease {
+                name: "@yarnpkg/cli-dist",
+                version: "4.19.0",
+                bin_name: "yarn",
+                bin: "bin/yarn.js",
+            },
+        ],
+    );
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"packageManager":"yarn@>=1 <5"}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join(".npmrc"), format!("registry={registry}\n")).unwrap();
+    let out = pm_cmd(&dir, &["which"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stdout.contains("yarn-berry/4.19.0/"),
+        "the newest match, 4.19.0 from @yarnpkg/cli-dist, must provision as Berry: {stdout}{stderr}"
+    );
+
+    // Offline, the same range finds that Berry release in the cache.
+    std::fs::write(dir.join(".npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let out = pm_cmd(&dir, &["which"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.code() == Some(0) && stdout.contains("yarn-berry/4.19.0/"),
+        "the cached Berry release must answer the range offline: {stdout}{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The `pnpm` shim prints the warning `nub pm which` does for a range pnpm 10+
+/// ignores in `packageManager`. The registry is a dead port: the warning comes
+/// before any download.
+#[cfg(unix)]
+#[test]
+fn pm_shim_warns_about_a_range_in_package_manager() {
+    let dir = unique_test_cache();
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink(nub_binary(), bin.join("pnpm")).unwrap();
+    std::fs::write(dir.join("package.json"), r#"{"packageManager":"pnpm@^10"}"#).unwrap();
+    let out = Command::new(bin.join("pnpm"))
+        .arg("--version")
+        .current_dir(&dir)
+        .env("HOME", &dir)
+        .env("XDG_CACHE_HOME", dir.join("cache"))
+        .env_remove("npm_config_registry")
+        .env("NPM_CONFIG_REGISTRY", "http://127.0.0.1:1/")
+        .output()
+        .expect("spawn the pnpm shim");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(r#"packageManager "pnpm@^10" is not an exact version"#),
+        "the shim must warn about the range: {stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── Section 8: exec/nubx workspace flags (-r / --filter / --parallel) ───
 //
 // Unix-only: the `.bin` entries are POSIX-shebang node scripts created at

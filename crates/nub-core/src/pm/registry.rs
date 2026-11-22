@@ -110,13 +110,23 @@ pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
         .find_map(|(path, trusted)| read_npmrc_key(path, "registry").map(|r| (Some(r), *trusted)))
         .unwrap_or((None, false));
     let user_registry = home_npmrc().and_then(|p| read_npmrc_key(&p, "registry"));
+    let env = crate::incumbent::env_config();
+    let env_registry = env
+        .iter()
+        .rev()
+        .find(|(k, v)| k == "registry" && !v.trim().is_empty())
+        .map(|(_, v)| v.clone());
     let base = resolve_base(
-        env_nonempty("npm_config_registry"),
+        env_registry.clone(),
         project_registry,
         user_registry,
         project_trusted,
     );
-    let auth = npmrc_auth_for(&project, &base);
+    let auth = npmrc_auth_for(
+        &project,
+        &env_auth_text(&env, env_registry.as_deref()),
+        &base,
+    );
     RegistryConfig { base, auth }
 }
 
@@ -146,11 +156,23 @@ pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
 /// `.npmrc` plus, per incumbent, the invoking member's
 /// ([`crate::workspace::npmrc::project_npmrc_paths`]). Each carries its own trust,
 /// so the opt-in re-trusts only the file it names. Returned lowest precedence first.
+///
+/// A project file that IS the user rc (`NPM_CONFIG_USERCONFIG` naming the
+/// project's `.npmrc`, or a project at `$HOME`) is left out: it is read once, as
+/// the user file, the way the install engine dedupes it.
 fn project_npmrc_layers(root: &std::path::Path) -> Vec<(PathBuf, bool)> {
+    project_npmrc_layers_beside(root, home_npmrc().as_deref())
+}
+
+fn project_npmrc_layers_beside(
+    root: &std::path::Path,
+    user_rc: Option<&Path>,
+) -> Vec<(PathBuf, bool)> {
     let auth_file = env_nonempty("PNPM_CONFIG_NPMRC_AUTH_FILE");
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     crate::workspace::npmrc::project_npmrc_paths(root)
         .into_iter()
+        .filter(|path| !user_rc.is_some_and(|user| same_file(path, user)))
         .map(|path| {
             let trusted = auth_file
                 .as_deref()
@@ -158,6 +180,15 @@ fn project_npmrc_layers(root: &std::path::Path) -> Vec<(PathBuf, bool)> {
             (path, trusted)
         })
         .collect()
+}
+
+/// Whether two paths name one physical file: canonical paths when both resolve,
+/// else the paths as written.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// PURE: does the configured `PNPM_CONFIG_NPMRC_AUTH_FILE` path point AT the
@@ -179,9 +210,10 @@ fn auth_file_trusts_project(configured: &str, cwd: &Path, project_rc: &Path) -> 
     }
 }
 
-/// The user-level `~/.npmrc` path, if a home directory resolves.
+/// The user-level `.npmrc`: `NPM_CONFIG_USERCONFIG` when set, else `~/.npmrc` —
+/// the file the install engine reads (asked through [`crate::incumbent`]).
 fn home_npmrc() -> Option<PathBuf> {
-    dirs_next::home_dir().map(|h| h.join(".npmrc"))
+    crate::incumbent::user_npmrc()
 }
 
 /// Read a single `key=value` setting from ONE `.npmrc` file — no project→user
@@ -296,7 +328,35 @@ fn interpolate_with(value: &str, mut lookup: impl FnMut(&str) -> Option<String>)
 /// matching `registry_base`. This is npm's nerfDart resolution: an auth line is
 /// keyed by a registry URL minus its scheme (`//npm.example.com/path/:_authToken`),
 /// and the most-specific (longest) matching prefix wins.
-fn npmrc_auth_for(project: &[(PathBuf, bool)], registry_base: &str) -> Option<Auth> {
+/// The environment's auth entries as `.npmrc` text: `//host/:key=value` lines
+/// as the environment scoped them (`YARN_NPM_AUTH_TOKEN` arrives scoped to
+/// `YARN_NPM_REGISTRY_SERVER`), and an unscoped `_authToken` / `_auth` (Bun's
+/// `BUN_CONFIG_TOKEN`) scoped to the registry the environment names, the only
+/// one it can mean. With no environment registry an unscoped credential is
+/// dropped rather than sent to whatever host the files pick.
+fn env_auth_text(env: &[(String, String)], env_registry: Option<&str>) -> String {
+    let mut text = String::new();
+    for (key, value) in env {
+        let line = if key.starts_with("//") {
+            format!("{key}={value}")
+        } else if matches!(key.as_str(), "_authToken" | "_auth")
+            && let Some(registry) = env_registry
+        {
+            format!("{}/:{key}={value}", nerf_dart(registry))
+        } else {
+            continue;
+        };
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
+fn npmrc_auth_for(
+    project: &[(PathBuf, bool)],
+    env_auth: &str,
+    registry_base: &str,
+) -> Option<Auth> {
     let project: Vec<(String, bool)> = project
         .iter()
         .map(|(path, trusted)| (std::fs::read_to_string(path).unwrap_or_default(), *trusted))
@@ -313,6 +373,8 @@ fn npmrc_auth_for(project: &[(PathBuf, bool)], registry_base: &str) -> Option<Au
         .map(|(text, trusted)| (text.as_str(), *trusted))
         .collect();
     sources.push((&user, true));
+    // The environment outranks both files, as it does for the registry URL.
+    sources.push((env_auth, true));
     parse_npmrc_auth(&sources, registry_base, |name| std::env::var(name).ok())
 }
 
@@ -338,8 +400,9 @@ fn parse_npmrc_auth(
     registry_base: &str,
     mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> Option<Auth> {
-    // The base, scheme-stripped and trailing-slash-trimmed: `//host/path`.
-    let base_nerf = strip_scheme(registry_base).trim_end_matches('/');
+    // The base in nerfDart form: `//host/path`.
+    let base_nerf = nerf_dart(registry_base);
+    let base_nerf = base_nerf.as_str();
 
     // Group auth fields by their `//host[/path]` prefix.
     #[derive(Default)]
@@ -374,7 +437,7 @@ fn parse_npmrc_auth(
         let Some((prefix, field)) = key.rsplit_once(':') else {
             continue;
         };
-        let prefix = prefix.trim_end_matches('/');
+        let prefix = nerf_dart_key(prefix, default_port(registry_base));
         let raw = raw_val.trim().trim_matches('"').trim_matches('\'');
         // Trust-aware expansion: only a trusted source interpolates `${VAR}`; an
         // untrusted (repo-controlled) value stays literal so a committed secret
@@ -384,7 +447,7 @@ fn parse_npmrc_auth(
         } else {
             raw.to_string()
         };
-        let entry = by_prefix.entry(prefix.to_string()).or_default();
+        let entry = by_prefix.entry(prefix).or_default();
         match field {
             "_authToken" => entry.auth_token = Some(val),
             "_auth" => entry.auth_basic = Some(val),
@@ -394,9 +457,19 @@ fn parse_npmrc_auth(
         }
     }
 
-    // Longest `//host[/path]` prefix that is a prefix of the base wins.
+    // Longest `//host[/path]` prefix that is a prefix of the base AND carries a
+    // credential wins — the engine's `has_credential_material` rule. A
+    // path-scoped entry holding only TLS settings (`cafile`), or a username with
+    // no `_password` key, must not shadow the host's token. A `_password` key
+    // that is present but empty completes the pair (`user:`), as in the engine.
+    let has_credential = |f: &Fields| {
+        let set = |v: &Option<String>| v.as_ref().is_some_and(|v| !v.is_empty());
+        set(&f.auth_token) || set(&f.auth_basic) || (set(&f.username) && f.password.is_some())
+    };
     let best = by_prefix
-        .keys()
+        .iter()
+        .filter(|(_, fields)| has_credential(fields))
+        .map(|(prefix, _)| prefix)
         .filter(|prefix| {
             let p = prefix.trim_start_matches("//");
             let base = base_nerf.trim_start_matches("//");
@@ -419,6 +492,49 @@ fn parse_npmrc_auth(
         )));
     }
     None
+}
+
+/// npm's nerfDart form of a registry URL: `//host[:port]/path`, scheme and
+/// trailing slash dropped, and the scheme's default port (443, 80) dropped too,
+/// as `new URL()` does for npm and as the engine keys the credentials it
+/// derives (`YARN_NPM_AUTH_TOKEN` for `https://host:443/npm/` is keyed
+/// `//host/npm/`). A non-default port stays.
+fn nerf_dart(url: &str) -> String {
+    nerf_dart_key(strip_scheme(url), default_port(url))
+}
+
+/// The same form for an `.npmrc` credential key (`//host[:port]/path`), which
+/// carries no scheme: `default_port` is the one of the registry it is matched
+/// against, so `//host:443/npm/` and `//host/npm/` are one key for an https
+/// registry.
+fn nerf_dart_key(key: &str, default_port: &str) -> String {
+    let rest = key.trim_end_matches('/');
+    let Some(authority_and_path) = rest.strip_prefix("//") else {
+        return rest.to_string();
+    };
+    let (authority, path) = authority_and_path
+        .split_once('/')
+        .unwrap_or((authority_and_path, ""));
+    let authority = match authority.strip_suffix(default_port) {
+        Some(host) if !default_port.is_empty() => host,
+        _ => authority,
+    };
+    if path.is_empty() {
+        format!("//{authority}")
+    } else {
+        format!("//{authority}/{path}")
+    }
+}
+
+/// The default port of a URL's scheme, as the `:port` suffix it would carry.
+fn default_port(url: &str) -> &'static str {
+    if url.starts_with("https:") {
+        ":443"
+    } else if url.starts_with("http:") {
+        ":80"
+    } else {
+        ""
+    }
 }
 
 /// npm stores `:_password` base64-encoded; decode it back to plaintext before
@@ -445,10 +561,15 @@ fn strip_scheme(url: &str) -> &str {
 /// (or a replicating mirror) often hardcodes to the public registry even when the
 /// packument was served by a private mirror — so a mirrored/air-gapped install
 /// would otherwise download the tarball from the wrong (often unreachable) host.
-/// npm/pnpm rewrite the origin: keep the path + query, swap scheme+host+port to
-/// the configured registry's. Only rewritten when a NON-public registry is
-/// configured; a public-registry config leaves the URL untouched (the common
-/// case, and the safe one — never redirect a public tarball).
+/// The origin is swapped to the configured registry's, and a registry that
+/// lives under a path (`https://host/artifactory/api/npm/npm`) keeps that path:
+/// `…/pnpm/-/pnpm-10.0.0.tgz` on the public registry becomes
+/// `https://host/artifactory/api/npm/npm/pnpm/-/pnpm-10.0.0.tgz`, as corepack
+/// rewrites it (npm's origin-only swap drops the prefix and 404s there). A tarball
+/// path that already starts with the registry's path keeps it as is. Only
+/// rewritten when a NON-public registry is configured; a public-registry config
+/// leaves the URL untouched (the common case, and the safe one — never redirect a
+/// public tarball).
 fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
     // No rewrite when the configured registry is the public one.
     if origin_of(registry_base) == Some(origin_of(PUBLIC_REGISTRY).unwrap()) {
@@ -461,9 +582,16 @@ fn rewrite_tarball_origin(tarball: &str, registry_base: &str) -> String {
     if reg_origin == tar_origin {
         return tarball.to_string(); // already on the mirror
     }
-    // Swap the origin (scheme+host[+port]); keep the rest of the URL verbatim.
     let rest = &tarball[tar_origin.len()..];
-    format!("{reg_origin}{rest}")
+    let prefix = registry_base[reg_origin.len()..].trim_end_matches('/');
+    let under_prefix = rest
+        .strip_prefix(prefix)
+        .is_some_and(|after| after.is_empty() || after.starts_with('/'));
+    if prefix.is_empty() || under_prefix {
+        format!("{reg_origin}{rest}")
+    } else {
+        format!("{reg_origin}{prefix}{rest}")
+    }
 }
 
 /// The registry credential to present when DOWNLOADING `tarball_url` — `cfg.auth`,
@@ -668,17 +796,22 @@ fn dist_from_meta(version: &str, meta: &Value) -> Result<VersionDist> {
 /// space-separated — pick the sha512 entry), then fall back to the hex
 /// `dist.shasum` (sha1).
 fn parse_integrity(dist: &Value) -> Option<Integrity> {
-    if let Some(sri) = dist.get("integrity").and_then(Value::as_str) {
-        if let Some(sha512) = sri
-            .split_whitespace()
-            .find_map(|tok| tok.strip_prefix("sha512-"))
-        {
-            return Some(Integrity::Sha512(sha512.to_string()));
-        }
+    if let Some(sri) = dist.get("integrity").and_then(Value::as_str)
+        && let Some(integrity) = parse_sri(sri)
+    {
+        return Some(integrity);
     }
     dist.get("shasum")
         .and_then(Value::as_str)
         .map(|hex| Integrity::Sha1(hex.to_string()))
+}
+
+/// The sha512 digest of an SRI string (`sha512-<base64>`, possibly one of several
+/// space-separated hashes) — the only algorithm the registry and lockfiles use.
+pub(crate) fn parse_sri(sri: &str) -> Option<Integrity> {
+    sri.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("sha512-"))
+        .map(|b64| Integrity::Sha512(b64.to_string()))
 }
 
 /// The bin path to run, relative to the package root. npm's `bin` is either a
@@ -789,6 +922,23 @@ const CORGI_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 /// check, that package installs into the store as pnpm 10.9.0, where every
 /// later exact `pnpm@10.9.0` pin on the machine takes it as a cache hit.
 pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
+    let dist = resolve_version_unchecked(cfg, pkg, spec)?;
+    // An exact request is answered by that version or not at all. A registry
+    // that returns another one (a version manifest naming a different version,
+    // or a packument missing the key, whose fallback reads the spec as a caret
+    // range) would otherwise be installed, and checked, as a release nobody
+    // pinned.
+    let spec = spec.trim();
+    if semver::Version::parse(spec).is_ok() && dist.version != spec {
+        bail!(
+            "the registry answered {pkg}@{spec} with version {} — refusing a release other than the one pinned",
+            dist.version
+        );
+    }
+    Ok(dist)
+}
+
+fn resolve_version_unchecked(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
     let spec = spec.trim();
     let base = cfg.base.trim_end_matches('/');
     let is_exact = semver::Version::parse(spec).is_ok();
@@ -1429,6 +1579,50 @@ mod tests {
     }
 
     #[test]
+    fn a_project_npmrc_that_is_the_user_rc_is_read_only_as_user_config() {
+        // `NPM_CONFIG_USERCONFIG=.npmrc` in CI names the project's own file; read
+        // as project config too, its unexpanded `${VAR}` would win.
+        let root = std::env::temp_dir().join(format!("nub-rc-dedupe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        std::fs::write(root.join(".npmrc"), "registry=${CI_REGISTRY}\n").unwrap();
+        let rc = root.join(".npmrc");
+        assert!(project_npmrc_layers_beside(&root, Some(&rc)).is_empty());
+        assert_eq!(
+            project_npmrc_layers_beside(&root, Some(&root.join("elsewhere.npmrc")))
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![rc]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tarball_rewrite_keeps_the_registry_path_prefix() {
+        let public = "https://registry.npmjs.org/pnpm/-/pnpm-10.0.0.tgz";
+        let base = "https://npm.corp.test/artifactory/api/npm/npm";
+        assert_eq!(
+            rewrite_tarball_origin(public, base),
+            "https://npm.corp.test/artifactory/api/npm/npm/pnpm/-/pnpm-10.0.0.tgz"
+        );
+        // A foreign host already under the same path keeps a single prefix.
+        assert_eq!(
+            rewrite_tarball_origin(
+                "https://old.corp.test/artifactory/api/npm/npm/pnpm/-/pnpm-10.0.0.tgz",
+                base
+            ),
+            "https://npm.corp.test/artifactory/api/npm/npm/pnpm/-/pnpm-10.0.0.tgz"
+        );
+        // A root-path mirror swaps only the origin; the public registry rewrites nothing.
+        assert_eq!(
+            rewrite_tarball_origin(public, "http://127.0.0.1:4873"),
+            "http://127.0.0.1:4873/pnpm/-/pnpm-10.0.0.tgz"
+        );
+        assert_eq!(rewrite_tarball_origin(public, PUBLIC_REGISTRY), public);
+    }
+
+    #[test]
     fn registry_base_reads_npmrc_and_normalizes_the_trailing_slash() {
         // The `npm_config_registry` branch is process-global env (flaky to mutate
         // under the parallel harness) — covered by the documented single-override
@@ -1616,6 +1810,113 @@ mod tests {
             Some(Auth::Bearer("${NPM_TOKEN}".to_string())),
             "an untrusted auth line must stay literal, never expand the secret"
         );
+    }
+
+    /// The scheme's default port is optional on both sides: a registry URL and
+    /// a credential key match whichever of them spells `:443` out, the way npm
+    /// and the engine key them; a non-default port still has to match exactly.
+    #[test]
+    fn default_port_spelling_matches_the_credential_key() {
+        let none = |_: &str| None;
+        for key in [
+            "//mirror.example.test/npm/:_authToken=tok\n",
+            "//mirror.example.test:443/npm/:_authToken=tok\n",
+        ] {
+            for base in [
+                "https://mirror.example.test:443/npm/",
+                "https://mirror.example.test/npm",
+            ] {
+                assert_eq!(
+                    parse_npmrc_auth(&[(key, true)], base, none),
+                    Some(Auth::Bearer("tok".to_string())),
+                    "{key} for {base}"
+                );
+            }
+            assert_eq!(
+                parse_npmrc_auth(
+                    &[(key, true)],
+                    "https://mirror.example.test:8443/npm/",
+                    none
+                ),
+                None,
+                "{key} must not reach another port"
+            );
+        }
+        // `:443` is not http's default port, so for an http registry it names
+        // another host:port.
+        assert_eq!(
+            parse_npmrc_auth(
+                &[("//mirror.example.test:443/npm/:_authToken=tok\n", true)],
+                "http://mirror.example.test/npm/",
+                none
+            ),
+            None
+        );
+        assert_eq!(nerf_dart("http://h:80/x/"), "//h/x");
+        assert_eq!(nerf_dart("http://h:443/x/"), "//h:443/x");
+    }
+
+    /// Only an entry carrying a credential competes for the longest-prefix
+    /// match: a path-scoped `cafile` (here spelled with `:443`) leaves the
+    /// host's token in force.
+    #[test]
+    fn a_tls_only_path_entry_does_not_shadow_the_host_token() {
+        let npmrc = "//mirror.example.test/:_authToken=tok\n\
+                     //mirror.example.test:443/npm/:cafile=/etc/ssl/mirror.pem\n";
+        assert_eq!(
+            parse_npmrc_auth(&[(npmrc, true)], "https://mirror.example.test/npm/", |_| {
+                None
+            }),
+            Some(Auth::Bearer("tok".to_string()))
+        );
+    }
+
+    /// A username with a `_password` key, even an empty one, is a credential
+    /// (Basic `user:`); a username with no `_password` key is not.
+    #[test]
+    fn a_username_needs_a_password_key_even_an_empty_one() {
+        let reg = "https://mirror.example.test/";
+        let with_empty =
+            "//mirror.example.test/:username=user\n//mirror.example.test/:_password=\n";
+        assert_eq!(
+            parse_npmrc_auth(&[(with_empty, true)], reg, |_| None),
+            Some(Auth::Basic(base64_encode(b"user:")))
+        );
+        let without = "//mirror.example.test/:username=user\n";
+        assert_eq!(parse_npmrc_auth(&[(without, true)], reg, |_| None), None);
+    }
+
+    /// The environment's credential travels with the environment's registry and
+    /// stays scoped to it: Yarn's pair arrives host-scoped, Bun's token unscoped
+    /// and is pinned to the registry the environment names, and it outranks the
+    /// files.
+    #[test]
+    fn env_auth_goes_with_the_env_registry_and_outranks_the_files() {
+        let reg = "http://127.0.0.1:4873/";
+        let none = |_: &str| None;
+        let yarn = env_auth_text(
+            &[
+                ("registry".into(), reg.into()),
+                ("//127.0.0.1:4873/:_authToken".into(), "yarn-tok".into()),
+            ],
+            Some(reg),
+        );
+        let user = "//127.0.0.1:4873/:_authToken=file-tok\n";
+        assert_eq!(
+            parse_npmrc_auth(&[(user, true), (&yarn, true)], reg, none),
+            Some(Auth::Bearer("yarn-tok".to_string()))
+        );
+        assert_eq!(
+            parse_npmrc_auth(&[(&yarn, true)], "https://registry.npmjs.org/", none),
+            None,
+            "the token must not reach another host"
+        );
+        let bun = env_auth_text(&[("_authToken".into(), "bun-tok".into())], Some(reg));
+        assert_eq!(
+            parse_npmrc_auth(&[(&bun, true)], reg, none),
+            Some(Auth::Bearer("bun-tok".to_string()))
+        );
+        assert!(env_auth_text(&[("_authToken".into(), "bun-tok".into())], None).is_empty());
     }
 
     /// A TRUSTED source (the user `~/.npmrc`, or a project file opted in via the

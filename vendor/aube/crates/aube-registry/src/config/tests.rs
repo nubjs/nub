@@ -3285,6 +3285,28 @@ fn npm_config_env_entries_pnpm_uri_auth_wins_over_npm_uri_auth() {
 }
 
 #[test]
+fn npm_config_env_lowercase_registry_wins_over_uppercase_in_either_order() {
+    // npm reads `npm_config_registry` before `NPM_CONFIG_REGISTRY`, so the
+    // environment's own order must not decide which one applies.
+    let lower = (
+        "npm_config_registry".to_string(),
+        "https://lower.example/".to_string(),
+    );
+    let upper = (
+        "NPM_CONFIG_REGISTRY".to_string(),
+        "https://upper.example/".to_string(),
+    );
+    for env in [[lower.clone(), upper.clone()], [upper, lower]] {
+        let mut config = NpmConfig::default();
+        config.apply(npm_config_env_entries_from(&env));
+        assert_eq!(
+            config.registry, "https://lower.example/",
+            "env order {env:?}"
+        );
+    }
+}
+
+#[test]
 fn translate_npm_config_env_ignores_uri_token_helper() {
     assert_eq!(
         translate_config_env_compat(

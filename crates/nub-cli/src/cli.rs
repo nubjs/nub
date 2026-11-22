@@ -10473,6 +10473,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 eprintln!("» this project uses nub (resolved from {field})");
                 return Ok(0);
             }
+            if let Some(err) = unusable_pin_error(&cwd) {
+                return Err(err);
+            }
             // A project may DECLARE a manager nub doesn't provision (bun — and
             // any name outside nub's provisioning scope). The install path
             // honors the declared identity (`declared_pm_raw`); `which` must
@@ -10556,6 +10559,9 @@ fn run_pm(args: &[String]) -> Result<i32> {
         // shape; a hand-written range is the user's intent and stays verbatim.
         "update" | "up" => {
             check_manifest_json(&cwd)?;
+            if let Some(err) = unusable_pin_error(&cwd) {
+                return Err(err);
+            }
             // A project may DECLARE a manager nub doesn't provision (bun, or any
             // name outside npm/pnpm/yarn). `resolve_pin_with_source` reads such a
             // pin as unresolvable, so the generic "no pin — declare one" context
@@ -10582,26 +10588,39 @@ fn run_pm(args: &[String]) -> Result<i32> {
             for w in &res.warnings {
                 eprintln!("{w}");
             }
+            let from_package_manager = res.source == resolve::PinSource::PackageManager;
             let pin = res.pin;
             let name = pin.pm.to_string();
             let range = dev_engines_range(&cwd, &name);
-            let spec = range.clone().unwrap_or_else(|| "latest".to_string());
+            let current = pin
+                .version
+                .as_deref()
+                .map(|v| v.split_once('+').map_or(v, |(bare, _)| bare).to_string());
+            // The pnpm 11 pair (devEngines repeating the packageManager pin) is
+            // not a range to float within: it moves with the pin inside its major.
+            // An exact devEngines version anywhere else is the user's constraint.
+            let repeats_pin = from_package_manager
+                && range
+                    .as_deref()
+                    .zip(pin.version.as_deref())
+                    .is_some_and(|(r, p)| resolve::is_pnpm_11_pair(&name, r, p));
+            let spec = match (&current, repeats_pin) {
+                (Some(cur), true) => format!("^{cur}"),
+                _ => range.clone().unwrap_or_else(|| "latest".to_string()),
+            };
             // The pair semantics: devEngines = intent, packageManager = resolved
             // record. A nub-shaped range (^x.y.z — what pin/update themselves
             // write) is re-derived from the new exact; a hand-written one
             // (">=9 <10", "~9.2") survives untouched. The update just resolved
             // WITHIN that range, so the new exact satisfies it by construction.
-            let keep_dev_engines = range
-                .as_deref()
-                .is_some_and(|r| !resolve::nub_shaped_range(r));
-            let current = pin
-                .version
-                .as_deref()
-                .map(|v| v.split_once('+').map_or(v, |(bare, _)| bare).to_string());
+            let keep_dev_engines = !repeats_pin
+                && range
+                    .as_deref()
+                    .is_some_and(|r| !resolve::nub_shaped_range(r));
             // A nub-shaped devEngines range moves with the pin (same writer as
             // `use`, onFail:"warn"); a hand-written one is the user's stated
             // constraint update floats WITHIN — never rewritten.
-            let (version, _) = resolve_provision_declare(
+            let (version, write) = resolve_provision_declare(
                 &name,
                 &spec,
                 &cwd,
@@ -10610,6 +10629,23 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 |_| Ok(()),
             )?;
             warn_if_yarn_path_shadows_pin(&cwd, &name);
+            if pin.pm == Pm::Pnpm {
+                // pnpm 11+ checks the pinned pnpm against the lockfile's env
+                // document on a frozen install, so it moves with the pin.
+                let root = resolve::pin_target_dir(&cwd);
+                if let Err(e) = crate::pm_engine::sync_pnpm_package_manager_pin(&root) {
+                    eprintln!(
+                        "nub: could not record pnpm@{version} in pnpm-lock.yaml: {e:#}\n\
+                         \x20 the next `nub install` records it"
+                    );
+                }
+                if keep_pnpm_pin_digest(&root, &version, &write)? {
+                    eprintln!(
+                        "nub: packageManager keeps its +sha512 hash, since pnpm-lock.yaml \
+                         does not record pnpm@{version}"
+                    );
+                }
+            }
             match current {
                 Some(cur) if cur == version => eprintln!(
                     "{name} is already on the newest version ({version}); pin hash refreshed."
@@ -10884,6 +10920,41 @@ fn resolve_provision_declare(
     Ok((dist.version, write))
 }
 
+/// An unhashed pnpm 11+ pin's project-pinned digest is the integrity
+/// `pnpm-lock.yaml` records; a cold download checks the tarball against it.
+/// When the lockfile does not record this exact tarball (there is no lockfile
+/// yet, the pin's `onFail: "ignore"` keeps pnpm from recording it, or the
+/// sync failed), the hash goes back on the pin. Returns whether it did.
+fn keep_pnpm_pin_digest(
+    root: &Path,
+    version: &str,
+    write: &nub_core::pm::resolve::DeclaredPmWrite,
+) -> Result<bool> {
+    use base64::Engine as _;
+    if write.pin_hashed {
+        return Ok(false);
+    }
+    let want = hex_to_bytes(&write.sha512_hex).map(|bytes| {
+        format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    });
+    let recorded = crate::pm_engine::pnpm_lockfile_integrity(root, version);
+    if want.is_some() && recorded == want {
+        return Ok(false);
+    }
+    nub_core::pm::resolve::hash_package_manager_pin(root, "pnpm", version, &write.sha512_hex)?;
+    Ok(true)
+}
+
+fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 fn sha512_file_hex(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha512};
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -10958,7 +11029,8 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
 
     // Step 4 — the file-by-file summary (stdout). Nothing silent.
     println!("using {name}@{version}");
-    println!("  package.json: packageManager = {name}@{version} (+sha512)");
+    let hashed = if write.pin_hashed { " (+sha512)" } else { "" };
+    println!("  package.json: packageManager = {name}@{version}{hashed}");
     if let Some(range) = &write.dev_engines_range {
         println!(
             "  package.json: devEngines.packageManager = {{ name: \"{name}\", version: \"{range}\", onFail: \"warn\" }}"
@@ -11057,6 +11129,12 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
                 "nub: could not record pnpm@{version} in pnpm-lock.yaml: {e:#}\n\
                  \x20 the next `nub install` records it"
             ),
+        }
+        if keep_pnpm_pin_digest(&root, &version, &write)? {
+            println!(
+                "  package.json: packageManager = pnpm@{version} (+sha512), \
+                 since pnpm-lock.yaml does not record it"
+            );
         }
     }
     Ok(0)
@@ -11198,6 +11276,20 @@ fn fetch_verify_and_hash_tarball(
         path,
         _dir: dir,
     })
+}
+
+/// The error for a pin field that names npm, pnpm or Yarn but can't be used (a
+/// dist-tag such as `yarn@stable`): the field, its value and why,
+/// instead of the generic "no package manager is pinned".
+fn unusable_pin_error(cwd: &Path) -> Option<anyhow::Error> {
+    match nub_core::pm::resolve::unusable_pin(cwd)? {
+        nub_core::pm::resolve::PinWarning::Ignored {
+            field,
+            spec,
+            reason,
+        } => Some(anyhow::anyhow!("{field} \"{spec}\": {reason}")),
+        _ => None,
+    }
 }
 
 /// `devEngines.packageManager.version` from the root manifest, when the field
@@ -11808,7 +11900,20 @@ fn shim_plan_at(
     use nub_core::pm::resolve::{self, PmTarget};
     use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
 
-    let target = resolve::resolve_target(cwd);
+    let resolution = resolve::resolve_target_with_source(cwd);
+    // A range pnpm 10+ ignores in `packageManager` still runs, with the warning
+    // `nub pm which` prints. A pin field nub can't use at all (a dist-tag such
+    // as `yarn@stable`) runs the project unpinned — but says so too.
+    if let Some(res) = &resolution {
+        for w in &res.warnings {
+            if matches!(w, resolve::PinWarning::RangeInPackageManager { .. }) {
+                eprintln!("{w}");
+            }
+        }
+    } else if let Some(w) = resolve::unusable_pin(cwd) {
+        eprintln!("{w}");
+    }
+    let target = resolution.map(|r| r.target);
     let pin_state = shim_pin_state(cwd, target.as_ref());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the

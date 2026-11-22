@@ -17,6 +17,11 @@ pub(super) fn npm_config_env_entries_from(env: &[(String, String)]) -> Vec<(Stri
     let read_pnpm = aube_util::engine_context().read_pnpm_config_env_registry;
     let mut npm_scoped = Vec::new();
     let mut pnpm_scoped = Vec::new();
+    // `NPM_CONFIG_*` entries, ahead of their lowercase twins: npm reads the
+    // lowercase spelling first, so `npm_config_registry` beats
+    // `NPM_CONFIG_REGISTRY` whatever order the environment lists them in.
+    let mut upper_out = Vec::new();
+    let mut upper_scoped = Vec::new();
     let mut out = Vec::new();
     let mut pnpm_out = Vec::new();
     for (name, value) in env {
@@ -33,19 +38,27 @@ pub(super) fn npm_config_env_entries_from(env: &[(String, String)]) -> Vec<(Stri
         let is_pnpm_prefixed = name
             .get(.."pnpm_config_".len())
             .is_some_and(|p| p.eq_ignore_ascii_case("pnpm_config_"));
+        let is_npm_upper = name.starts_with("NPM_CONFIG_");
         match translate_config_env(name, value, read_pnpm) {
             Some((key, value)) if key.starts_with("//") => {
                 if is_pnpm_prefixed {
                     pnpm_scoped.push((key, value));
+                } else if is_npm_upper {
+                    upper_scoped.push((key, value));
                 } else {
                     npm_scoped.push((key, value));
                 }
             }
             Some(entry) if is_pnpm_prefixed => pnpm_out.push(entry),
+            Some(entry) if is_npm_upper => upper_out.push(entry),
             Some(entry) => out.push(entry),
             None => {}
         }
     }
+    upper_out.append(&mut out);
+    let mut out = upper_out;
+    upper_scoped.append(&mut npm_scoped);
+    let npm_scoped = upper_scoped;
     // Order (low → high precedence, last-write-wins): npm non-auth, pnpm
     // non-auth, npm auth, pnpm auth. The auth buckets stay after the non-auth
     // ones to preserve the existing auth-wins layering.
