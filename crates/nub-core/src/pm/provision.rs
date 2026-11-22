@@ -174,6 +174,17 @@ pub fn provision_pm_announced(
             let fallback = if is_tag {
                 read_tag_resolution(&pm_store, &cfg.base, spec)
                     .and_then(|(version, _)| cached_bin(&pm_store, &version).map(|b| (version, b)))
+            } else if pm == super::Pm::Yarn {
+                // A classic yarn range can be met by a Berry release the online
+                // path installed under the Berry store: the newest across both.
+                let berry_store = store_root.join("pm").join(super::Pm::YarnBerry.store_dir());
+                [
+                    best_cached_match(&pm_store, spec),
+                    best_cached_match(&berry_store, spec),
+                ]
+                .into_iter()
+                .flatten()
+                .max_by_key(|(version, _)| semver::Version::parse(version).ok())
             } else {
                 best_cached_match(&pm_store, spec)
             };

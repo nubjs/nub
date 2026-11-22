@@ -13187,6 +13187,16 @@ fn pm_yarn_range_spanning_classic_and_berry_takes_the_newest() {
         stdout.contains("yarn-berry/4.19.0/"),
         "the newest match, 4.19.0 from @yarnpkg/cli-dist, must provision as Berry: {stdout}{stderr}"
     );
+
+    // Offline, the same range finds that Berry release in the cache.
+    std::fs::write(dir.join(".npmrc"), "registry=http://127.0.0.1:1/\n").unwrap();
+    let out = pm_cmd(&dir, &["which"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.code() == Some(0) && stdout.contains("yarn-berry/4.19.0/"),
+        "the cached Berry release must answer the range offline: {stdout}{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

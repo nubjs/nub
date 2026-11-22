@@ -342,10 +342,7 @@ fn env_auth_text(env: &[(String, String)], env_registry: Option<&str>) -> String
         } else if matches!(key.as_str(), "_authToken" | "_auth")
             && let Some(registry) = env_registry
         {
-            format!(
-                "{}/:{key}={value}",
-                strip_scheme(registry).trim_end_matches('/')
-            )
+            format!("{}/:{key}={value}", nerf_dart(registry))
         } else {
             continue;
         };
@@ -403,8 +400,9 @@ fn parse_npmrc_auth(
     registry_base: &str,
     mut lookup: impl FnMut(&str) -> Option<String>,
 ) -> Option<Auth> {
-    // The base, scheme-stripped and trailing-slash-trimmed: `//host/path`.
-    let base_nerf = strip_scheme(registry_base).trim_end_matches('/');
+    // The base in nerfDart form: `//host/path`.
+    let base_nerf = nerf_dart(registry_base);
+    let base_nerf = base_nerf.as_str();
 
     // Group auth fields by their `//host[/path]` prefix.
     #[derive(Default)]
@@ -484,6 +482,37 @@ fn parse_npmrc_auth(
         )));
     }
     None
+}
+
+/// npm's nerfDart form of a registry URL: `//host[:port]/path`, scheme and
+/// trailing slash dropped, and the scheme's default port (443, 80) dropped too,
+/// as `new URL()` does for npm and as the engine keys the credentials it
+/// derives (`YARN_NPM_AUTH_TOKEN` for `https://host:443/npm/` is keyed
+/// `//host/npm/`). A non-default port stays.
+fn nerf_dart(url: &str) -> String {
+    let default_port = if url.starts_with("https:") {
+        ":443"
+    } else if url.starts_with("http:") {
+        ":80"
+    } else {
+        ""
+    };
+    let rest = strip_scheme(url).trim_end_matches('/');
+    let Some(authority_and_path) = rest.strip_prefix("//") else {
+        return rest.to_string();
+    };
+    let (authority, path) = authority_and_path
+        .split_once('/')
+        .unwrap_or((authority_and_path, ""));
+    let authority = match authority.strip_suffix(default_port) {
+        Some(host) if !default_port.is_empty() => host,
+        _ => authority,
+    };
+    if path.is_empty() {
+        format!("//{authority}")
+    } else {
+        format!("//{authority}/{path}")
+    }
 }
 
 /// npm stores `:_password` base64-encoded; decode it back to plaintext before
@@ -1759,6 +1788,35 @@ mod tests {
             Some(Auth::Bearer("${NPM_TOKEN}".to_string())),
             "an untrusted auth line must stay literal, never expand the secret"
         );
+    }
+
+    /// A registry spelled with its scheme's default port matches a credential
+    /// keyed without it, the way npm and the engine key them; a non-default port
+    /// still has to match exactly.
+    #[test]
+    fn default_port_spelling_matches_the_credential_key() {
+        let none = |_: &str| None;
+        let key = "//mirror.example.test/npm/:_authToken=tok\n";
+        for base in [
+            "https://mirror.example.test:443/npm/",
+            "https://mirror.example.test/npm",
+        ] {
+            assert_eq!(
+                parse_npmrc_auth(&[(key, true)], base, none),
+                Some(Auth::Bearer("tok".to_string())),
+                "{base}"
+            );
+        }
+        assert_eq!(
+            parse_npmrc_auth(
+                &[(key, true)],
+                "https://mirror.example.test:8443/npm/",
+                none
+            ),
+            None
+        );
+        assert_eq!(nerf_dart("http://h:80/x/"), "//h/x");
+        assert_eq!(nerf_dart("http://h:443/x/"), "//h:443/x");
     }
 
     /// The environment's credential travels with the environment's registry and
