@@ -107,11 +107,14 @@ jobs:
 
       # Buildx v0.39.0 fails to load a build context whose .dockerignore has more
       # than 490 patterns with HTTP 431, and ours has ~920 (docker/buildx#4209,
-      # fixed in v0.39.1).
+      # fixed in v0.39.1). The pinned binary is downloaded every run, never
+      # restored from the Actions cache, which any workflow on the repo can write
+      # (zizmor's cache-poisoning audit).
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
         with:
           version: v0.39.1
+          cache-binary: false
 
       # The nub version to bake in. When invoked with a `nub_version` input (the
       # release.yml call or a workflow_dispatch backfill), install exactly that
