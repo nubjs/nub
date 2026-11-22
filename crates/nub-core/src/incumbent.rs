@@ -27,6 +27,9 @@ pub struct IncumbentProbe {
     /// The default registry the environment sets, by the engine's rules
     /// (`npm_config_registry` in either case, and the incumbent's own variables).
     pub env_registry: fn() -> Option<String>,
+    /// The integrity `<dir>/pnpm-lock.yaml` records for the pinned pnpm at a
+    /// version (its `packageManagerDependencies`), as an SRI string.
+    pub pnpm_lockfile_integrity: fn(&Path, &str) -> Option<String>,
 }
 
 static PROBE: OnceLock<IncumbentProbe> = OnceLock::new();
@@ -64,4 +67,11 @@ pub(crate) fn env_registry() -> Option<String> {
         None => std::env::var("npm_config_registry").ok(),
     }
     .filter(|v| !v.trim().is_empty())
+}
+
+/// See [`IncumbentProbe::pnpm_lockfile_integrity`]. Unregistered, `None`.
+pub(crate) fn pnpm_lockfile_integrity(dir: &Path, version: &str) -> Option<String> {
+    PROBE
+        .get()
+        .and_then(|p| (p.pnpm_lockfile_integrity)(dir, version))
 }

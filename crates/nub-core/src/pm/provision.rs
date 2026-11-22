@@ -208,12 +208,25 @@ pub fn provision_pm_announced(
         }); // cache hit — silent
     }
 
+    // A pnpm 11+ pin nub writes carries no hash (pnpm 11 warns on one); its
+    // project-pinned digest is the integrity `pnpm-lock.yaml` records instead.
+    let lockfile_integrity = (pm == super::Pm::Pnpm && pin_hash.is_none())
+        .then(|| {
+            crate::incumbent::pnpm_lockfile_integrity(
+                &super::resolve::pin_target_dir(project_root),
+                &dist.version,
+            )
+        })
+        .flatten()
+        .and_then(|sri| registry::parse_sri(&sri));
+
     install(
         pm,
         &dist,
         &pm_store,
         &final_dir,
         pin_hash,
+        lockfile_integrity.as_ref(),
         // Host-match the registry auth to the tarball before attaching it: a
         // packument's `dist.tarball` can name a foreign host, and the bearer
         // token must never leave the registry's own origin (N1b). The packument
@@ -424,6 +437,7 @@ fn install(
     pm_store: &Path,
     final_dir: &Path,
     pin_hash: Option<&str>,
+    lockfile_integrity: Option<&registry::Integrity>,
     auth: Option<&download::Auth>,
     resolved_from: Option<&str>,
     quiet_using: bool,
@@ -481,6 +495,14 @@ fn install(
         verify_pin_hash(&tarball, suffix).with_context(|| {
             format!(
                 "verifying {pm} {} against the packageManager pin hash",
+                dist.version
+            )
+        })?;
+    }
+    if let Some(want) = lockfile_integrity {
+        registry::verify_integrity(&tarball, want).with_context(|| {
+            format!(
+                "verifying {pm} {} against the integrity pnpm-lock.yaml records",
                 dist.version
             )
         })?;

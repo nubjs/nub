@@ -80,7 +80,7 @@ pub struct PmTargetResolution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PmPinResolution {
     pub pin: PmPin,
-    source: PinSource,
+    pub source: PinSource,
     pub warnings: Vec<PinWarning>,
 }
 
@@ -90,8 +90,8 @@ pub struct PmPinResolution {
 /// on the variant, not on a formatted string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PinWarning {
-    /// A pin field is present but unusable (`yarn@^4` in the exact-only
-    /// `packageManager`; an unsupported manager; a missing version) — the project
+    /// A pin field is present but unusable (a yarn dist-tag such as
+    /// `yarn@stable`; an unsupported manager; a missing version) — the project
     /// resolves as unpinned. `field` names where it came from, `spec` is the raw
     /// value, `reason` is the parser's message.
     Ignored {
@@ -108,6 +108,11 @@ pub enum PinWarning {
         dev_engines: String,
         kind: DisagreementKind,
     },
+    /// `packageManager` names pnpm by a range or partial version (`pnpm@10`).
+    /// nub resolves it to the newest matching release, as for npm and Yarn, but
+    /// pnpm 10 and later ignore a non-exact `packageManager` (with a warning of
+    /// their own), so the range belongs in `devEngines.packageManager`.
+    RangeInPackageManager { spec: String },
 }
 
 /// Which pin field a [`PinWarning::Ignored`] refers to — drives the field name in
@@ -145,6 +150,11 @@ impl std::fmt::Display for PinWarning {
                 spec,
                 reason,
             } => write!(f, "nub: ignoring {field} \"{spec}\": {reason}"),
+            PinWarning::RangeInPackageManager { spec } => write!(
+                f,
+                "nub: packageManager \"{spec}\" is not an exact version, which pnpm 10 and \
+                 later ignore — a range belongs in devEngines.packageManager"
+            ),
             PinWarning::Disagreement {
                 package_manager,
                 dev_engines,
@@ -242,8 +252,8 @@ pub fn resolve_pin_with_source(cwd: &Path) -> Option<PmPinResolution> {
 }
 
 /// Why a project whose pin field names npm, pnpm or Yarn still resolves as
-/// unpinned: the [`PinWarning::Ignored`] for that field (`yarn@^4` in the
-/// exact-only `packageManager`). `None` when the project resolves, carries no pin
+/// unpinned: the [`PinWarning::Ignored`] for that field (`yarn@stable`, a
+/// dist-tag with no major to classify by). `None` when the project resolves, carries no pin
 /// field, or declares a manager nub doesn't provision (bun has its own message).
 /// [`resolve_pin_with_source`] drops these warnings on `None`; callers that
 /// report "unpinned" ask here first so the reason reaches the user.
@@ -302,6 +312,11 @@ fn pin_from_manifest(manifest: &serde_json::Value) -> ManifestPin {
                 // Both fields present + agreeing → silent; disagreeing → warn,
                 // packageManager (the field nub executes) wins.
                 let mut warnings = Vec::new();
+                if pnpm_ignores_range(&pin) {
+                    warnings.push(PinWarning::RangeInPackageManager {
+                        spec: spec.to_string(),
+                    });
+                }
                 if let Some(w) = disagreement_warning(spec, &pin, manifest) {
                     warnings.push(w);
                 }
@@ -339,7 +354,7 @@ fn pin_from_manifest(manifest: &serde_json::Value) -> ManifestPin {
         };
     };
     let version = dev.get("version").and_then(|v| v.as_str());
-    match classify(name, version, SpecForm::Range) {
+    match classify(name, version) {
         Ok(pin) => ManifestPin {
             pin: Some((pin, PinSource::DevEngines)),
             warnings: Vec::new(),
@@ -678,6 +693,28 @@ pub struct DeclaredPmWrite {
     /// Whether `packageManager` carries the `+sha512.<hex>` suffix — every pin
     /// but pnpm 11+, whose hash lives in `pnpm-lock.yaml` instead.
     pub pin_hashed: bool,
+    /// The tarball's sha512, hex — on the pin when `pin_hashed`, and the digest
+    /// the caller checks `pnpm-lock.yaml` against when not.
+    pub sha512_hex: String,
+}
+
+/// Put the `+sha512.<hex>` hash back on an unhashed pnpm 11+ `packageManager`
+/// pin, for when `pnpm-lock.yaml` cannot carry its digest (no lockfile yet, or
+/// a pin pnpm does not record). pnpm 11 then warns that the two fields differ,
+/// but a cold download keeps a project-pinned digest to check against.
+pub fn hash_package_manager_pin(
+    cwd: &Path,
+    name: &str,
+    version: &str,
+    sha512_hex: &str,
+) -> Result<()> {
+    edit_manifest(cwd, |obj| {
+        obj.insert(
+            "packageManager".to_string(),
+            serde_json::Value::String(format!("{name}@{version}+sha512.{sha512_hex}")),
+        );
+    })?;
+    Ok(())
 }
 
 /// Write the `packageManager` declaration into the workspace-root
@@ -739,7 +776,9 @@ pub fn write_declared_pm(
         );
     }
 
-    let mirrors = dev_engines_mirrors_pin(name, version);
+    // Only a pair nub writes in full mirrors: with devEngines left alone (a
+    // hand-written range `update` floats within), the hash stays on the pin.
+    let mirrors = maintain_dev_engines && dev_engines_mirrors_pin(name, version);
     let range = maintain_dev_engines.then(|| {
         if mirrors {
             version.to_string()
@@ -789,6 +828,7 @@ pub fn write_declared_pm(
         path,
         dev_engines_range: range,
         pin_hashed: !mirrors,
+        sha512_hex: sha512_hex.to_string(),
     })
 }
 
@@ -804,15 +844,16 @@ fn dev_engines_mirrors_pin(name: &str, version: &str) -> bool {
     name == "pnpm" && semver::Version::parse(version).is_ok_and(|v| v.major >= 11)
 }
 
-/// Whether a `devEngines.packageManager.version` repeats the `packageManager`
-/// pin's exact version (hash ignored) — the pnpm 11 shape [`write_declared_pm`]
-/// writes, and what `pnpm init` writes. `nub pm update` floats such a pair within
-/// the pin's major and rewrites both, as `pnpm self-update` does, rather than
-/// reading the exact version as a range that admits nothing newer.
-pub fn dev_engines_repeats_pin(dev_engines_version: &str, pin_version: &str) -> bool {
+/// Whether `packageManager: pnpm@<v>` and a `devEngines.packageManager.version`
+/// form the pnpm 11+ pair [`write_declared_pm`] writes (and `pnpm init` writes):
+/// the same exact version in both, hash ignored. `nub pm update` floats such a
+/// pair within the pin's major and rewrites both, as `pnpm self-update` does,
+/// rather than reading the exact version as a range that admits nothing newer.
+/// Any other exact devEngines version is the user's constraint and stays put.
+pub fn is_pnpm_11_pair(name: &str, dev_engines_version: &str, pin_version: &str) -> bool {
     let bare = |v: &str| v.split_once('+').map_or(v, |(b, _)| b).trim().to_string();
     let dev = bare(dev_engines_version);
-    semver::Version::parse(&dev).is_ok() && dev == bare(pin_version)
+    dev_engines_mirrors_pin(name, &dev) && dev == bare(pin_version)
 }
 
 /// Whether a `devEngines.packageManager.version` is exactly the shape nub
@@ -956,7 +997,7 @@ fn serialize_manifest(manifest: &serde_json::Value, format: &ManifestFormat) -> 
 /// Resolve where a pin is written: the workspace root if one is above `cwd`,
 /// else the nearest project root, else `cwd`. Mirrors `manage::pin_target_dir`'s
 /// rule (a `packageManager` pin is repo-wide, like the Node pin).
-fn pin_target_dir(cwd: &Path) -> PathBuf {
+pub fn pin_target_dir(cwd: &Path) -> PathBuf {
     if let Some(project) = detect_project(cwd) {
         return project.workspace_root.unwrap_or(project.root);
     }
@@ -981,9 +1022,9 @@ fn parse_spec(spec: &str) -> Result<PmPin> {
     // version-switch on a URL spec. Without this the URL reached the semver
     // resolver and aborted the run (`unexpected character 'h'`).
     if is_url_version_ref(version) {
-        return classify(name, None, SpecForm::Exact);
+        return classify(name, None);
     }
-    classify(name, Some(version), SpecForm::Exact)
+    classify(name, Some(version))
 }
 
 /// Whether a `packageManager` *version* slot holds a URL / git / file reference
@@ -997,42 +1038,34 @@ fn is_url_version_ref(version: &str) -> bool {
     v.contains("://") || v.starts_with("git+") || v.starts_with("git@") || v.starts_with("file:")
 }
 
-/// Which spec shapes a pin field admits: `packageManager` is exact-only (the
-/// Corepack contract), `devEngines.packageManager` takes a semver range.
-#[derive(Clone, Copy)]
-enum SpecForm {
-    Exact,
-    Range,
+/// Whether pnpm itself would drop this `packageManager` pin: pnpm 10 and later
+/// ignore a non-exact version there, while pnpm 9, npm and Yarn read one. Judged
+/// by the range's lower-bound major, the line `pnpm@10` or `pnpm@^10.2` resolves
+/// to; a version with no major (`pnpm@latest`) resolves past 10.
+fn pnpm_ignores_range(pin: &PmPin) -> bool {
+    let (Pm::Pnpm, Some(v)) = (pin.pm, pin.version.as_deref()) else {
+        return false;
+    };
+    semver::Version::parse(v.trim()).is_err() && yarn_range_major(v).is_none_or(|m| m >= 10)
 }
 
 /// Map a `(name, version)` pair to a [`PmPin`], applying the yarn classic/berry
 /// split. The version (with any hash suffix) is stored verbatim.
-fn classify(name: &str, version: Option<&str>, form: SpecForm) -> Result<PmPin> {
-    // `packageManager` holds one exact version (a `+sha512.…` suffix rides as
-    // build metadata). Corepack refuses a range there, and pnpm 10 and 11 warn
-    // and ignore it, so nub doesn't resolve one either: a range belongs in
-    // `devEngines.packageManager`, which npm, pnpm and nub all read as a range.
-    if let (SpecForm::Exact, Some(v), "npm" | "pnpm" | "yarn") = (form, version, name)
-        && semver::Version::parse(v.trim()).is_err()
-    {
-        bail!(
-            "\"{v}\" is not an exact version — packageManager takes {name}@x.y.z; \
-             put a range in devEngines.packageManager instead"
-        );
-    }
+fn classify(name: &str, version: Option<&str>) -> Result<PmPin> {
     let pm = match name {
         "npm" => Pm::Npm,
         "pnpm" => Pm::Pnpm,
         "yarn" => {
             // A *pinned* yarn (version present) must classify by major to pick
-            // the `yarn` vs `@yarnpkg/cli-dist` package. A spec with no leading
-            // numeric major (`yarn@stable`, `yarn@berry`) can't be split, so it is
+            // the `yarn` vs `@yarnpkg/cli-dist` package. An exact version or a
+            // range (`yarn@^4`, in either field, as for pnpm and npm) carries one;
+            // a dist-tag (`yarn@stable`, `yarn@berry`) can't be split, so it is
             // rejected naming the requirement rather than silently provisioning
             // classic for a Berry tag. A genuinely absent version (the
             // lockfile-inference seam) still flows through the yarnrc signal in
             // `classify_yarn`.
             if let Some(v) = version {
-                if matches!(form, SpecForm::Range) && yarn_range_major(v).is_none() {
+                if yarn_range_major(v).is_none() {
                     bail!(
                         "yarn \"{v}\" needs a numeric version or range (e.g. 4.2.2, ^4) — \
                          dist-tags (stable, berry) can't tell classic yarn from Berry"
@@ -1527,16 +1560,16 @@ mod tests {
     }
 
     #[test]
-    fn yarn_dist_tag_or_range_pin_is_rejected_naming_the_exact_version_rule() {
+    fn yarn_dist_tag_pin_is_rejected_naming_the_numeric_version_rule() {
         // A non-numeric yarn version (`yarn@stable`, `yarn@berry`) can't be split
-        // into classic-vs-Berry and Corepack requires an exact version — so the
-        // parser errors here rather than silently misclassifying it as classic and
-        // attempting a doomed classic-tarball provision.
+        // into classic-vs-Berry — so the parser errors here rather than silently
+        // misclassifying it as classic and attempting a doomed classic-tarball
+        // provision.
         for spec in ["yarn@stable", "yarn@berry"] {
             let err = parse_spec(spec).unwrap_err().to_string();
             assert!(
-                err.contains("exact version"),
-                "{spec} must be rejected naming the exact-version rule, got: {err}"
+                err.contains("dist-tags"),
+                "{spec} must be rejected naming the dist-tag rule, got: {err}"
             );
         }
         // An exact version classifies by its major.
@@ -1545,30 +1578,47 @@ mod tests {
     }
 
     #[test]
-    fn package_manager_takes_only_an_exact_version_for_every_manager() {
-        // Corepack refuses a range in `packageManager` and pnpm 10/11 warn and
-        // drop it, so nub treats one the same for npm, pnpm and yarn alike: the
-        // field is unusable and the reason points at devEngines.packageManager.
-        for spec in [
-            "pnpm@10",
-            "pnpm@^9.1.0",
-            "npm@10",
-            "yarn@1",
-            "yarn@^4",
-            "pnpm@latest",
-        ] {
-            let err = parse_spec(spec).unwrap_err().to_string();
+    fn package_manager_range_resolves_and_warns_only_where_pnpm_drops_it() {
+        // A range or partial version in `packageManager` resolves for npm, pnpm
+        // and Yarn alike. pnpm 10+ ignores one itself, so only those pins warn.
+        let read = |spec: &str| pin_from_manifest(&serde_json::json!({ "packageManager": spec }));
+        for spec in ["pnpm@10", "pnpm@^10.2.0", "pnpm@11", "pnpm@latest"] {
+            let r = read(spec);
+            let (pin, source) = r.pin.expect("a pnpm range must still resolve");
+            assert_eq!((pin.pm, source), (Pm::Pnpm, PinSource::PackageManager));
+            assert_eq!(
+                r.warnings,
+                vec![PinWarning::RangeInPackageManager {
+                    spec: spec.to_string()
+                }],
+                "{spec}: pnpm 10+ drops a non-exact packageManager, so nub must say so"
+            );
             assert!(
-                err.contains("is not an exact version")
-                    && err.contains("devEngines.packageManager"),
-                "{spec} must be refused toward devEngines, got: {err}"
+                r.warnings[0]
+                    .to_string()
+                    .contains("devEngines.packageManager"),
+                "the warning must point at devEngines"
             );
         }
-        for spec in ["pnpm@10.0.0", "npm@10.9.2+sha512.ab12", "pnpm@11.0.0-rc.1"] {
-            assert!(parse_spec(spec).is_ok(), "{spec} is exact and must parse");
+        for (spec, pm) in [
+            ("pnpm@9", Pm::Pnpm),
+            ("pnpm@^9.1.0", Pm::Pnpm),
+            ("npm@10", Pm::Npm),
+            ("yarn@1", Pm::Yarn),
+            ("yarn@^4", Pm::YarnBerry),
+            ("pnpm@10.0.0", Pm::Pnpm),
+            ("pnpm@11.5.3+sha512.ab12", Pm::Pnpm),
+        ] {
+            let r = read(spec);
+            let (pin, _) = r.pin.unwrap_or_else(|| panic!("{spec} must resolve"));
+            assert_eq!(pin.pm, pm, "{spec}");
+            assert_eq!(pin.version.as_deref(), spec.split_once('@').map(|(_, v)| v));
+            assert!(
+                r.warnings.is_empty(),
+                "{spec} must not warn: {:?}",
+                r.warnings
+            );
         }
-        // devEngines keeps accepting a range.
-        assert!(classify("pnpm", Some("^10"), SpecForm::Range).is_ok());
     }
 
     #[test]
@@ -1612,12 +1662,12 @@ mod tests {
 
     #[test]
     fn present_but_unusable_pin_warns_once_and_resolves_unpinned() {
-        // A yarn range in `packageManager` is unusable (classify needs an exact
-        // version for the classic/Berry split) — it must resolve as unpinned WITH
-        // exactly one structured warning naming the field, the raw spec, and the
-        // reason. The warning vec holds exactly that one entry.
+        // A yarn dist-tag in `packageManager` is unusable (classify needs a major
+        // for the classic/Berry split) — it must resolve as unpinned WITH exactly
+        // one structured warning naming the field, the raw spec, and the reason.
+        // The warning vec holds exactly that one entry.
         let manifest: serde_json::Value =
-            serde_json::from_str(r#"{"packageManager":"yarn@^4"}"#).unwrap();
+            serde_json::from_str(r#"{"packageManager":"yarn@stable"}"#).unwrap();
         let resolved = pin_from_manifest(&manifest);
         assert!(
             resolved.pin.is_none(),
@@ -1631,10 +1681,10 @@ mod tests {
                     reason,
                 },
             ] => {
-                assert_eq!(spec, "yarn@^4", "the warning carries the raw spec");
+                assert_eq!(spec, "yarn@stable", "the warning carries the raw spec");
                 assert!(
-                    reason.contains("exact version"),
-                    "the reason names the exact-version rule, got: {reason}"
+                    reason.contains("dist-tags"),
+                    "the reason names the dist-tag rule, got: {reason}"
                 );
             }
             other => panic!("expected one packageManager Ignored warning, got: {other:?}"),
@@ -1858,10 +1908,17 @@ mod tests {
         assert!(write.pin_hashed);
 
         // `nub pm update` reads that pair (also `pnpm init`'s) as moving
-        // together; a range, or a different version, is not that pair.
-        assert!(dev_engines_repeats_pin("11.5.3", "11.5.3"));
-        assert!(!dev_engines_repeats_pin("^11.5.3", "11.5.3+sha512.abc123"));
-        assert!(!dev_engines_repeats_pin("11.5.2", "11.5.3"));
+        // together; a range, a different version, an older pnpm, or another
+        // manager is not that pair.
+        assert!(is_pnpm_11_pair("pnpm", "11.5.3", "11.5.3"));
+        assert!(!is_pnpm_11_pair("pnpm", "^11.5.3", "11.5.3+sha512.abc123"));
+        assert!(!is_pnpm_11_pair("pnpm", "11.5.2", "11.5.3"));
+        assert!(!is_pnpm_11_pair("pnpm", "10.12.1", "10.12.1"));
+        assert!(!is_pnpm_11_pair("npm", "10.9.2", "10.9.2"));
+
+        // A pin-only write (update under a hand-written range) keeps the hash.
+        let write = write_declared_pm("pnpm", "11.5.3", "abc123", &dir, false).unwrap();
+        assert!(write.pin_hashed);
     }
 
     #[test]
@@ -2174,10 +2231,10 @@ mod tests {
             "a committed yarnPath IS a yarn-Berry identity"
         );
 
-        // (b) A present-but-unusable spec still names its PM (`yarn@^4` is a
-        // range the exact-only packageManager field refuses).
+        // (b) A present-but-unusable spec still names its PM (`yarn@stable` is a
+        // dist-tag with no major to classify by).
         let dir = tmpdir("ident-range");
-        write_pkg(&dir, r#"{"packageManager":"yarn@^4"}"#);
+        write_pkg(&dir, r#"{"packageManager":"yarn@stable"}"#);
         assert_eq!(
             project_pm_identity(&dir).map(|i| i.name),
             Some("yarn".to_string()),

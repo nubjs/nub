@@ -131,6 +131,22 @@ impl EnvLockfile {
         self.root()?.package_manager_dependencies.as_ref()
     }
 
+    /// The `resolution.integrity` recorded for package-manager dependency
+    /// `name` at `version` — the digest the pinned pnpm's tarball must match.
+    /// `None` when the document records another version, or no integrity.
+    pub fn package_manager_integrity(&self, name: &str, version: &str) -> Option<&str> {
+        let dep = self.package_manager_dependencies()?.get(name)?;
+        if dep.version != version {
+            return None;
+        }
+        self.doc
+            .packages
+            .get(&format!("{name}@{version}"))?
+            .get("resolution")?
+            .get("integrity")?
+            .as_str()
+    }
+
     /// Whether this document pins the package manager at `version`: each
     /// of `names` is recorded, every recorded entry is at `version` with
     /// its `packages:` and `snapshots:` records present, and — when

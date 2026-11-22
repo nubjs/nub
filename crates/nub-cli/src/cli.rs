@@ -10559,6 +10559,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
             for w in &res.warnings {
                 eprintln!("{w}");
             }
+            let from_package_manager = res.source == resolve::PinSource::PackageManager;
             let pin = res.pin;
             let name = pin.pm.to_string();
             let range = dev_engines_range(&cwd, &name);
@@ -10566,12 +10567,14 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 .version
                 .as_deref()
                 .map(|v| v.split_once('+').map_or(v, |(bare, _)| bare).to_string());
-            // A devEngines version that repeats the pin (the pnpm 11 shape) is
+            // The pnpm 11 pair (devEngines repeating the packageManager pin) is
             // not a range to float within: it moves with the pin inside its major.
-            let repeats_pin = range
-                .as_deref()
-                .zip(pin.version.as_deref())
-                .is_some_and(|(r, p)| resolve::dev_engines_repeats_pin(r, p));
+            // An exact devEngines version anywhere else is the user's constraint.
+            let repeats_pin = from_package_manager
+                && range
+                    .as_deref()
+                    .zip(pin.version.as_deref())
+                    .is_some_and(|(r, p)| resolve::is_pnpm_11_pair(&name, r, p));
             let spec = match (&current, repeats_pin) {
                 (Some(cur), true) => format!("^{cur}"),
                 _ => range.clone().unwrap_or_else(|| "latest".to_string()),
@@ -10588,7 +10591,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
             // A nub-shaped devEngines range moves with the pin (same writer as
             // `use`, onFail:"warn"); a hand-written one is the user's stated
             // constraint update floats WITHIN — never rewritten.
-            let (version, _) = resolve_provision_declare(
+            let (version, write) = resolve_provision_declare(
                 &name,
                 &spec,
                 &cwd,
@@ -10597,6 +10600,23 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 |_| Ok(()),
             )?;
             warn_if_yarn_path_shadows_pin(&cwd, &name);
+            if pin.pm == Pm::Pnpm {
+                // pnpm 11+ checks the pinned pnpm against the lockfile's env
+                // document on a frozen install, so it moves with the pin.
+                let root = resolve::pin_target_dir(&cwd);
+                if let Err(e) = crate::pm_engine::sync_pnpm_package_manager_pin(&root) {
+                    eprintln!(
+                        "nub: could not record pnpm@{version} in pnpm-lock.yaml: {e:#}\n\
+                         \x20 the next `nub install` records it"
+                    );
+                }
+                if keep_pnpm_pin_digest(&root, &version, &write)? {
+                    eprintln!(
+                        "nub: packageManager keeps its +sha512 hash, since pnpm-lock.yaml \
+                         does not record pnpm@{version}"
+                    );
+                }
+            }
             match current {
                 Some(cur) if cur == version => eprintln!(
                     "{name} is already on the newest version ({version}); pin hash refreshed."
@@ -10871,6 +10891,41 @@ fn resolve_provision_declare(
     Ok((dist.version, write))
 }
 
+/// An unhashed pnpm 11+ pin's project-pinned digest is the integrity
+/// `pnpm-lock.yaml` records; a cold download checks the tarball against it.
+/// When the lockfile does not record this exact tarball (there is no lockfile
+/// yet, the pin's `onFail: "ignore"` keeps pnpm from recording it, or the
+/// sync failed), the hash goes back on the pin. Returns whether it did.
+fn keep_pnpm_pin_digest(
+    root: &Path,
+    version: &str,
+    write: &nub_core::pm::resolve::DeclaredPmWrite,
+) -> Result<bool> {
+    use base64::Engine as _;
+    if write.pin_hashed {
+        return Ok(false);
+    }
+    let want = hex_to_bytes(&write.sha512_hex).map(|bytes| {
+        format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    });
+    let recorded = crate::pm_engine::pnpm_lockfile_integrity(root, version);
+    if want.is_some() && recorded == want {
+        return Ok(false);
+    }
+    nub_core::pm::resolve::hash_package_manager_pin(root, "pnpm", version, &write.sha512_hex)?;
+    Ok(true)
+}
+
+fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 fn sha512_file_hex(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha512};
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
@@ -11046,6 +11101,12 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
                  \x20 the next `nub install` records it"
             ),
         }
+        if keep_pnpm_pin_digest(&root, &version, &write)? {
+            println!(
+                "  package.json: packageManager = pnpm@{version} (+sha512), \
+                 since pnpm-lock.yaml does not record it"
+            );
+        }
     }
     Ok(0)
 }
@@ -11189,7 +11250,7 @@ fn fetch_verify_and_hash_tarball(
 }
 
 /// The error for a pin field that names npm, pnpm or Yarn but can't be used (a
-/// range in the exact-only `packageManager`): the field, its value and why,
+/// dist-tag such as `yarn@stable`): the field, its value and why,
 /// instead of the generic "no package manager is pinned".
 fn unusable_pin_error(cwd: &Path) -> Option<anyhow::Error> {
     match nub_core::pm::resolve::unusable_pin(cwd)? {
@@ -11811,8 +11872,8 @@ fn shim_plan_at(
     use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
 
     let target = resolve::resolve_target(cwd);
-    // A pin field nub can't use (a range in `packageManager`) runs the project
-    // unpinned, as pnpm does — but says so, naming the field and the fix.
+    // A pin field nub can't use (a dist-tag such as `yarn@stable`) runs the
+    // project unpinned — but says so, naming the field and why.
     if target.is_none()
         && let Some(w) = resolve::unusable_pin(cwd)
     {

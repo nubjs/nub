@@ -146,11 +146,23 @@ pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
 /// `.npmrc` plus, per incumbent, the invoking member's
 /// ([`crate::workspace::npmrc::project_npmrc_paths`]). Each carries its own trust,
 /// so the opt-in re-trusts only the file it names. Returned lowest precedence first.
+///
+/// A project file that IS the user rc (`NPM_CONFIG_USERCONFIG` naming the
+/// project's `.npmrc`, or a project at `$HOME`) is left out: it is read once, as
+/// the user file, the way the install engine dedupes it.
 fn project_npmrc_layers(root: &std::path::Path) -> Vec<(PathBuf, bool)> {
+    project_npmrc_layers_beside(root, home_npmrc().as_deref())
+}
+
+fn project_npmrc_layers_beside(
+    root: &std::path::Path,
+    user_rc: Option<&Path>,
+) -> Vec<(PathBuf, bool)> {
     let auth_file = env_nonempty("PNPM_CONFIG_NPMRC_AUTH_FILE");
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     crate::workspace::npmrc::project_npmrc_paths(root)
         .into_iter()
+        .filter(|path| !user_rc.is_some_and(|user| same_file(path, user)))
         .map(|path| {
             let trusted = auth_file
                 .as_deref()
@@ -158,6 +170,15 @@ fn project_npmrc_layers(root: &std::path::Path) -> Vec<(PathBuf, bool)> {
             (path, trusted)
         })
         .collect()
+}
+
+/// Whether two paths name one physical file: canonical paths when both resolve,
+/// else the paths as written.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 /// PURE: does the configured `PNPM_CONFIG_NPMRC_AUTH_FILE` path point AT the
@@ -681,17 +702,22 @@ fn dist_from_meta(version: &str, meta: &Value) -> Result<VersionDist> {
 /// space-separated — pick the sha512 entry), then fall back to the hex
 /// `dist.shasum` (sha1).
 fn parse_integrity(dist: &Value) -> Option<Integrity> {
-    if let Some(sri) = dist.get("integrity").and_then(Value::as_str) {
-        if let Some(sha512) = sri
-            .split_whitespace()
-            .find_map(|tok| tok.strip_prefix("sha512-"))
-        {
-            return Some(Integrity::Sha512(sha512.to_string()));
-        }
+    if let Some(sri) = dist.get("integrity").and_then(Value::as_str)
+        && let Some(integrity) = parse_sri(sri)
+    {
+        return Some(integrity);
     }
     dist.get("shasum")
         .and_then(Value::as_str)
         .map(|hex| Integrity::Sha1(hex.to_string()))
+}
+
+/// The sha512 digest of an SRI string (`sha512-<base64>`, possibly one of several
+/// space-separated hashes) — the only algorithm the registry and lockfiles use.
+pub(crate) fn parse_sri(sri: &str) -> Option<Integrity> {
+    sri.split_whitespace()
+        .find_map(|tok| tok.strip_prefix("sha512-"))
+        .map(|b64| Integrity::Sha512(b64.to_string()))
 }
 
 /// The bin path to run, relative to the package root. npm's `bin` is either a
@@ -1439,6 +1465,26 @@ mod tests {
             auth_for_tarball(&no_auth, "https://registry.npmjs.org/x/-/x-1.0.0.tgz"),
             None
         );
+    }
+
+    #[test]
+    fn a_project_npmrc_that_is_the_user_rc_is_read_only_as_user_config() {
+        // `NPM_CONFIG_USERCONFIG=.npmrc` in CI names the project's own file; read
+        // as project config too, its unexpanded `${VAR}` would win.
+        let root = std::env::temp_dir().join(format!("nub-rc-dedupe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"), "{}").unwrap();
+        std::fs::write(root.join(".npmrc"), "registry=${CI_REGISTRY}\n").unwrap();
+        let rc = root.join(".npmrc");
+        assert!(project_npmrc_layers_beside(&root, Some(&rc)).is_empty());
+        assert_eq!(
+            project_npmrc_layers_beside(&root, Some(&root.join("elsewhere.npmrc")))
+                .into_iter()
+                .map(|(p, _)| p)
+                .collect::<Vec<_>>(),
+            vec![rc]
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
