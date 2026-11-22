@@ -967,7 +967,8 @@ impl EffectiveConfig {
                 .map_err(|error| invalid(format!("cannot read `{path}`: {error}")))?;
             let parsed = crate::jsonc::parse_to_value(&text)
                 .map_err(|error| invalid(format!("cannot parse `{path}`: {error}")))?;
-            if !matches!(parsed, Some(Value::Object(_))) {
+            // No value at all (an empty or comment-only file) is `{}` to `tsc`.
+            if !matches!(parsed, None | Some(Value::Object(_))) {
                 return Err(invalid(format!("`{path}` must contain a JSON object")));
             }
         }

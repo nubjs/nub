@@ -823,7 +823,8 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // cannot tell the two apart: a user may add "require" as a custom condition.
     const fromRequire = context.importAttributes === undefined;
     const r = core.resolveSpec(specifier, context.parentURL, fromRequire);
-    if (r) return r;
+    if (r && !r.redirect) return r;
+    const nextContext = core.nextResolveContext(context);
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
     // be resolved explicitly — through `pnpapi.resolveRequest`, passing Node's
     // `context.conditions` (the import-side set) so a DUAL package resolves to its
@@ -832,14 +833,21 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // to `nextResolve`, which reaches nub's `_resolveFilename` override (delegating to
     // PnP) — so a plain dep still resolves; only a dual package's condition is lost.
     const pnp = pnpApi();
-    if (pnp && !module_.isBuiltin(specifier) && !specifier.startsWith("node:")) {
+    if (pnp && !r && !module_.isBuiltin(specifier) && !specifier.startsWith("node:")) {
       try {
-        const res = pnpResolveEsm(pnp, specifier, context);
+        const res = pnpResolveEsm(pnp, specifier, nextContext);
         if (res) return res;
       } catch { /* fall through to Node's resolver */ }
     }
     try {
-      return restoreSchemeOnlyBuiltinURL(nextResolve(specifier, context));
+      // A `paths` redirect for `require()` is left to the `_resolveFilename` patch,
+      // which Node's default step calls with the original specifier and the real
+      // parent: Node's CommonJS resolver ignores a `parentURL` passed here.
+      if (r && !fromRequire) {
+        const hit = core.resolveRedirect(r.redirect, nextContext, nextResolve);
+        if (hit) return hit;
+      }
+      return restoreSchemeOnlyBuiltinURL(nextResolve(specifier, nextContext));
     } catch (err) {
       if (isAsyncLoaderSyncStub(err)) {
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
@@ -1281,6 +1289,37 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       const parentPath = parent && typeof parent.filename === "string" ? parent.filename : null;
       resolved = core.resolveCjsPath(request, parentPath);
     } catch { /* fall through to Node */ }
+    if (resolved !== null && typeof resolved === "object") {
+      // A `paths` redirect (see transform-core `resolveRedirect`). Node's CommonJS
+      // resolver tries a self-reference from the parent's own package first, so a
+      // parent whose filename is the target's `package.json` makes it answer from
+      // that exact copy, with the require conditions and `options.conditions`.
+      const redirect = resolved;
+      resolved = redirect.otherwise ?? null;
+      for (const p of redirect.packages) {
+        if (core.namesABuiltin(p.specifier)) {
+          if (p.file) {
+            resolved = p.file;
+            break;
+          }
+          continue;
+        }
+        const anchor = {
+          __proto__: parent ?? null,
+          filename: p.packageJson,
+          paths: module_._nodeModulePaths(dirname(p.packageJson)),
+        };
+        try {
+          return ReflectApply(origResolveFilename, this, [p.specifier, anchor, false, options]);
+        } catch (err) {
+          if (!core.isPackageRefusal(err)) throw err;
+          if (p.file) {
+            resolved = p.file;
+            break;
+          }
+        }
+      }
+    }
     if (resolved) {
       // This pre-check stays at RESOLVE time even though `_resolveFilename` also
       // answers `require.resolve()`, for which a path lookup is not a load. Below the
@@ -1382,7 +1421,12 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     }
     const { source, format } = core.loadTranspile(pathToFileURL(filename).href, pathExtname(filename));
     if (format === "module") throw requireEsmError(filename);
-    mod._compile(source, filename);
+    // The format is passed, not left for Node to guess: without it, 20.19+ and
+    // 22.12–22.14 run their own ES-module syntax detection on a `.ts` it has no rule
+    // for, and load `export` in a `"type": "commonjs"` package as an ES module —
+    // where every other tier, and Node's own type stripping, follows the package
+    // type and throws. Node versions without the parameter ignore it.
+    mod._compile(source, filename, "commonjs");
   };
   // Serve a data document the way the ESM load hook's `dataExtsFor` branch does.
   // Without any handler Node has none for `.yaml`/`.toml`/`.json5`/`.jsonc`/

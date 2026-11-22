@@ -93,6 +93,13 @@ pub struct TsconfigResult {
     /// `JSON.stringify`-equivalent of the FULL merged compilerOptions — the exact
     /// string the cache key folds in (`tsconfigHash`). Empty when no tsconfig.
     pub tsconfig_hash: String,
+    /// Merged `compilerOptions.customConditions`, verbatim ([`custom_conditions`]).
+    pub custom_conditions: Vec<String>,
+    /// Problems found reading the config ([`diagnostics`]). Empty on a clean parse.
+    pub diagnostics: Vec<String>,
+    /// The config is one a parent process already settled the warning for
+    /// ([`reported_by_parent`]).
+    pub reported_by_parent: bool,
 }
 
 /// The cached, fully-resolved tsconfig for one importer directory.
@@ -176,6 +183,9 @@ pub fn load_tsconfig(dir: &str, explicit: Option<&str>) -> TsconfigResult {
         path: loaded.path.clone(),
         compiler_options: loaded.compiler_options.clone(),
         tsconfig_hash: loaded.tsconfig_hash.clone(),
+        custom_conditions: loaded.custom_conditions.clone(),
+        diagnostics: loaded.diagnostics.clone(),
+        reported_by_parent: loaded.path.as_deref().is_some_and(reported_by_parent),
     }
 }
 
@@ -338,10 +348,10 @@ fn report_diagnostics(config_path: &str, diags: &[String], report: Report) {
     if diags.is_empty() {
         return;
     }
-    let path = slash(config_path);
-    if std::env::var(REPORTED_ENV).is_ok_and(|v| v.split('\n').any(|already| already == path)) {
+    if reported_by_parent(config_path) {
         return;
     }
+    let path = report_key(config_path);
     let mut seen = reported().lock().unwrap_or_else(|e| e.into_inner());
     if seen.iter().any(|p| p == &path) {
         return;
@@ -352,6 +362,56 @@ fn report_diagnostics(config_path: &str, diags: &[String], report: Report) {
         for diag in diags {
             eprintln!("Nub: {diag}");
         }
+    }
+}
+
+/// Whether a parent process already settled the warning for `config_path`: it is
+/// listed in [`REPORTED_ENV`] under any spelling of the same file.
+pub fn reported_by_parent(config_path: &str) -> bool {
+    std::env::var(REPORTED_ENV).is_ok_and(|listed| lists(&listed, config_path))
+}
+
+/// Whether a newline-separated [`REPORTED_ENV`] value names `config_path`. Both
+/// sides go through [`report_key`]: the CLI and the addon reach one file under
+/// different spellings (the CLI canonicalizes an entry's directory; Node keeps a
+/// Windows working directory's 8.3 short form), and a plain string match then
+/// warns twice.
+fn lists(listed: &str, config_path: &str) -> bool {
+    let key = report_key(config_path);
+    listed
+        .split('\n')
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| report_key(entry) == key)
+}
+
+/// One spelling per config file: its DIRECTORY canonicalized (symlinks resolved,
+/// and on Windows the long form of an 8.3 short name), without the `\\?\` prefix,
+/// and compared case-insensitively on Windows. The file name is joined unchanged:
+/// a `tsconfig.json` symlink resolves `extends` from its own directory, so two
+/// such links sharing a target are different configs. A directory that does not
+/// resolve keeps its own spelling.
+fn report_key(path: &str) -> String {
+    let path = Path::new(path);
+    let resolved = match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => std::fs::canonicalize(dir).map_or_else(
+            |_| path.to_path_buf(),
+            |dir| {
+                let dir = dir.to_string_lossy();
+                let dir = if let Some(unc) = dir.strip_prefix(r"\\?\UNC\") {
+                    format!(r"\\{unc}")
+                } else {
+                    dir.strip_prefix(r"\\?\").unwrap_or(&dir).to_string()
+                };
+                Path::new(&dir).join(name)
+            },
+        ),
+        _ => path.to_path_buf(),
+    };
+    let key = slash(&resolved.to_string_lossy());
+    if cfg!(windows) {
+        key.to_lowercase()
+    } else {
+        key
     }
 }
 
@@ -1191,12 +1251,18 @@ fn read_jsonc(path: &str) -> Result<Value, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH, nub_json_guard::Dialect::Jsonc)
         .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
-    // The `Option` is the deserialization target, not a wrapper the parser adds.
-    // It collapses an empty document and a literal `null` into `None`; a tsconfig
-    // that is either is unusable, so both fall through to the same error.
-    jsonc_parser::parse_to_serde_value::<Option<Value>>(text, &jsonc_parse_options())
-        .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?
-        .ok_or_else(|| format!("Failed to parse tsconfig at: {path}"))
+    let parsed = jsonc_parser::parse_to_serde_value::<Option<Value>>(text, &jsonc_parse_options())
+        .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
+    if let Some(value) = parsed {
+        return Ok(value);
+    }
+    // `None` is either a literal `null`, which `tsc` refuses (TS5092), or a document
+    // with no value at all (empty, whitespace, or only comments), which `tsc` reads
+    // as `{}`. The AST tells the two apart.
+    match jsonc_parser::parse_to_value(text, &jsonc_parse_options()) {
+        Ok(None) => Ok(Value::Object(serde_json::Map::new())),
+        _ => Err(format!("Failed to parse tsconfig at: {path}")),
+    }
 }
 
 // ── compilerOptions normalization (get-tsconfig's `normalizeCompilerOptions`) ──
@@ -1587,6 +1653,42 @@ mod tests {
 
     fn read(dir: &tempfile::TempDir) -> Vec<String> {
         custom_conditions(&dir.path().to_string_lossy(), None)
+    }
+
+    /// A config the parent listed under one spelling is recognised under another:
+    /// here a symlinked directory, the Unix stand-in for a Windows 8.3 short name.
+    /// Two `tsconfig.json` file symlinks in different directories stay distinct even
+    /// when they share a target, since each resolves `extends` from its own directory.
+    #[cfg(unix)]
+    #[test]
+    fn a_reported_config_matches_under_another_spelling() {
+        use std::os::unix::fs::symlink;
+        let dir = project(&[
+            ("real/tsconfig.json", "{}"),
+            ("real/other.json", "{}"),
+            ("shared.json", "{}"),
+        ]);
+        let at = |sub: &str| dir.path().join(sub);
+        symlink(at("real"), at("link")).unwrap();
+        for sub in ["a", "b"] {
+            std::fs::create_dir(at(sub)).unwrap();
+            symlink(at("shared.json"), at(&format!("{sub}/tsconfig.json"))).unwrap();
+        }
+        let spell = |sub: &str| at(sub).to_string_lossy().into_owned();
+        let (real, link) = (spell("real/tsconfig.json"), spell("link/tsconfig.json"));
+        assert!(
+            super::lists(&link, &real),
+            "listed via the link, read via the real path"
+        );
+        assert!(super::lists(&format!("{real}\n"), &link), "and the reverse");
+        assert!(
+            !super::lists(&spell("link/other.json"), &real),
+            "a different file is not listed"
+        );
+        assert!(
+            !super::lists(&spell("a/tsconfig.json"), &spell("b/tsconfig.json")),
+            "file symlinks in different directories are different configs"
+        );
     }
 
     /// The memo is keyed by DIRECTORY, so it is unbounded by construction — and it

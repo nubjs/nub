@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
+use napi::Either;
 use napi_derive::napi;
 
 use nub_tsconfig as tsconfig;
@@ -26,7 +27,8 @@ use nub_tsconfig as tsconfig;
 const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 
 /// The additive TS resolution. `Some(absolute path)` ⇒ nub short-circuits; `None`
-/// ⇒ fall through to Node (the compat boundary). `parent_path` is the importer's
+/// ⇒ fall through to Node (the compat boundary); a [`PackageRedirect`] ⇒ ask Node
+/// for the installed packages a `paths` target names. `parent_path` is the importer's
 /// absolute filesystem path (empty for the entry).
 /// `tsconfig_path` is the project's configured tsconfig when one is set, so
 /// `paths` resolution reads the file the project names instead of rediscovering
@@ -40,7 +42,7 @@ pub fn resolve_ts(
     parent_path: String,
     tsconfig_path: Option<String>,
     preserve_symlinks: Option<bool>,
-) -> Option<String> {
+) -> Option<Either<String, PackageRedirect>> {
     let preserve_symlinks = preserve_symlinks.unwrap_or(false);
     // Classify and DISCOVER from where the importer really lives. Under
     // `--preserve-symlinks` Node hands over the un-realpathed path, so a file inside a
@@ -71,15 +73,22 @@ pub fn resolve_ts(
     // alias resolves too.)
     if !is_relative && !is_absolute && !is_file_url && !is_node_modules(&parent_path) {
         let candidates = tsconfig::match_paths(&parent_dir, &specifier, tsconfig_path.as_deref());
+        let mut packages = Vec::new();
         for candidate in candidates {
+            if let Some(mut target) = package_target(&candidate) {
+                target.file = try_resolve_file(&candidate, true, probe_order(&parent_ext));
+                packages.push(target);
+                continue;
+            }
             if let Some(resolved) = try_resolve_file(&candidate, true, probe_order(&parent_ext)) {
-                return Some(resolved);
+                return redirect_or_file(packages, Some(resolved));
             }
         }
         // No alias matched. A bare package NAME still belongs entirely to Node
         // (`main`/`exports`); only a SUBPATH into an `exports`-less dependency is
         // ours to probe.
-        return resolve_bare_subpath(&specifier, &parent_dir, preserve_symlinks);
+        let rest = resolve_bare_subpath(&specifier, &parent_dir, preserve_symlinks);
+        return redirect_or_file(packages, rest);
     }
 
     // Extensionless / emit-swap branch — only when the importer is itself a TS
@@ -87,11 +96,99 @@ pub fn resolve_ts(
     if is_ts_parent(&parent_ext) && is_relative && !names_a_directory(&specifier) {
         let target = path_join_resolve(&parent_dir, &specifier);
         if let Some(resolved) = try_resolve_file(&target, true, probe_order(&parent_ext)) {
-            return Some(resolved);
+            return Some(Either::A(resolved));
         }
     }
 
     None
+}
+
+/// The `paths` targets that land in installed packages, for Node to resolve in
+/// order, and what answers when none of them does.
+///
+/// `"*": ["./node_modules/*"]` is a common tsconfig line, and probing its target as a
+/// path reads the package's legacy `main` and never its `exports` — so `import "dep"`
+/// silently loaded a different file than plain Node does (a dual package's CommonJS
+/// build under `import`, say). `tsc` and tsconfig-paths take `main` there too, but
+/// they answer a different question: `tsc` is looking for TYPES (`types` first), and
+/// the runtime module is Node's to choose.
+///
+/// The caller asks Node for each [`PackageTarget`] in `paths` order. Where Node
+/// refuses one (not exported, or nothing at the mapped path), that target's own
+/// `file` answers if it has one, else the next target is tried, and `otherwise`
+/// (a later candidate's file) closes the list. With nothing left, Node resolves the
+/// original specifier, so the error is the one plain Node gives.
+#[napi(object)]
+pub struct PackageRedirect {
+    pub packages: Vec<PackageTarget>,
+    pub otherwise: Option<String>,
+}
+
+/// One installed package a `paths` target names, as the package's own
+/// self-reference (`specifier` is its manifest `name` plus the subpath) resolved from
+/// its `package.json`. Anchoring inside the package is what makes Node answer from
+/// that exact copy: from the importer, a nested copy or the project's own name
+/// could win instead. Only a package that declares `exports` is a target: without
+/// one, Node's own answer IS `main` plus probing, which [`try_resolve_file`] already
+/// gives, and a self-reference needs `exports` and `name` to resolve at all.
+#[napi(object)]
+pub struct PackageTarget {
+    pub specifier: String,
+    pub package_json: String,
+    /// The file the target names by path, loaded where `exports` refuses it.
+    pub file: Option<String>,
+}
+
+fn redirect_or_file(
+    packages: Vec<PackageTarget>,
+    otherwise: Option<String>,
+) -> Option<Either<String, PackageRedirect>> {
+    if packages.is_empty() {
+        return otherwise.map(Either::A);
+    }
+    Some(Either::B(PackageRedirect {
+        packages,
+        otherwise,
+    }))
+}
+
+fn package_target(candidate: &str) -> Option<PackageTarget> {
+    let components: Vec<_> = Path::new(candidate).components().collect();
+    let nm = components
+        .iter()
+        .rposition(|c| c.as_os_str() == "node_modules")?;
+    let first = components.get(nm + 1)?.as_os_str().to_str()?;
+    let name_end = nm + 1 + if first.starts_with('@') { 2 } else { 1 };
+    if components.len() < name_end {
+        return None;
+    }
+    // A target naming an existing file by its full name is a path the author spelled
+    // out, not a package lookup.
+    if components.len() > name_end && !extname(candidate).is_empty() && is_file(candidate) {
+        return None;
+    }
+    let pkg_dir: PathBuf = components[..name_end].iter().collect();
+    let package_json = pkg_dir.join("package.json");
+    let text = std::fs::read_to_string(&package_json).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // `"exports": null` is no exports map to Node, here as there.
+    if manifest
+        .get("exports")
+        .is_none_or(serde_json::Value::is_null)
+    {
+        return None;
+    }
+    let name = manifest.get("name")?.as_str()?;
+    let mut specifier = name.to_string();
+    for c in &components[name_end..] {
+        specifier.push('/');
+        specifier.push_str(c.as_os_str().to_str()?);
+    }
+    Some(PackageTarget {
+        specifier,
+        package_json: package_json.to_string_lossy().into_owned(),
+        file: None,
+    })
 }
 
 /// Extension probing for a bare package SUBPATH (`pkg/sub`, `@scope/pkg/a/b`).

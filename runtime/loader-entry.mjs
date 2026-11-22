@@ -23,7 +23,7 @@ import * as core from "./transform-core.mjs";
 
 const __require = createRequire(import.meta.url);
 const module_ = __require("node:module");
-const { fileURLToPath } = __require("node:url");
+const { fileURLToPath, pathToFileURL } = __require("node:url");
 const { dirname, isAbsolute, resolve: resolvePath, sep } = __require("node:path");
 const common = __require("./preload-common.cjs");
 
@@ -116,6 +116,52 @@ function foreignAsyncLoaderPresent(includeRequire = false) {
   return tokens.some((t) => t && !isOwnLoaderToken(t));
 }
 
+// A tsconfig that cannot be read in full stops the run, as it does under the `nub`
+// CLI (`ensure_tsconfig_parses`): carrying on would transpile and resolve under
+// options its author never wrote. The same two configs the CLI checks: the working
+// directory's, and the file entry's (`node --import <pkg> app/main.ts` from the
+// root). A config path a parent `nub` already settled (`__NUB_TSCONFIG_REPORTED`,
+// the lifecycle path that lets a script generate its `extends` target) is not this
+// process's call. Main thread only: a worker inherits the preload after the main
+// thread already passed.
+function refuseUnreadableTsconfig() {
+  if (!__require("node:worker_threads").isMainThread) return;
+  const dirs = [process.cwd()];
+  const entry = entryPath();
+  if (entry && !core.isDependency(pathToFileURL(entry).href)) dirs.push(dirname(entry));
+  const unreadable = dirs.some((dir) => {
+    const { path, diagnostics, reportedByParent } = core.getTsconfigForDir(dir);
+    return path && diagnostics && diagnostics.length > 0 && !reportedByParent;
+  });
+  if (!unreadable) return;
+  process.stderr.write(
+    "Error: the project's tsconfig.json could not be read in full (see above).\n" +
+      "Fix the config, or run without the @nubjs/runner preload.\n",
+  );
+  process.exit(1);
+}
+
+// The file entry as the transform will see it: Node has already resolved
+// `argv[1]`, and follows a symlink to it unless `--preserve-symlinks-main` is set.
+// Null when Node runs no file: stdin, and an eval string without `-i`, where
+// `argv[1]` is an argument handed to the code. That is Node's own dispatch
+// (`has_eval_string && !force_repl`), which it mirrors onto `process._eval` and
+// `process._forceRepl` before any preload runs; `-p -- file` sets no eval string
+// and `-i -e code file` forces the REPL, and both run the file. Were those
+// properties ever gone, the check would run and refuse rather than skip.
+function entryPath() {
+  if (typeof process._eval === "string" && !process._forceRepl) return null;
+  const main = process.argv[1];
+  if (typeof main !== "string" || main === "-" || !isAbsolute(main)) return null;
+  const flags = [...process.execArgv, ...(process.env.NODE_OPTIONS || "").split(/\s+/)];
+  if (flags.some((f) => f.replace(/_/g, "-") === "--preserve-symlinks-main")) return main;
+  try {
+    return __require("node:fs").realpathSync(main);
+  } catch {
+    return main;
+  }
+}
+
 // Arm the loader. `esm` = the ESM hook surface (module.registerHooks on the fast
 // tier, the module.register loader worker on the compat tier); `cjs` = the
 // CommonJS require() surface (Module._resolveFilename + the classic transpile
@@ -139,6 +185,8 @@ export function arm({ esm = true, cjs = true } = {}) {
     );
     return;
   }
+
+  refuseUnreadableTsconfig();
 
   // The loader ships no polyfill packages, so the clobber map's synthetic
   // modules (re-exports of globals the CLI runtime installs) would hand users
