@@ -437,7 +437,7 @@ fn parse_npmrc_auth(
         let Some((prefix, field)) = key.rsplit_once(':') else {
             continue;
         };
-        let prefix = prefix.trim_end_matches('/');
+        let prefix = nerf_dart_key(prefix, default_port(registry_base));
         let raw = raw_val.trim().trim_matches('"').trim_matches('\'');
         // Trust-aware expansion: only a trusted source interpolates `${VAR}`; an
         // untrusted (repo-controlled) value stays literal so a committed secret
@@ -447,7 +447,7 @@ fn parse_npmrc_auth(
         } else {
             raw.to_string()
         };
-        let entry = by_prefix.entry(prefix.to_string()).or_default();
+        let entry = by_prefix.entry(prefix).or_default();
         match field {
             "_authToken" => entry.auth_token = Some(val),
             "_auth" => entry.auth_basic = Some(val),
@@ -490,14 +490,15 @@ fn parse_npmrc_auth(
 /// derives (`YARN_NPM_AUTH_TOKEN` for `https://host:443/npm/` is keyed
 /// `//host/npm/`). A non-default port stays.
 fn nerf_dart(url: &str) -> String {
-    let default_port = if url.starts_with("https:") {
-        ":443"
-    } else if url.starts_with("http:") {
-        ":80"
-    } else {
-        ""
-    };
-    let rest = strip_scheme(url).trim_end_matches('/');
+    nerf_dart_key(strip_scheme(url), default_port(url))
+}
+
+/// The same form for an `.npmrc` credential key (`//host[:port]/path`), which
+/// carries no scheme: `default_port` is the one of the registry it is matched
+/// against, so `//host:443/npm/` and `//host/npm/` are one key for an https
+/// registry.
+fn nerf_dart_key(key: &str, default_port: &str) -> String {
+    let rest = key.trim_end_matches('/');
     let Some(authority_and_path) = rest.strip_prefix("//") else {
         return rest.to_string();
     };
@@ -512,6 +513,17 @@ fn nerf_dart(url: &str) -> String {
         format!("//{authority}")
     } else {
         format!("//{authority}/{path}")
+    }
+}
+
+/// The default port of a URL's scheme, as the `:port` suffix it would carry.
+fn default_port(url: &str) -> &'static str {
+    if url.starts_with("https:") {
+        ":443"
+    } else if url.starts_with("http:") {
+        ":80"
+    } else {
+        ""
     }
 }
 
@@ -1790,27 +1802,42 @@ mod tests {
         );
     }
 
-    /// A registry spelled with its scheme's default port matches a credential
-    /// keyed without it, the way npm and the engine key them; a non-default port
-    /// still has to match exactly.
+    /// The scheme's default port is optional on both sides: a registry URL and
+    /// a credential key match whichever of them spells `:443` out, the way npm
+    /// and the engine key them; a non-default port still has to match exactly.
     #[test]
     fn default_port_spelling_matches_the_credential_key() {
         let none = |_: &str| None;
-        let key = "//mirror.example.test/npm/:_authToken=tok\n";
-        for base in [
-            "https://mirror.example.test:443/npm/",
-            "https://mirror.example.test/npm",
+        for key in [
+            "//mirror.example.test/npm/:_authToken=tok\n",
+            "//mirror.example.test:443/npm/:_authToken=tok\n",
         ] {
+            for base in [
+                "https://mirror.example.test:443/npm/",
+                "https://mirror.example.test/npm",
+            ] {
+                assert_eq!(
+                    parse_npmrc_auth(&[(key, true)], base, none),
+                    Some(Auth::Bearer("tok".to_string())),
+                    "{key} for {base}"
+                );
+            }
             assert_eq!(
-                parse_npmrc_auth(&[(key, true)], base, none),
-                Some(Auth::Bearer("tok".to_string())),
-                "{base}"
+                parse_npmrc_auth(
+                    &[(key, true)],
+                    "https://mirror.example.test:8443/npm/",
+                    none
+                ),
+                None,
+                "{key} must not reach another port"
             );
         }
+        // `:443` is not http's default port, so for an http registry it names
+        // another host:port.
         assert_eq!(
             parse_npmrc_auth(
-                &[(key, true)],
-                "https://mirror.example.test:8443/npm/",
+                &[("//mirror.example.test:443/npm/:_authToken=tok\n", true)],
+                "http://mirror.example.test/npm/",
                 none
             ),
             None
