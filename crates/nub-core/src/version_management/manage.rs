@@ -408,8 +408,9 @@ fn pin_dev_engines(spec: &str, cwd: &Path) -> Result<PinResult> {
 /// caret Cargo gives it (node-semver would read `24.0.0` as exactly 24.0.0).
 /// Alternatives without a comma, and specs without one, are kept as typed.
 ///
-/// `None` when the rewrite would not read back as the same requirement, so the
-/// caller refuses rather than write a pin that means something else.
+/// `None` for a comparator with a prerelease or build part, and when the rewrite
+/// would not admit the same versions, so the caller refuses rather than write a
+/// pin that means something else.
 fn node_semver_range(spec: &str) -> Option<String> {
     if !spec.contains(',') {
         return Some(spec.to_string());
@@ -427,7 +428,9 @@ fn node_semver_range(spec: &str) -> Option<String> {
                 .find(|c: char| !matches!(c, '>' | '<' | '=' | '^' | '~'))
                 .unwrap_or(comparator.len());
             let (op, version) = comparator.split_at(op_len);
-            if version.is_empty() {
+            // Prerelease and build parts don't carry over safely (`rc.x` isn't a
+            // wildcard, and the check below samples releases only): refuse them.
+            if version.is_empty() || version.contains(['-', '+']) {
                 return None;
             }
             // A wildcard (`24.22.x`, `*`) means the same bare in both grammars.
@@ -462,7 +465,7 @@ fn same_matches(a: &VersionPin, b: &VersionPin, spec: &str) -> bool {
         .split(|c: char| !c.is_ascii_digit())
         .filter_map(|t| t.parse::<u64>().ok())
     {
-        points.extend([n.saturating_sub(1), n, n + 1]);
+        points.extend([n.saturating_sub(1), n, n.saturating_add(1)]);
     }
     points.iter().all(|major| {
         points.iter().all(|minor| {
@@ -739,6 +742,14 @@ mod tests {
                 .unwrap();
         assert_eq!(json["devEngines"]["runtime"][1]["version"], ">=22 <25");
 
+        let before = std::fs::read_to_string(root.join("package.json")).unwrap();
+        pin("27.0.0-rc.x, <27.0.0", &root).expect_err("a prerelease comma range is refused");
+        assert_eq!(
+            std::fs::read_to_string(root.join("package.json")).unwrap(),
+            before,
+            "a refused pin leaves the manifest alone"
+        );
+
         let err = pin("lts", &root).expect_err("devEngines takes no aliases");
         assert!(err.to_string().contains("alias"), "{err}");
     }
@@ -776,6 +787,13 @@ mod tests {
                 assert_eq!(npm_matched, matched, "node-semver on {rewritten} at {v}");
             }
         }
+
+        // Prerelease and build parts are refused rather than translated.
+        assert_eq!(node_semver_range("27.0.0-rc.x, <27.0.0"), None);
+        assert_eq!(
+            node_semver_range(">=22.0.0+18446744073709551615, <25"),
+            None
+        );
 
         // A dotted wildcard stays one: a caret would widen it to 24.23.0.
         let wildcard = VersionPin::parse_allowing_ranges("24.22.x <25").unwrap();
