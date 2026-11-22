@@ -430,8 +430,12 @@ fn node_semver_range(spec: &str) -> Option<String> {
             if version.is_empty() {
                 return None;
             }
+            // A wildcard (`24.22.x`, `*`) means the same bare in both grammars.
+            let wildcard = version
+                .split('.')
+                .any(|part| matches!(part, "*" | "x" | "X"));
             let op = match op {
-                "" if matches!(version, "*" | "x" | "X") => "",
+                "" if wildcard => "",
                 "" => "^",
                 ">" | ">=" | "<" | "<=" | "=" | "^" | "~" => op,
                 _ => return None,
@@ -442,7 +446,32 @@ fn node_semver_range(spec: &str) -> Option<String> {
     }
     let rewritten = alternatives.join(" || ");
     let original = VersionPin::parse_allowing_ranges(spec).ok()?;
-    (VersionPin::parse_allowing_ranges(&rewritten).ok()? == original).then_some(rewritten)
+    let reread = VersionPin::parse_allowing_ranges(&rewritten).ok()?;
+    same_matches(&original, &reread, spec).then_some(rewritten)
+}
+
+/// Whether two requirements admit the same release versions. Comparators only
+/// change their answer at a number the spec names or the one after it, so every
+/// combination of those numbers (each with its neighbours, plus 0 and a large
+/// value) covers each region the two could disagree in. Structural equality
+/// isn't enough: Cargo's `semver` keeps `24.22.x` and `=24.22.x` as different
+/// shapes that match the same versions.
+fn same_matches(a: &VersionPin, b: &VersionPin, spec: &str) -> bool {
+    let mut points = std::collections::BTreeSet::from([0u64, 1, 9999]);
+    for n in spec
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|t| t.parse::<u64>().ok())
+    {
+        points.extend([n.saturating_sub(1), n, n + 1]);
+    }
+    points.iter().all(|major| {
+        points.iter().all(|minor| {
+            points.iter().all(|patch| {
+                let v = NodeVersion(semver::Version::new(*major, *minor, *patch));
+                v.satisfies(a) == v.satisfies(b)
+            })
+        })
+    })
 }
 
 #[cfg(test)]
@@ -723,10 +752,11 @@ mod tests {
             ("24.0.0, <25", "^24.0.0 <25"),
             ("22.14, <23 || >=24, <25", "^22.14 <23 || >=24 <25"),
             ("~22.1, >22.1.3 || 26", "~22.1 >22.1.3 || 26"),
+            ("24.22.x, <25", "24.22.x <25"),
         ];
         let versions = [
             "20.19.0", "22.0.0", "22.1.2", "22.1.4", "22.14.0", "22.23.5", "24.0.0", "24.22.1",
-            "25.0.0", "26.13.1",
+            "24.23.0", "25.0.0", "26.13.1",
         ];
         for (comma, expected) in cases {
             let rewritten = node_semver_range(comma).expect("translatable");
@@ -746,6 +776,21 @@ mod tests {
                 assert_eq!(npm_matched, matched, "node-semver on {rewritten} at {v}");
             }
         }
+
+        // A dotted wildcard stays one: a caret would widen it to 24.23.0.
+        let wildcard = VersionPin::parse_allowing_ranges("24.22.x <25").unwrap();
+        assert!(
+            "24.22.1"
+                .parse::<NodeVersion>()
+                .unwrap()
+                .satisfies(&wildcard)
+        );
+        assert!(
+            !"24.23.0"
+                .parse::<NodeVersion>()
+                .unwrap()
+                .satisfies(&wildcard)
+        );
     }
 
     #[test]
