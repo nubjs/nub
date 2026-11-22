@@ -144,11 +144,14 @@ function refuseUnreadableTsconfig() {
 
 // The file entry as the transform will see it: Node has already resolved
 // `argv[1]`, and follows a symlink to it unless `--preserve-symlinks-main` is set.
-// Null for `-e`/`-p`, the REPL and stdin: there `argv[1]` is the first argument
-// handed to the code, not a file Node runs.
-const EVAL_FLAG = /^(?:-[ep]|-pe|-ep|--eval|--print)(?:=|$)/;
+// Null when Node runs no file: stdin, and an eval string without `-i`, where
+// `argv[1]` is an argument handed to the code. That is Node's own dispatch
+// (`has_eval_string && !force_repl`), which it mirrors onto `process._eval` and
+// `process._forceRepl` before any preload runs; `-p -- file` sets no eval string
+// and `-i -e code file` forces the REPL, and both run the file. Were those
+// properties ever gone, the check would run and refuse rather than skip.
 function entryPath() {
-  if (process.execArgv.some((flag) => EVAL_FLAG.test(flag))) return null;
+  if (typeof process._eval === "string" && !process._forceRepl) return null;
   const main = process.argv[1];
   if (typeof main !== "string" || main === "-" || !isAbsolute(main)) return null;
   const flags = [...process.execArgv, ...(process.env.NODE_OPTIONS || "").split(/\s+/)];

@@ -646,11 +646,12 @@ export function isPackageRefusal(err) {
     code === "MODULE_NOT_FOUND";
 }
 
-// A self-reference Node would answer with one of its own modules: it checks builtins
-// before packages, so a package whose manifest names itself `events` resolves to
-// `node:events`. Such a target loads the file it names instead.
+// A self-reference Node would answer with one of its own modules: it checks bare
+// builtins before packages, so a package whose manifest names itself `events`
+// resolves to `node:events`. Such a target loads the file it names instead. A
+// prefix-only builtin (`node:test`) is not one: a bare `test` is a package to Node.
 export function namesABuiltin(specifier) {
-  return module.isBuiltin(specifier) || module.isBuiltin(`node:${specifier}`);
+  return module.isBuiltin(specifier);
 }
 
 // Resolve a `resolveSpec` redirect through an `import` hook's `nextResolve`. Each

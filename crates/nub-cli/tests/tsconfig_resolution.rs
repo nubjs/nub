@@ -139,6 +139,39 @@ console.log(which, createRequire(import.meta.url)("@polyfill/events").which);
     );
     let out = nub(root, &root.join(".cache"), &["main.ts"]);
     assert_eq!(stdout(&out, "nub main.ts"), "polyfill polyfill");
+
+    // `test` is a builtin only as `node:test`, so a package by that name keeps its
+    // `exports`. This one has nothing else to load.
+    write(
+        root,
+        "tsconfig.json",
+        r#"{"compilerOptions":{"paths":{"@fixtures/test":["./node_modules/test-fixtures"]}}}"#,
+    );
+    write(
+        root,
+        "node_modules/test-fixtures/package.json",
+        r#"{"name":"test","exports":{".":{"import":"./esm.mjs","require":"./cjs.cjs"}}}"#,
+    );
+    write(
+        root,
+        "node_modules/test-fixtures/esm.mjs",
+        "export const which = 'import';",
+    );
+    write(
+        root,
+        "node_modules/test-fixtures/cjs.cjs",
+        "exports.which = 'require';",
+    );
+    write(
+        root,
+        "main.ts",
+        r#"import { which } from "@fixtures/test";
+import { createRequire } from "node:module";
+console.log(which, createRequire(import.meta.url)("@fixtures/test").which);
+"#,
+    );
+    let out = nub(root, &root.join(".cache"), &["main.ts"]);
+    assert_eq!(stdout(&out, "nub main.ts, `test`"), "import require");
 }
 
 /// A `paths` target names one installed copy, and that copy answers: not a nested
@@ -293,6 +326,20 @@ fn the_standalone_loader_stops_on_an_unreadable_tsconfig() {
     for args in [["-e", "console.log('ran')", arg], ["--print", "'ran'", arg]] {
         let out = loader(None, "loader-register.mjs", root, &cache, &args);
         assert_eq!(stdout(&out, args[0]), "ran");
+    }
+    // These run the file after all: `-p` with no code, and `-i`, which forces the
+    // REPL past the eval string.
+    for args in [&["-p", "--", arg][..], &["-i", "-e", "0", arg]] {
+        let out = loader(None, "loader-register.mjs", root, &cache, args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{args:?}: the run must stop: {stderr}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("entry"),
+            "{args:?}: the entry must not run: {stderr}"
+        );
     }
 }
 
