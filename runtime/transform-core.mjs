@@ -646,6 +646,13 @@ export function isPackageRefusal(err) {
     code === "MODULE_NOT_FOUND";
 }
 
+// A self-reference Node would answer with one of its own modules: it checks builtins
+// before packages, so a package whose manifest names itself `events` resolves to
+// `node:events`. Such a target loads the file it names instead.
+export function namesABuiltin(specifier) {
+  return module.isBuiltin(specifier) || module.isBuiltin(`node:${specifier}`);
+}
+
 // Resolve a `resolveSpec` redirect through an `import` hook's `nextResolve`. Each
 // package is asked for its own self-reference from its own `package.json`, so
 // `exports` and the import conditions apply to the exact copy `paths` named. A
@@ -653,6 +660,10 @@ export function isPackageRefusal(err) {
 // answered, and the caller resolves the original specifier.
 export function resolveRedirect(redirect, context, next) {
   for (const p of redirect.packages) {
+    if (namesABuiltin(p.specifier)) {
+      if (p.fileURL) return { url: p.fileURL, shortCircuit: true };
+      continue;
+    }
     try {
       return next(p.specifier, { ...context, parentURL: p.parentURL });
     } catch (err) {
@@ -666,6 +677,10 @@ export function resolveRedirect(redirect, context, next) {
 // `resolveRedirect` for an async `nextResolve` (the `module.register` tier).
 export async function resolveRedirectAsync(redirect, context, next) {
   for (const p of redirect.packages) {
+    if (namesABuiltin(p.specifier)) {
+      if (p.fileURL) return { url: p.fileURL, shortCircuit: true };
+      continue;
+    }
     try {
       return await next(p.specifier, { ...context, parentURL: p.parentURL });
     } catch (err) {

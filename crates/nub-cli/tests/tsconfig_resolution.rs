@@ -36,7 +36,13 @@ fn runtime_dir() -> PathBuf {
 
 /// Plain `node` (from `node_dir`, else `PATH`) with the standalone loader preloaded.
 #[cfg(unix)]
-fn loader(node_dir: Option<&Path>, preload: &str, cwd: &Path, cache: &Path, entry: &str) -> Output {
+fn loader(
+    node_dir: Option<&Path>,
+    preload: &str,
+    cwd: &Path,
+    cache: &Path,
+    args: &[&str],
+) -> Output {
     let program = node_dir.map_or(PathBuf::from("node"), |dir| dir.join("node"));
     let mut command = Command::new(program);
     let flag = if preload.ends_with(".cjs") {
@@ -44,10 +50,9 @@ fn loader(node_dir: Option<&Path>, preload: &str, cwd: &Path, cache: &Path, entr
     } else {
         "--import"
     };
-    command.args([
-        format!("{flag}={}/{preload}", runtime_dir().display()),
-        entry.to_string(),
-    ]);
+    command
+        .arg(format!("{flag}={}/{preload}", runtime_dir().display()))
+        .args(args);
     hermetic(command, cwd, cache)
 }
 
@@ -99,6 +104,41 @@ console.log(which, require("dual").which, internal);
     );
     let out = nub(root, &root.join(".cache"), &["main.ts"]);
     assert_eq!(stdout(&out, "nub main.ts"), "import require internal");
+}
+
+/// A package whose manifest names itself after a Node builtin (`events`) is not
+/// asked for by that name, which Node would answer with the builtin: the target's
+/// own file loads, as it did before targets went through `exports`.
+#[test]
+fn a_paths_target_named_like_a_builtin_loads_the_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", r#"{"type":"module"}"#);
+    write(
+        root,
+        "tsconfig.json",
+        r#"{"compilerOptions":{"paths":{"@polyfill/events":["./node_modules/events-polyfill"]}}}"#,
+    );
+    write(
+        root,
+        "node_modules/events-polyfill/package.json",
+        r#"{"name":"events","main":"./main.cjs","exports":{".":"./main.cjs"}}"#,
+    );
+    write(
+        root,
+        "node_modules/events-polyfill/main.cjs",
+        "exports.which = 'polyfill';",
+    );
+    write(
+        root,
+        "main.ts",
+        r#"import { which } from "@polyfill/events";
+import { createRequire } from "node:module";
+console.log(which, createRequire(import.meta.url)("@polyfill/events").which);
+"#,
+    );
+    let out = nub(root, &root.join(".cache"), &["main.ts"]);
+    assert_eq!(stdout(&out, "nub main.ts"), "polyfill polyfill");
 }
 
 /// A `paths` target names one installed copy, and that copy answers: not a nested
@@ -224,7 +264,7 @@ fn the_standalone_loader_stops_on_an_unreadable_tsconfig() {
             "loader-register.mjs",
             root,
             &root.join(".cache"),
-            entry,
+            &[entry],
         );
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
@@ -239,6 +279,20 @@ fn the_standalone_loader_stops_on_an_unreadable_tsconfig() {
             stderr.contains("missing.json"),
             "{entry}: the failure names the file: {stderr}"
         );
+    }
+
+    // Under `-e`/`-p`, the path after the code is an argument to it, not an entry:
+    // its directory's config is not one this run reads.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "app/tsconfig.json", r#"{"extends":"./missing.json"}"#);
+    write(root, "app/main.mjs", "console.log('entry');\n");
+    let arg = root.join("app/main.mjs");
+    let arg = arg.to_str().unwrap();
+    let cache = root.join(".cache");
+    for args in [["-e", "console.log('ran')", arg], ["--print", "'ran'", arg]] {
+        let out = loader(None, "loader-register.mjs", root, &cache, &args);
+        assert_eq!(stdout(&out, args[0]), "ran");
     }
 }
 
@@ -259,7 +313,7 @@ fn an_empty_tsconfig_reads_as_an_empty_object() {
         #[cfg(unix)]
         assert_eq!(
             stdout(
-                &loader(None, "loader-register.mjs", root, &cache, "main.ts"),
+                &loader(None, "loader-register.mjs", root, &cache, &["main.ts"]),
                 &format!("loader, {body:?}")
             ),
             "1"
@@ -301,7 +355,7 @@ fn esm_syntax_in_a_commonjs_package_fails_on_the_compat_tier_too() {
         "loader-register.cjs",
         root,
         &cache,
-        "main.ts",
+        &["main.ts"],
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "22.13 must refuse it: {stderr}");

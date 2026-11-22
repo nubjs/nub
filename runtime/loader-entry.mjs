@@ -144,8 +144,11 @@ function refuseUnreadableTsconfig() {
 
 // The file entry as the transform will see it: Node has already resolved
 // `argv[1]`, and follows a symlink to it unless `--preserve-symlinks-main` is set.
-// Null for `-e`, the REPL and stdin.
+// Null for `-e`/`-p`, the REPL and stdin: there `argv[1]` is the first argument
+// handed to the code, not a file Node runs.
+const EVAL_FLAG = /^(?:-[ep]|-pe|-ep|--eval|--print)(?:=|$)/;
 function entryPath() {
+  if (process.execArgv.some((flag) => EVAL_FLAG.test(flag))) return null;
   const main = process.argv[1];
   if (typeof main !== "string" || main === "-" || !isAbsolute(main)) return null;
   const flags = [...process.execArgv, ...(process.env.NODE_OPTIONS || "").split(/\s+/)];

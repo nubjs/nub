@@ -1297,6 +1297,13 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       const redirect = resolved;
       resolved = redirect.otherwise ?? null;
       for (const p of redirect.packages) {
+        if (core.namesABuiltin(p.specifier)) {
+          if (p.file) {
+            resolved = p.file;
+            break;
+          }
+          continue;
+        }
         const anchor = {
           __proto__: parent ?? null,
           filename: p.packageJson,
