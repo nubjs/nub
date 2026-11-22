@@ -498,6 +498,12 @@ runs:
             *)      want="$(LC_ALL=C awk 'NR == 1 { sub(/^\357\273\277/, "") } { sub(/#.*/, ""); gsub(/\r/, ""); gsub(/^[ \t]+|[ \t]+$/, "") } $0 != "" { sub(/^v/, ""); print; exit }' "$NODE_VERSION_FILE")" ;;
           esac
         fi
+        # A version input can carry whitespace a YAML block scalar or a file adds
+        # (`node-version: |` ends in a newline; ranges may use tabs). Fold it to
+        # single spaces and trim, so the pin written below is one clean line.
+        want="$(printf '%s' "$want" | tr '\t\r\n' '   ' | tr -s ' ')"
+        want="${want# }"; want="${want% }"
+
         # nvm-style aliases, as setup-node reads them: lts/*, lts/<codename>, node,
         # latest and current resolve through the dist index to a version nub pins.
         # The index is newest-first and every entry carries its lts field, so
@@ -530,11 +536,39 @@ runs:
         pin_dir="."
         if [ -n "$want" ]; then
           pin_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/nub-pin.XXXXXX")"
-          printf '%s\n' "$want" > "$pin_dir/.node-version"
+          case "$want" in
+            # A semver range (^24, >=22 <23, 24.x): only devEngines.runtime reads
+            # one, so pin it there and install with a bare `nub node install`,
+            # which resolves the range against the Node index.
+            *[!0-9.vV]*)
+              want_json="${want//\\/\\\\}"; want_json="${want_json//\"/\\\"}"
+              printf '{"devEngines":{"runtime":{"name":"node","version":"%s"}}}\n' "$want_json" > "$pin_dir/package.json" ;;
+            *) printf '%s\n' "$want" > "$pin_dir/.node-version" ;;
+          esac
+        fi
+        # nub's resolver takes a Node already on PATH whenever it satisfies the
+        # pin: `nub node which` answers with it and `nub node install` skips it.
+        # For an explicit version that left the runner's root-owned Node in place
+        # (ubuntu-26.04 ships 24.x in /usr/local/bin), where `npm install -g npm`
+        # fails with EACCES; setup-node always fronts its own copy. So an explicit
+        # version resolves and installs on a PATH with every dir holding a `node`
+        # removed, and only nub's cache can answer. The project's pin keeps
+        # taking a satisfying runner Node, as documented.
+        nub_bin="$(command -v nub)"
+        nub_pin() { "$nub_bin" "$@"; }
+        if [ -n "$want" ]; then
+          nodeless_path=""
+          IFS=':' read -ra path_dirs <<< "$PATH"
+          for d in "${path_dirs[@]}"; do
+            [ -n "$d" ] || continue
+            if [ -e "$d/node" ] || [ -e "$d/node.exe" ]; then continue; fi
+            nodeless_path="${nodeless_path:+$nodeless_path:}$d"
+          done
+          nub_pin() { PATH="$nodeless_path" "$nub_bin" "$@"; }
         fi
         why="${RUNNER_TEMP:-/tmp}/nub-why.$$"
         resolve() {
-          resolved="$( (cd "$pin_dir" && nub node which) 2>"$why" )" || resolved=""
+          resolved="$( (cd "$pin_dir" && nub_pin node which) 2>"$why" )" || resolved=""
           reason="$(tr -d '\r' < "$why" 2>/dev/null || true)"
           # Windows prints backslashes and CRLF.
           resolved="$(printf '%s' "$resolved" | tr -d '\r')"
@@ -544,7 +578,11 @@ runs:
         if [ -z "$resolved" ]; then
           if [ -n "$want" ]; then
             echo "Installing Node ${want}"
-            nub node install "$want" || { echo "::error::nub node install ${want} failed"; exit 1; }
+            if [ -e "$pin_dir/package.json" ]; then
+              (cd "$pin_dir" && nub_pin node install) || { echo "::error::nub node install ${want} failed"; exit 1; }
+            else
+              nub_pin node install "$want" || { echo "::error::nub node install ${want} failed"; exit 1; }
+            fi
           else
             echo "Installing the project's pinned Node"
             nub node install || { echo "::error::The project's Node pin could not be provisioned. Set provision-node: false to run on the runner's Node ${runner_ver:-(none)} instead."; exit 1; }
@@ -567,7 +605,7 @@ runs:
             if [ -z "$resolved_ver" ]; then
               echo "::error::No Node satisfies this project's pin after provisioning: ${reason}"
               exit 1
-            elif [ "$resolved_ver" = "$runner_ver" ]; then
+            elif [ -z "$want" ] && [ "$resolved_ver" = "$runner_ver" ]; then
               echo "The runner's Node ${runner_ver} satisfies the pin (${src}); nothing installed or fronted."
             else
               dirname "$resolved" >> "$GITHUB_PATH"
