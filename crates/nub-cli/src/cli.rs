@@ -192,17 +192,6 @@ fn emit_ndjson_summary(passed: usize, failed: usize) {
 /// dependency spun up a thread during init (A19). Set once; never mutated after.
 static ENV_FILE_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
-/// Un-stripped merge of the explicit `--env-file` contents — the values Node's
-/// own `--env-file` parser delivers. The watch path forwards the explicit files
-/// to the watched Node (#479) and diffs [`ENV_FILE_VARS`] against this map (see
-/// [`watch_inject_vars`]) so a var Node already delivers is left to Node's
-/// re-read and live-reloads across restarts. The two maps now differ only by the
-/// denied-key strip, since `--env-file` values are no longer expanded; keeping
-/// them separate is what preserves that strip (a denied key must stay out of
-/// [`ENV_FILE_VARS`] but stay IN the forwarded set, so the guard can neutralize
-/// it rather than let a startup consumer act on it).
-static ENV_FILE_VARS_RAW: OnceLock<HashMap<String, String>> = OnceLock::new();
-
 /// Explicit `--env-file` / `--env-file-if-exists` paths in command-line order
 /// (absolutized against the scan-time cwd — the directory `read_env_file`
 /// resolved them from), tagged with the if-exists flavor. Retained for the
@@ -318,8 +307,9 @@ fn merge_child_env(
 /// left to Node's `--env-file` and live-reloads on restart. In practice the
 /// difference comes from `${VAR}` expansion, which only the auto-discovered and
 /// `nub.jsonc`-sourced families get: an explicit `--env-file` is delivered
-/// verbatim (Node's own semantics), so it never diverges and is always left to
-/// Node once forwarded. A key absent from
+/// verbatim, so it diverges only where Node's parser misreads the file, which
+/// `forwarded_raw` reflects because the watched Node itself parsed it
+/// ([`node_env_file_values`]). A key absent from
 /// `forwarded_raw` is injected, because injection is then its only delivery
 /// channel: that covers the explicit `--env-file` case (auto-discovery is
 /// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
@@ -335,6 +325,43 @@ fn watch_inject_vars<'a>(
         .iter()
         .filter(|(k, v)| forwarded_raw.get(*k) != Some(*v))
         .collect()
+}
+
+/// What `node_path` reads from `paths` given as repeated `--env-file` flags, in
+/// order, later files winning. The Node itself parses them with `util.parseEnv`,
+/// the parser behind `--env-file`, because the parser changes across releases
+/// (Node 20 keeps a leading tab that 26 trims) and misreads lines Nub's parser
+/// reads correctly. `None` when that Node cannot say: `util.parseEnv` arrived in
+/// 20.12, and the probe can fail. The caller then injects every value.
+fn node_env_file_values(node_path: &Path, paths: &[&Path]) -> Option<HashMap<String, String>> {
+    const PROBE: &str = "const { parseEnv } = require('node:util');\n\
+        const { readFileSync } = require('node:fs');\n\
+        const values = Object.create(null);\n\
+        for (const path of process.argv.slice(1)) {\n\
+          let text;\n\
+          try { text = readFileSync(path, 'utf8'); } catch { continue; }\n\
+          Object.assign(values, parseEnv(text));\n\
+        }\n\
+        process.stdout.write(JSON.stringify(values));";
+    if paths.is_empty() {
+        return Some(HashMap::new());
+    }
+    let mut probe = std::process::Command::new(node_path);
+    nub_core::node::nesting::mark_probe(&mut probe, node_path);
+    let output = probe
+        .arg("-e")
+        .arg(PROBE)
+        .arg("--")
+        .args(paths)
+        .env_remove("NODE_OPTIONS")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
 }
 
 /// Node's `--env-file` floor (landed 20.6.0). Below it Node aborts on the
@@ -2204,10 +2231,8 @@ fn run_nub() -> Result<i32> {
     let mut rest: Vec<String> = Vec::new();
     let mut subcommand_found = false;
     let mut env_file_vars: std::collections::HashMap<String, String> = Default::default();
-    // Parallel pre-strip merge + the flag paths themselves, retained for the
-    // watch path's --env-file forwarding (#479). See ENV_FILE_VARS_RAW /
-    // ENV_FILE_PATHS.
-    let mut env_file_raw_vars: std::collections::HashMap<String, String> = Default::default();
+    // The flag paths themselves, retained for the watch path's --env-file
+    // forwarding (#479). See ENV_FILE_PATHS.
     let mut env_file_paths: Vec<(PathBuf, bool)> = Vec::new();
     // Tracks whether any `--env-file` flag appeared, independent of whether it
     // yielded vars (an empty file still counts as intent). Drives suppression of
@@ -2387,7 +2412,6 @@ fn run_nub() -> Result<i32> {
                             // variables defined in previous files" (doc/api/cli.md).
                             // Shell env still wins over all of them — enforced later
                             // in `overlay_env_file_vars` (skips keys already set).
-                            env_file_raw_vars.insert(k.clone(), v.clone());
                             env_file_vars.insert(k, v);
                         }
                     } else {
@@ -2492,12 +2516,7 @@ fn run_nub() -> Result<i32> {
     // dep threads during init. Shell-wins / `.env`-override precedence is applied
     // at each spawn site via overlay_env_file_vars / apply_env_file_vars.
     let _ = ENV_FILE_VARS.set(env_file_vars);
-    // Raw values + flag paths for the watch path's --env-file forwarding (#479).
-    // The raw map deliberately keeps denied keys: watch_inject_vars iterates the
-    // stripped ENV_FILE_VARS side, so a denied key is never injected, and the
-    // forwarded file's copy is neutralized by the watch env guard's placeholder
-    // pinning (Node's --env-file never overrides an already-set var).
-    let _ = ENV_FILE_VARS_RAW.set(env_file_raw_vars);
+    // Flag paths for the watch path's --env-file forwarding (#479).
     let _ = ENV_FILE_PATHS.set(env_file_paths);
     // Record flag presence so the run/watch paths can suppress eager `.env*`
     // auto-discovery when the user named explicit env file(s).
@@ -7557,8 +7576,9 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // lived watcher process never restarts, so it never re-reads `.env`. Injecting
     // every var (the old behavior) therefore froze plain vars across restarts even
     // though Node's own `--env-file` would have live-reloaded them. Fix: inject
-    // ONLY the keys whose `${VAR}` expansion actually changed the raw value (Node's
-    // `--env-file` can't reproduce those); every plain/unexpanded var is delivered
+    // ONLY the keys whose `${VAR}` expansion actually changed the raw value, or
+    // whose line Node's parser misreads (Node's `--env-file` can't reproduce
+    // those); every other var is delivered
     // SOLELY through the `--env-file` args, so editing `.env` is picked up on the
     // next restart, matching `node --watch --env-file=.env`. See the inject loop.
     //
@@ -7596,9 +7616,9 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     // The base `.env` set, unexpanded — the auto cascade, or the config's source
     // list. Loaded whenever a base source is live, INDEPENDENT of forwarding:
     // `auto_env` below needs it as the injection base even when the files never
-    // reach Node. A single read (rather than a loader plus a second raw loader)
-    // avoids re-parsing every file twice and closes the TOCTOU window where a
-    // file changing between two reads could spuriously inject a plain var.
+    // reach Node. Forwarded files are read a second time below for Node's view
+    // of them; a key edited in the instant between the two reads is injected
+    // with its first-read value, frozen until the watcher restarts.
     let base_raw_env = if no_env_file {
         HashMap::new()
     } else {
@@ -7620,24 +7640,45 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     };
     // Pre-expand the config/automatic base to the same map the direct file
     // runner produces, then overlay CLI values so they are strongest.
-    let mut env_vars = base_raw_env.clone();
+    let mut env_vars = base_raw_env;
     nub_core::workspace::env::expand_env_map(&mut env_vars);
     overlay_env_file_vars(&mut env_vars);
-    // Raw values that the watched Node receives through forwarded files — the set
-    // the inject loop must SKIP, since injecting a var Node already delivers
-    // freezes it at the startup value (#207). Values absent here must be injected,
-    // while values that differ after expansion are injected with their expanded
-    // form. A family that is not forwarded contributes nothing, which makes
-    // injection its only delivery channel and restores the pre-#207
-    // freeze-at-startup behavior: degraded live-reload, never a dead watcher.
-    let mut forwarded_raw_env = if forward_base {
-        base_raw_env
+    // Node is last-writer-wins, so the auto cascade goes highest-priority LAST
+    // to line up with nub's first-writer-wins. A config `env` source list is
+    // already in user order (later files win, like repeated `--env-file`), and
+    // explicit `--env-file` files keep user order too (#479).
+    let mut forwarded_base: Vec<&Path> = if forward_base {
+        env_file_paths.iter().map(PathBuf::as_path).collect()
     } else {
-        HashMap::new()
+        Vec::new()
     };
-    if forward_explicit && let Some(explicit) = ENV_FILE_VARS_RAW.get() {
-        forwarded_raw_env.extend(explicit.clone());
+    if !config_env_sources {
+        forwarded_base.reverse();
     }
+    let forwarded_explicit: &[(PathBuf, bool)] = if forward_explicit {
+        explicit_env_files
+    } else {
+        &[]
+    };
+    // What the watched Node reads from the forwarded files, after precedence,
+    // asked of that Node itself. The inject loop SKIPS a key whose value already
+    // matches here, since injecting a var Node delivers freezes it at the startup
+    // value (#207). Everything else is injected: a value `${VAR}` expansion
+    // changed, a key no forwarded file carries, and a value Node's parser
+    // misreads (an empty value followed by a space, a byte order mark). A family
+    // that is not forwarded contributes nothing, and neither does a Node that
+    // cannot answer, which makes injection the only delivery channel and
+    // restores the pre-#207 freeze-at-startup behavior: degraded live-reload,
+    // never a wrong value or a dead watcher. Denied keys stay in this map;
+    // `watch_inject_vars` iterates the stripped side, and the forwarded copy is
+    // neutralized by the child guard below.
+    let forwarded_paths: Vec<&Path> = forwarded_base
+        .iter()
+        .copied()
+        .chain(forwarded_explicit.iter().map(|(path, _)| path.as_path()))
+        .collect();
+    let forwarded_raw_env =
+        node_env_file_values(node.path.as_std_path(), &forwarded_paths).unwrap_or_default();
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let preload_path = nub_core::node::spawn::find_public_preload(&nub_binary);
@@ -7701,28 +7742,14 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         nub_core::node::flags::strip_unsupported_node_options(existing, &node.version)
     });
 
-    // Reverse so the highest-priority `.env*` file lands last (Node's
-    // last-writer-wins ⇒ nub's first-writer-wins precedence).
-    // A config `env` source list is already in user order (later files win, like
-    // repeated `--env-file`), so only the auto cascade is reversed.
-    if forward_base {
-        let mut ordered: Vec<&Path> = env_file_paths.iter().map(PathBuf::as_path).collect();
-        if !config_env_sources {
-            ordered.reverse();
-        }
-        for path in ordered {
-            // `cmd` inherits `cwd`; the helper chooses the path form required by
-            // the platform watcher without changing cwd or file precedence.
-            node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
-        }
+    // In `forwarded_base` / `forwarded_explicit` order (above). `cmd` inherits
+    // `cwd`; the helper chooses the path form required by the platform watcher
+    // without changing cwd or file precedence.
+    for path in &forwarded_base {
+        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), false)?);
     }
-    // Explicit `--env-file` files forward in USER order — no reverse: Node is
-    // last-writer-wins and nub's parse across repeated flags is last-wins too,
-    // so the orders already agree (#479).
-    if forward_explicit {
-        for (path, if_exists) in explicit_env_files {
-            node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), *if_exists)?);
-        }
+    for (path, if_exists) in forwarded_explicit {
+        node_args.push(watch_env_file_arg(path, &cwd, cfg!(windows), *if_exists)?);
     }
 
     node_args.extend(watched_program(file, args));
@@ -7923,7 +7950,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
     }
     // Inject ONLY the .env* vars whose `${VAR}` expansion changed the raw value
-    // (#207) — see [`watch_inject_vars`]. A var Node's `--env-file` already
+    // (#207), or that Node's parser misreads — see [`watch_inject_vars`]. A var
+    // Node's `--env-file` already
     // delivers identically is left to Node so the long-lived watcher re-reads it
     // from the file on every restart (a changed `.env` value is picked up) instead
     // of freezing at startup.

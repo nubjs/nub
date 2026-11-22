@@ -576,14 +576,17 @@ pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
 /// their inner quotes and backslash escapes. Later keys override earlier ones
 /// (Node's `insert_or_assign` / last-writer-wins), preserving first-seen order
 /// for callers that fold these pairs into a `HashMap`.
+///
+/// Where Node's parser misreads a file, this one follows dotenv instead: an
+/// empty value followed by spaces does not take the next line, a byte order
+/// mark is dropped, an empty `export KEY=` sets `KEY`, and every line is
+/// trimmed before it is read.
 pub fn parse_env(content: &str) -> Vec<(String, String)> {
     // Node removes carriage returns before scanning.
     let content = content.replace('\r', "");
     let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
     let mut rest = trim_env_spaces(content);
-
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut pairs = EnvPairs::default();
 
     while !rest.is_empty() {
         if rest.starts_with('\n') || rest.starts_with('#') {
@@ -609,25 +612,18 @@ pub fn parse_env(content: &str) -> Vec<(String, String)> {
             continue;
         }
 
+        // Skip only spaces and tabs: trimming the newline too would make
+        // `KEY= ` take the next line as its value.
+        rest = rest.trim_start_matches([' ', '\t']);
         if rest.is_empty() || rest.starts_with('\n') {
-            upsert_env_pair(&mut pairs, &mut seen, key.to_string(), String::new());
-            rest = match rest.find('\n') {
-                Some(newline) => trim_env_spaces(&rest[newline + 1..]),
-                None => "",
-            };
+            pairs.insert(key, String::new());
+            rest = trim_env_spaces(skip_line(rest));
             continue;
-        }
-
-        rest = trim_env_spaces(rest);
-        if rest.is_empty() {
-            upsert_env_pair(&mut pairs, &mut seen, key.to_string(), String::new());
-            break;
         }
 
         if rest.starts_with('"') {
             if let Some(closing_quote) = closing_quote(rest, '"') {
-                let value = rest[1..closing_quote].replace("\\n", "\n");
-                upsert_env_pair(&mut pairs, &mut seen, key.to_string(), value);
+                pairs.insert(key, rest[1..closing_quote].replace("\\n", "\n"));
                 rest = trim_env_spaces(after_value_line(rest, closing_quote + 1));
                 continue;
             }
@@ -635,30 +631,42 @@ pub fn parse_env(content: &str) -> Vec<(String, String)> {
 
         if let Some(quote) = leading_quote(rest) {
             if let Some(closing_quote) = closing_quote(rest, quote) {
-                let value = rest[1..closing_quote].to_string();
-                upsert_env_pair(&mut pairs, &mut seen, key.to_string(), value);
+                pairs.insert(key, rest[1..closing_quote].to_string());
                 rest = trim_env_spaces(after_value_line(rest, closing_quote + 1));
                 continue;
             }
 
             let (line, next) = split_line(rest);
-            upsert_env_pair(&mut pairs, &mut seen, key.to_string(), line.to_string());
+            pairs.insert(key, line.to_string());
             rest = trim_env_spaces(next);
             continue;
         }
 
         let (line, next) = split_line(rest);
         let value = line.split_once('#').map(|(value, _)| value).unwrap_or(line);
-        upsert_env_pair(
-            &mut pairs,
-            &mut seen,
-            key.to_string(),
-            trim_env_spaces(value).to_string(),
-        );
+        pairs.insert(key, trim_env_spaces(value).to_string());
         rest = trim_env_spaces(next);
     }
 
-    pairs
+    pairs.pairs
+}
+
+/// Pairs in first-seen order, with a later assignment replacing an earlier one.
+#[derive(Default)]
+struct EnvPairs {
+    pairs: Vec<(String, String)>,
+    seen: HashMap<String, usize>,
+}
+
+impl EnvPairs {
+    fn insert(&mut self, key: &str, value: String) {
+        if let Some(&idx) = self.seen.get(key) {
+            self.pairs[idx].1 = value;
+        } else {
+            self.seen.insert(key.to_string(), self.pairs.len());
+            self.pairs.push((key.to_string(), value));
+        }
+    }
 }
 
 fn trim_env_spaces(input: &str) -> &str {
@@ -694,20 +702,6 @@ fn leading_quote(input: &str) -> Option<char> {
 
 fn closing_quote(input: &str, quote: char) -> Option<usize> {
     input[1..].find(quote).map(|idx| idx + 1)
-}
-
-fn upsert_env_pair(
-    pairs: &mut Vec<(String, String)>,
-    seen: &mut HashMap<String, usize>,
-    key: String,
-    value: String,
-) {
-    if let Some(&idx) = seen.get(&key) {
-        pairs[idx].1 = value;
-    } else {
-        seen.insert(key.clone(), pairs.len());
-        pairs.push((key, value));
-    }
 }
 
 /// Append `text`, or give up if that would grow the expansion past its cap.
@@ -1190,6 +1184,22 @@ mod tests {
     fn parse_comments_and_blanks() {
         let pairs = parse_env("# comment\n\nFOO=bar\n");
         assert_eq!(pairs.len(), 1);
+    }
+
+    #[test]
+    fn empty_value_followed_by_whitespace_does_not_take_the_next_line() {
+        let pairs = parse_env("A= \nB=b\nC=\t\nD=d\nexport E=  \nF=f\nG= ");
+        let expected = [
+            ("A", ""),
+            ("B", "b"),
+            ("C", ""),
+            ("D", "d"),
+            ("E", ""),
+            ("F", "f"),
+            ("G", ""),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        assert_eq!(pairs, expected);
     }
 
     #[test]
