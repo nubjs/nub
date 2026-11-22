@@ -308,8 +308,8 @@ fn merge_child_env(
 /// difference comes from `${VAR}` expansion, which only the auto-discovered and
 /// `nub.jsonc`-sourced families get: an explicit `--env-file` is delivered
 /// verbatim, so it diverges only where Node's parser misreads the file, which
-/// `forwarded_raw` reflects because the caller builds it with
-/// [`nub_core::workspace::env::parse_env_as_node`]. A key absent from
+/// `forwarded_raw` reflects because the watched Node itself parsed it
+/// ([`node_env_file_values`]). A key absent from
 /// `forwarded_raw` is injected, because injection is then its only delivery
 /// channel: that covers the explicit `--env-file` case (auto-discovery is
 /// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
@@ -325,6 +325,43 @@ fn watch_inject_vars<'a>(
         .iter()
         .filter(|(k, v)| forwarded_raw.get(*k) != Some(*v))
         .collect()
+}
+
+/// What `node_path` reads from `paths` given as repeated `--env-file` flags, in
+/// order, later files winning. The Node itself parses them with `util.parseEnv`,
+/// the parser behind `--env-file`, because the parser changes across releases
+/// (Node 20 keeps a leading tab that 26 trims) and misreads lines Nub's parser
+/// reads correctly. `None` when that Node cannot say: `util.parseEnv` arrived in
+/// 20.12, and the probe can fail. The caller then injects every value.
+fn node_env_file_values(node_path: &Path, paths: &[&Path]) -> Option<HashMap<String, String>> {
+    const PROBE: &str = "const { parseEnv } = require('node:util');\n\
+        const { readFileSync } = require('node:fs');\n\
+        const values = Object.create(null);\n\
+        for (const path of process.argv.slice(1)) {\n\
+          let text;\n\
+          try { text = readFileSync(path, 'utf8'); } catch { continue; }\n\
+          Object.assign(values, parseEnv(text));\n\
+        }\n\
+        process.stdout.write(JSON.stringify(values));";
+    if paths.is_empty() {
+        return Some(HashMap::new());
+    }
+    let mut probe = std::process::Command::new(node_path);
+    nub_core::node::nesting::mark_probe(&mut probe, node_path);
+    let output = probe
+        .arg("-e")
+        .arg(PROBE)
+        .arg("--")
+        .args(paths)
+        .env_remove("NODE_OPTIONS")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice(&output.stdout).ok()
 }
 
 /// Node's `--env-file` floor (landed 20.6.0). Below it Node aborts on the
@@ -7623,28 +7660,25 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     } else {
         &[]
     };
-    // What the watched Node reads from the forwarded files: Node's own parse of
-    // each, merged in the order they are passed, so a key reads as Node will see
-    // it after precedence. The inject loop SKIPS a key whose value already
+    // What the watched Node reads from the forwarded files, after precedence,
+    // asked of that Node itself. The inject loop SKIPS a key whose value already
     // matches here, since injecting a var Node delivers freezes it at the startup
     // value (#207). Everything else is injected: a value `${VAR}` expansion
     // changed, a key no forwarded file carries, and a value Node's parser
     // misreads (an empty value followed by a space, a byte order mark). A family
-    // that is not forwarded contributes nothing, which makes injection its only
-    // delivery channel and restores the pre-#207 freeze-at-startup behavior:
-    // degraded live-reload, never a dead watcher. Denied keys stay in this map;
+    // that is not forwarded contributes nothing, and neither does a Node that
+    // cannot answer, which makes injection the only delivery channel and
+    // restores the pre-#207 freeze-at-startup behavior: degraded live-reload,
+    // never a wrong value or a dead watcher. Denied keys stay in this map;
     // `watch_inject_vars` iterates the stripped side, and the forwarded copy is
     // neutralized by the child guard below.
-    let mut forwarded_raw_env = HashMap::new();
-    let forwarded_paths = forwarded_base
+    let forwarded_paths: Vec<&Path> = forwarded_base
         .iter()
         .copied()
-        .chain(forwarded_explicit.iter().map(|(path, _)| path.as_path()));
-    for path in forwarded_paths {
-        if let Some(content) = nub_core::workspace::env::read_env_file(path) {
-            forwarded_raw_env.extend(nub_core::workspace::env::parse_env_as_node(&content));
-        }
-    }
+        .chain(forwarded_explicit.iter().map(|(path, _)| path.as_path()))
+        .collect();
+    let forwarded_raw_env =
+        node_env_file_values(node.path.as_std_path(), &forwarded_paths).unwrap_or_default();
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let preload_path = nub_core::node::spawn::find_public_preload(&nub_binary);

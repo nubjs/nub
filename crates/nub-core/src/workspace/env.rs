@@ -580,7 +580,7 @@ pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
 /// Where Node's parser misreads a file, this one follows dotenv instead: an
 /// empty value followed by spaces does not take the next line, a byte order
 /// mark is dropped, an empty `export KEY=` sets `KEY`, and every line is
-/// trimmed before it is read. [`parse_env_as_node`] keeps Node's reading.
+/// trimmed before it is read.
 pub fn parse_env(content: &str) -> Vec<(String, String)> {
     // Node removes carriage returns before scanning.
     let content = content.replace('\r', "");
@@ -646,89 +646,6 @@ pub fn parse_env(content: &str) -> Vec<(String, String)> {
         let value = line.split_once('#').map(|(value, _)| value).unwrap_or(line);
         pairs.insert(key, trim_env_spaces(value).to_string());
         rest = trim_env_spaces(next);
-    }
-
-    pairs.pairs
-}
-
-/// What Node's own `--env-file` parser reads from `content`: `ParseContent` in
-/// Node 26.11's `src/node_dotenv.cc`, ported branch for branch, misreadings
-/// included. `nub watch` hands env files to Node as `--env-file` and compares
-/// this against [`parse_env`] to find the values Node gets wrong, which it then
-/// injects itself.
-pub fn parse_env_as_node(content: &str) -> Vec<(String, String)> {
-    let lines = content.replace('\r', "");
-    let mut content = trim_env_spaces(&lines);
-    let mut pairs = EnvPairs::default();
-
-    while !content.is_empty() {
-        if content.starts_with('\n') || content.starts_with('#') {
-            content = skip_line(content);
-            continue;
-        }
-
-        let Some(equal_or_newline) = content.find(['=', '\n']) else {
-            break;
-        };
-        if content.as_bytes()[equal_or_newline] == b'\n' {
-            content = trim_env_spaces(&content[equal_or_newline + 1..]);
-            continue;
-        }
-
-        let mut key = trim_env_spaces(&content[..equal_or_newline]);
-        content = &content[equal_or_newline + 1..];
-        if content.is_empty() || content.starts_with('\n') {
-            pairs.insert(key, String::new());
-            continue;
-        }
-
-        // Trims the newline as well, so `KEY= ` reads the next line.
-        content = trim_env_spaces(content);
-        if key.is_empty() {
-            continue;
-        }
-        if let Some(stripped) = key.strip_prefix("export ") {
-            key = trim_env_spaces(stripped);
-        }
-        if content.is_empty() {
-            pairs.insert(key, String::new());
-            break;
-        }
-
-        if content.starts_with('"') {
-            if let Some(closing_quote) = closing_quote(content, '"') {
-                pairs.insert(key, content[1..closing_quote].replace("\\n", "\n"));
-                content = after_value_line(content, closing_quote + 1);
-                continue;
-            }
-        }
-
-        if let Some(quote) = leading_quote(content) {
-            match closing_quote(content, quote) {
-                Some(closing_quote) => {
-                    pairs.insert(key, content[1..closing_quote].to_string());
-                    content = after_value_line(content, closing_quote + 1);
-                    continue;
-                }
-                None => match content.find('\n') {
-                    Some(newline) => {
-                        pairs.insert(key, content[..newline].to_string());
-                        content = &content[newline + 1..];
-                    }
-                    None => {
-                        pairs.insert(key, content.to_string());
-                        break;
-                    }
-                },
-            }
-        } else {
-            let (line, next) = split_line(content);
-            let value = line.split_once('#').map(|(value, _)| value).unwrap_or(line);
-            pairs.insert(key, trim_env_spaces(value).to_string());
-            content = next;
-        }
-
-        content = trim_env_spaces(content);
     }
 
     pairs.pairs
@@ -1283,35 +1200,6 @@ mod tests {
         ]
         .map(|(k, v)| (k.to_string(), v.to_string()));
         assert_eq!(pairs, expected);
-    }
-
-    /// Node 26.11.1's `util.parseEnv` on the same inputs: the empty value takes
-    /// the next line, a quoted continuation line then reads as its own
-    /// assignment, the byte order mark stays on the key, an empty `export`
-    /// value keeps the prefix, and an indented comment after a quoted value
-    /// reads as a key.
-    #[test]
-    fn parse_env_as_node_keeps_nodes_misreadings() {
-        let node = |content| {
-            parse_env_as_node(content)
-                .into_iter()
-                .collect::<HashMap<_, _>>()
-        };
-        let pairs = |list: &[(&str, &str)]| {
-            list.iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<HashMap<_, _>>()
-        };
-        assert_eq!(
-            node("PORT=3000\nEMPTY= \nCONFIG=\"header\nPORT=9999\nfooter\"\n"),
-            pairs(&[("PORT", "9999"), ("EMPTY", "CONFIG=\"header")]),
-        );
-        assert_eq!(node("\u{feff}A=1\n"), pairs(&[("\u{feff}A", "1")]));
-        assert_eq!(node("export E=\n"), pairs(&[("export E", "")]));
-        assert_eq!(
-            node("A=\"x\"\n  # C=value\n"),
-            pairs(&[("A", "x"), ("# C", "value")]),
-        );
     }
 
     #[test]
