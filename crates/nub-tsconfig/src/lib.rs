@@ -384,22 +384,30 @@ fn lists(listed: &str, config_path: &str) -> bool {
         .any(|entry| report_key(entry) == key)
 }
 
-/// One spelling per config file: symlinks resolved, and on Windows the long form
-/// of an 8.3 short name (what `canonicalize` returns), without the `\\?\` prefix
-/// and compared case-insensitively. A path that does not resolve keeps its own.
+/// One spelling per config file: its DIRECTORY canonicalized (symlinks resolved,
+/// and on Windows the long form of an 8.3 short name), without the `\\?\` prefix,
+/// and compared case-insensitively on Windows. The file name is joined unchanged:
+/// a `tsconfig.json` symlink resolves `extends` from its own directory, so two
+/// such links sharing a target are different configs. A directory that does not
+/// resolve keeps its own spelling.
 fn report_key(path: &str) -> String {
-    let resolved = std::fs::canonicalize(path).map_or_else(
-        |_| path.to_string(),
-        |p| {
-            let p = p.to_string_lossy();
-            if let Some(unc) = p.strip_prefix(r"\\?\UNC\") {
-                format!(r"\\{unc}")
-            } else {
-                p.strip_prefix(r"\\?\").unwrap_or(&p).to_string()
-            }
-        },
-    );
-    let key = slash(&resolved);
+    let path = Path::new(path);
+    let resolved = match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => std::fs::canonicalize(dir).map_or_else(
+            |_| path.to_path_buf(),
+            |dir| {
+                let dir = dir.to_string_lossy();
+                let dir = if let Some(unc) = dir.strip_prefix(r"\\?\UNC\") {
+                    format!(r"\\{unc}")
+                } else {
+                    dir.strip_prefix(r"\\?\").unwrap_or(&dir).to_string()
+                };
+                Path::new(&dir).join(name)
+            },
+        ),
+        _ => path.to_path_buf(),
+    };
+    let key = slash(&resolved.to_string_lossy());
     if cfg!(windows) {
         key.to_lowercase()
     } else {
@@ -1649,12 +1657,24 @@ mod tests {
 
     /// A config the parent listed under one spelling is recognised under another:
     /// here a symlinked directory, the Unix stand-in for a Windows 8.3 short name.
+    /// Two `tsconfig.json` file symlinks in different directories stay distinct even
+    /// when they share a target, since each resolves `extends` from its own directory.
     #[cfg(unix)]
     #[test]
     fn a_reported_config_matches_under_another_spelling() {
-        let dir = project(&[("real/tsconfig.json", "{}"), ("real/other.json", "{}")]);
-        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
-        let spell = |sub: &str| dir.path().join(sub).to_string_lossy().into_owned();
+        use std::os::unix::fs::symlink;
+        let dir = project(&[
+            ("real/tsconfig.json", "{}"),
+            ("real/other.json", "{}"),
+            ("shared.json", "{}"),
+        ]);
+        let at = |sub: &str| dir.path().join(sub);
+        symlink(at("real"), at("link")).unwrap();
+        for sub in ["a", "b"] {
+            std::fs::create_dir(at(sub)).unwrap();
+            symlink(at("shared.json"), at(&format!("{sub}/tsconfig.json"))).unwrap();
+        }
+        let spell = |sub: &str| at(sub).to_string_lossy().into_owned();
         let (real, link) = (spell("real/tsconfig.json"), spell("link/tsconfig.json"));
         assert!(
             super::lists(&link, &real),
@@ -1664,6 +1684,10 @@ mod tests {
         assert!(
             !super::lists(&spell("link/other.json"), &real),
             "a different file is not listed"
+        );
+        assert!(
+            !super::lists(&spell("a/tsconfig.json"), &spell("b/tsconfig.json")),
+            "file symlinks in different directories are different configs"
         );
     }
 
