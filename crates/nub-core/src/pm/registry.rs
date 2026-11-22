@@ -459,11 +459,12 @@ fn parse_npmrc_auth(
 
     // Longest `//host[/path]` prefix that is a prefix of the base AND carries a
     // credential wins — the engine's `has_credential_material` rule. A
-    // path-scoped entry holding only TLS settings (`cafile`) or a lone half of
-    // a username/password pair must not shadow the host's token.
+    // path-scoped entry holding only TLS settings (`cafile`), or a username with
+    // no `_password` key, must not shadow the host's token. A `_password` key
+    // that is present but empty completes the pair (`user:`), as in the engine.
     let has_credential = |f: &Fields| {
         let set = |v: &Option<String>| v.as_ref().is_some_and(|v| !v.is_empty());
-        set(&f.auth_token) || set(&f.auth_basic) || (set(&f.username) && set(&f.password))
+        set(&f.auth_token) || set(&f.auth_basic) || (set(&f.username) && f.password.is_some())
     };
     let best = by_prefix
         .iter()
@@ -1868,6 +1869,21 @@ mod tests {
             }),
             Some(Auth::Bearer("tok".to_string()))
         );
+    }
+
+    /// A username with a `_password` key, even an empty one, is a credential
+    /// (Basic `user:`); a username with no `_password` key is not.
+    #[test]
+    fn a_username_needs_a_password_key_even_an_empty_one() {
+        let reg = "https://mirror.example.test/";
+        let with_empty =
+            "//mirror.example.test/:username=user\n//mirror.example.test/:_password=\n";
+        assert_eq!(
+            parse_npmrc_auth(&[(with_empty, true)], reg, |_| None),
+            Some(Auth::Basic(base64_encode(b"user:")))
+        );
+        let without = "//mirror.example.test/:username=user\n";
+        assert_eq!(parse_npmrc_auth(&[(without, true)], reg, |_| None), None);
     }
 
     /// The environment's credential travels with the environment's registry and
