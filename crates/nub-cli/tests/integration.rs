@@ -13100,6 +13100,53 @@ fn node_which_names_a_pin_file_holding_a_range() {
     );
 }
 
+/// A skipped pin file costs only a warning on a run: with no node on PATH the
+/// run still takes the unpinned fallback, here the newest Node in a warm store,
+/// so no network is involved. (Unix only — the stored `node` is `#!/bin/sh`.)
+#[cfg(unix)]
+#[test]
+fn run_with_a_range_in_nvmrc_warns_and_uses_the_store() {
+    let work = unique_test_cache();
+    let proj = work.join("proj");
+    let bin = work
+        .join("cache")
+        .join("nub")
+        .join("node")
+        .join("24.0.0")
+        .join("bin");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(work.join("empty-nvm")).unwrap();
+    std::fs::write(proj.join(".nvmrc"), "^22.18.0\n").unwrap();
+    std::fs::write(proj.join("app.js"), "").unwrap();
+    let node = bin.join("node");
+    std::fs::write(&node, "#!/bin/sh\necho stored-node-ran\n").unwrap();
+    let mut perms = std::fs::metadata(&node).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&node, perms).unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("app.js")
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("NVM_DIR", work.join("empty-nvm"))
+        .env("PATH", "")
+        .env_remove("NODE_EXECUTABLE")
+        .env_remove("NODE_COMPAT")
+        .output()
+        .expect("spawn nub app.js");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr:?}");
+    assert!(stdout.contains("stored-node-ran"), "stdout: {stdout:?}");
+    assert!(
+        stderr.contains("ignoring .nvmrc \"^22.18.0\""),
+        "the skipped file is named: {stderr:?}"
+    );
+}
+
 /// `nub run`/`nub exec` must report a ROLE-AWARE `npm_config_user_agent`, the
 /// same incumbent-first UA the engine's lifecycle path sends — not a hardcoded
 /// `nub/<v> npm/?`. Postinstall sniffers (only-allow, which-pm-runs) branch on

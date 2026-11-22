@@ -175,9 +175,6 @@ pub fn install_from_pin(store: &Path, cwd: &Path) -> Result<InstallOutcome> {
     for warning in &chain.warnings {
         eprintln!("{warning}");
     }
-    if let Some(ignored) = &chain.ignored_pin {
-        eprintln!("{}", ignored.warning());
-    }
     let Some((raw, pin, source)) = chain.pin else {
         bail!(
             "nub node install: no version given and no Node pin (devEngines.runtime, \
@@ -366,6 +363,8 @@ fn is_node_entry(entry: &serde_json::Value) -> bool {
 /// takes the `engines.node` grammar, so a range is accepted; an nvm alias is not
 /// (npm rejects `devEngines.runtime` versions like `lts`).
 fn pin_dev_engines(spec: &str, cwd: &Path) -> Result<PinResult> {
+    let spec = node_semver_range(spec);
+    let spec = spec.as_str();
     match VersionPin::parse_allowing_ranges(spec) {
         Ok(VersionPin::Alias(_)) => bail!(
             "nub node pin: \"{spec}\" is an alias, and this project pins Node in \
@@ -389,11 +388,31 @@ fn pin_dev_engines(spec: &str, cwd: &Path) -> Result<PinResult> {
             );
         }
     })?;
-    let path = std::fs::canonicalize(&path).unwrap_or(path);
     Ok(PinResult {
         path,
         spec: spec.to_string(),
     })
+}
+
+/// Spell a range the way node-semver does, which is what npm checks
+/// `devEngines` with. The range parser behind [`VersionPin::parse_allowing_ranges`]
+/// also takes Cargo's comma between AND-ed comparators (`>=22, <25`), which
+/// node-semver rejects outright (npm then fails every command with
+/// `EBADDEVENGINES`). A comma there means the same as node-semver's space, so
+/// rewriting it loses nothing; every other spelling is kept as typed.
+fn node_semver_range(spec: &str) -> String {
+    if !spec.contains(',') {
+        return spec.to_string();
+    }
+    spec.split("||")
+        .map(|alt| {
+            alt.replace(',', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(" || ")
 }
 
 #[cfg(test)]
@@ -652,6 +671,14 @@ mod tests {
             "bun untouched"
         );
         assert_eq!(json["devEngines"]["runtime"][1]["version"], "24.11.0");
+
+        // npm reads the field with node-semver, which has no comma between bounds.
+        let result = pin(">=22, <25", &root).expect("pin writes");
+        assert_eq!(result.spec, ">=22 <25");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(json["devEngines"]["runtime"][1]["version"], ">=22 <25");
 
         let err = pin("lts", &root).expect_err("devEngines takes no aliases");
         assert!(err.to_string().contains("alias"), "{err}");

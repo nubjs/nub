@@ -278,30 +278,12 @@ pub fn discover_node(cwd: &Path) -> Result<ResolvedNode, DiscoveryError> {
         eprintln!("{warning}");
     }
 
-    match (chain.pin, chain.ignored_pin) {
-        (None, ignored) => {
-            // No pin file — use whatever node is on PATH. A skipped pin file with
-            // no node to fall back on IS the error, so it's reported as one.
-            match (shell_path_node(None), ignored) {
-                (Err(DiscoveryError::NoNodeOnPath), Some(ignored)) => {
-                    Err(DiscoveryError::UnusablePin {
-                        hint: ignored.remedy(),
-                        file: ignored.file,
-                        raw: ignored.raw,
-                    })
-                }
-                (result, ignored) => {
-                    if let Some(ignored) = ignored {
-                        eprintln!("{}", ignored.warning());
-                    }
-                    result
-                }
-            }
+    match chain.pin {
+        None => {
+            // No pin file — use whatever node is on PATH.
+            shell_path_node(None)
         }
-        (Some((pin_str, parsed_pin, pin_source)), ignored) => {
-            if let Some(ignored) = ignored {
-                eprintln!("{}", ignored.warning());
-            }
+        Some((pin_str, parsed_pin, pin_source)) => {
             let parsed_pin = concretize_alias(parsed_pin, &pin_str);
             // Try shell PATH first (covers fnm/Volta/mise auto-switch).
             let path_node = shell_path_node(Some(pin_source.clone()));
@@ -940,9 +922,8 @@ pub struct PinChain {
     /// invocation by the entry point ([`discover_node`], or the `nub node`
     /// verbs when they resolve the chain themselves).
     pub(crate) warnings: Vec<String>,
-    /// A pin file the walk skipped. Kept out of `warnings` so the entry point
-    /// can report it once: as a warning when something else resolves, or as the
-    /// error itself when nothing does ([`DiscoveryError::UnusablePin`]).
+    /// A pin file the walk skipped (its warning is already in `warnings`). Every
+    /// run continues past it; only [`explain_no_node`] turns it into an error.
     pub ignored_pin: Option<IgnoredPin>,
 }
 
@@ -977,6 +958,9 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
     }
     let mut ignored_pin = None;
     let walked = walk_up_for_pin_noting(cwd, &mut ignored_pin);
+    if let Some(ignored) = &ignored_pin {
+        warnings.push(ignored.warning());
+    }
     if let Some(pin) = walked {
         return Ok(PinChain {
             pin: Some(pin),
@@ -1007,6 +991,29 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
         warnings,
         ignored_pin,
     })
+}
+
+/// For `nub node which` and the bare `nub node` status: a [`NoNodeOnPath`] in a
+/// project whose pin file was skipped is better reported as that file. Run paths
+/// never call this; they fall back to the unpinned provisioning, so the skipped
+/// file only ever costs a warning there.
+///
+/// [`NoNodeOnPath`]: DiscoveryError::NoNodeOnPath
+pub fn explain_no_node(cwd: &Path, error: DiscoveryError) -> DiscoveryError {
+    if !matches!(error, DiscoveryError::NoNodeOnPath) {
+        return error;
+    }
+    match resolve_pin_chain(cwd)
+        .ok()
+        .and_then(|chain| chain.ignored_pin)
+    {
+        Some(ignored) => DiscoveryError::UnusablePin {
+            hint: ignored.remedy(),
+            file: ignored.file,
+            raw: ignored.raw,
+        },
+        None => error,
+    }
 }
 
 /// Warn when pin sources disagree — a project misconfiguration the user should
@@ -3264,10 +3271,8 @@ mod tests {
         let chain = resolve_pin_chain(&dir).unwrap();
         let (_, _, source) = chain.pin.expect("falls through to engines.node");
         assert_eq!(source, ENGINES_NODE_SOURCE);
-        let warning = chain
-            .ignored_pin
-            .expect("the skipped file is recorded")
-            .warning();
+        assert_eq!(chain.warnings.len(), 1, "{:?}", chain.warnings);
+        let warning = &chain.warnings[0];
         assert!(
             warning.contains(".nvmrc \"^22.18.0\"") && warning.contains("engines.node"),
             "the warning names the file, the range and where ranges go: {warning}"

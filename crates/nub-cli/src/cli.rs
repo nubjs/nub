@@ -10112,7 +10112,8 @@ nub {v} — the all-in-one Node.js toolkit
 /// user is most likely here to debug where the pin came from.
 fn discover_node_for_status(cwd: &Path) -> Result<nub_core::node::discovery::ResolvedNode> {
     use nub_core::node::discovery::DiscoveryError;
-    nub_core::node::discovery::discover_node(cwd).map_err(|e| match e {
+    let discovered = nub_core::node::discovery::discover_node(cwd);
+    discovered.map_err(|e| match nub_core::node::discovery::explain_no_node(cwd, e) {
         DiscoveryError::PinnedNotFound { pin, shell_version } => anyhow::anyhow!(
             "pinned Node version {pin} not found\n\
              \x20\x20Active shell Node: {shell_version} (does not satisfy the pin)\n\
