@@ -318,8 +318,9 @@ fn merge_child_env(
 /// left to Node's `--env-file` and live-reloads on restart. In practice the
 /// difference comes from `${VAR}` expansion, which only the auto-discovered and
 /// `nub.jsonc`-sourced families get: an explicit `--env-file` is delivered
-/// verbatim (Node's own semantics), so it never diverges and is always left to
-/// Node once forwarded. A key absent from
+/// verbatim, so it diverges only where Node's parser misreads a shape Nub's
+/// does not, and the caller drops those keys from `forwarded_raw`
+/// ([`nub_core::workspace::env::keys_node_misreads`]). A key absent from
 /// `forwarded_raw` is injected, because injection is then its only delivery
 /// channel: that covers the explicit `--env-file` case (auto-discovery is
 /// suppressed) and every source below Node's 20.6.0 `--env-file` floor, where
@@ -7638,6 +7639,22 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
     if forward_explicit && let Some(explicit) = ENV_FILE_VARS_RAW.get() {
         forwarded_raw_env.extend(explicit.clone());
     }
+    // Node's own parser reads a few shapes differently from Nub's (an empty value
+    // followed by a space, a byte order mark): those keys are not delivered by
+    // Node either, so they go through injection.
+    let forwarded_paths = env_file_paths.iter().filter(|_| forward_base).chain(
+        explicit_env_files
+            .iter()
+            .filter(|_| forward_explicit)
+            .map(|(path, _)| path),
+    );
+    for path in forwarded_paths {
+        if let Some(content) = nub_core::workspace::env::read_env_file(path) {
+            for key in nub_core::workspace::env::keys_node_misreads(&content) {
+                forwarded_raw_env.remove(&key);
+            }
+        }
+    }
 
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let preload_path = nub_core::node::spawn::find_public_preload(&nub_binary);
@@ -7923,7 +7940,8 @@ fn run_watch(file: &str, args: &[String]) -> Result<i32> {
         cmd.current_dir(windows_long_watch_path(&cwd)?);
     }
     // Inject ONLY the .env* vars whose `${VAR}` expansion changed the raw value
-    // (#207) — see [`watch_inject_vars`]. A var Node's `--env-file` already
+    // (#207), or that Node's parser misreads — see [`watch_inject_vars`]. A var
+    // Node's `--env-file` already
     // delivers identically is left to Node so the long-lived watcher re-reads it
     // from the file on every restart (a changed `.env` value is picked up) instead
     // of freezing at startup.
