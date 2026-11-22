@@ -311,13 +311,21 @@ pub fn pin(spec: &str, cwd: &Path) -> Result<PinResult> {
     if spec.is_empty() {
         bail!("nub node pin requires a version (e.g. 22, lts, 22.13.0)");
     }
+
+    let dir = pin_target_dir(cwd);
+    // `devEngines.runtime` outranks every pin file, so writing `.node-version`
+    // beside a node entry there would change nothing the next run resolves.
+    // Edit the entry the chain actually reads instead.
+    if dev_engines_node_entry(&dir.join("package.json")) {
+        return pin_dev_engines(spec, cwd);
+    }
+
     // Reject only obvious garbage — a pin legitimately holds aliases (`lts`, `22`),
     // so anything that parses as a VersionPin is accepted without a network check.
     if spec.parse::<VersionPin>().is_err() {
         bail!("nub node pin: \"{spec}\" is not a valid Node version or alias");
     }
 
-    let dir = pin_target_dir(cwd);
     let file = pin_target_file(&dir);
     std::fs::write(&file, format!("{spec}\n"))
         .with_context(|| format!("writing {}", file.display()))?;
@@ -326,6 +334,191 @@ pub fn pin(spec: &str, cwd: &Path) -> Result<PinResult> {
     Ok(PinResult {
         path,
         spec: spec.to_string(),
+    })
+}
+
+/// Whether `manifest`'s `devEngines.runtime` (object or array form) carries an
+/// entry named `node`. An unreadable or non-JSON manifest counts as no entry, so
+/// `pin` falls back to the pin file rather than failing on someone else's syntax.
+fn dev_engines_node_entry(manifest: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(manifest) else {
+        return false;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(crate::strip_utf8_bom(&raw)) else {
+        return false;
+    };
+    match json.get("devEngines").and_then(|d| d.get("runtime")) {
+        Some(serde_json::Value::Array(items)) => items.iter().any(is_node_entry),
+        Some(entry) => is_node_entry(entry),
+        None => false,
+    }
+}
+
+fn is_node_entry(entry: &serde_json::Value) -> bool {
+    entry.get("name").and_then(|n| n.as_str()) == Some("node")
+}
+
+/// Set the `version` of the `node` entry in `devEngines.runtime`, through the
+/// same format-preserving, atomic manifest writer `nub pm` pins use. The field
+/// takes the `engines.node` grammar, so a range is accepted; an nvm alias is not
+/// (npm rejects `devEngines.runtime` versions like `lts`).
+fn pin_dev_engines(spec: &str, cwd: &Path) -> Result<PinResult> {
+    match VersionPin::parse_allowing_ranges(spec) {
+        Ok(VersionPin::Alias(_)) => bail!(
+            "nub node pin: \"{spec}\" is an alias, and this project pins Node in \
+             package.json#devEngines.runtime, which takes a version or range (e.g. 24, ^24, 24.11.0)"
+        ),
+        Ok(_) => {}
+        Err(_) => bail!("nub node pin: \"{spec}\" is not a valid Node version or range"),
+    }
+    let Some(spec) = node_semver_range(spec) else {
+        bail!("nub node pin: {}", untranslatable(spec));
+    };
+    let spec = spec.as_str();
+    let path = crate::pm::resolve::edit_root_manifest(cwd, |obj| {
+        let Some(runtime) = obj.get_mut("devEngines").and_then(|d| d.get_mut("runtime")) else {
+            return;
+        };
+        let entry = match runtime {
+            serde_json::Value::Array(items) => items.iter_mut().find(|e| is_node_entry(e)),
+            entry => Some(entry).filter(|e| is_node_entry(e)),
+        };
+        if let Some(serde_json::Value::Object(entry)) = entry {
+            entry.insert(
+                "version".to_string(),
+                serde_json::Value::String(spec.to_string()),
+            );
+        }
+    })?;
+    Ok(PinResult {
+        path,
+        spec: spec.to_string(),
+    })
+}
+
+/// Spell a range the way node-semver does, which is what npm checks
+/// `devEngines` with. The parser behind [`VersionPin::parse_allowing_ranges`]
+/// also takes Cargo's form, comparators joined by commas (`>=22, <25`), which
+/// node-semver rejects outright (npm then fails every command with
+/// `EBADDEVENGINES`). Each comma-joined alternative is rewritten comparator by
+/// comparator: the comma becomes a space, and an operator-less version gains the
+/// caret Cargo gives it (node-semver would read `24.0.0` as exactly 24.0.0).
+/// Alternatives without a comma, and specs without one, are kept as typed.
+///
+/// `None` for a comparator with a prerelease or build part, and when the rewrite
+/// would not admit the same versions, so the caller refuses rather than write a
+/// pin that means something else.
+fn node_semver_range(spec: &str) -> Option<String> {
+    if !spec.contains(',') {
+        return Some(spec.to_string());
+    }
+    // Prerelease and build parts don't carry over safely (`rc.x` isn't a
+    // wildcard, and the check below samples releases only): refuse them.
+    let (rewritten, suffixed) = comma_to_spaces(spec)?;
+    if suffixed {
+        return None;
+    }
+    let original = VersionPin::parse_allowing_ranges(spec).ok()?;
+    let reread = VersionPin::parse_allowing_ranges(&rewritten).ok()?;
+    same_matches(&original, &reread, spec).then_some(rewritten)
+}
+
+/// The comparator-by-comparator rewrite behind [`node_semver_range`], with no
+/// safety checks, and whether any rewritten comparator had a prerelease or
+/// build part. `None` only for a comparator it can't take apart.
+fn comma_to_spaces(spec: &str) -> Option<(String, bool)> {
+    let mut suffixed = false;
+    let mut alternatives = Vec::new();
+    for alt in spec.split("||") {
+        if !alt.contains(',') {
+            alternatives.push(alt.split_whitespace().collect::<Vec<_>>().join(" "));
+            continue;
+        }
+        let mut comparators = Vec::new();
+        for comparator in alt.split(',') {
+            let comparator: String = comparator.split_whitespace().collect();
+            let op_len = comparator
+                .find(|c: char| !matches!(c, '>' | '<' | '=' | '^' | '~'))
+                .unwrap_or(comparator.len());
+            let (op, version) = comparator.split_at(op_len);
+            if version.is_empty() {
+                return None;
+            }
+            let numbers = version.split(['-', '+']).next().unwrap_or(version);
+            suffixed |= numbers.len() != version.len();
+            // A wildcard (`24.22.x`, `*`) means the same bare in both grammars.
+            let wildcard = numbers
+                .split('.')
+                .any(|part| matches!(part, "*" | "x" | "X"));
+            let op = match op {
+                "" if wildcard => "",
+                "" => "^",
+                ">" | ">=" | "<" | "<=" | "=" | "^" | "~" => op,
+                _ => return None,
+            };
+            comparators.push(format!("{op}{version}"));
+        }
+        alternatives.push(comparators.join(" "));
+    }
+    Some((alternatives.join(" || "), suffixed))
+}
+
+/// Why [`node_semver_range`] refused `spec`. A concrete spelling is offered only
+/// for build metadata, and only when the spec without it passes the same
+/// translation and match check a pin would; every other refusal (prereleases
+/// included) gets the rule alone, since an unchecked rewrite can read differently
+/// in npm. Swapping commas for spaces alone isn't the rule: it drops the caret
+/// an operator-less version has in the comma form.
+fn untranslatable(spec: &str) -> String {
+    let shown = spec.escape_debug();
+    let mut without_build = String::new();
+    let mut in_build = false;
+    for c in spec.chars() {
+        in_build = match c {
+            '+' => true,
+            ',' | '|' => false,
+            c if c.is_whitespace() => false,
+            _ => in_build,
+        };
+        if !in_build {
+            without_build.push(c);
+        }
+    }
+    if without_build != spec
+        && let Some(rewritten) = node_semver_range(&without_build)
+    {
+        return format!(
+            "\"{shown}\" has build metadata, which the range syntax npm reads devEngines \
+             with can't carry; write it without the build part as `{rewritten}`"
+        );
+    }
+    format!(
+        "\"{shown}\" can't be rewritten for the range syntax npm reads devEngines with; \
+         write each comparator with an explicit operator, separated by spaces"
+    )
+}
+
+/// Whether two requirements admit the same release versions. Comparators only
+/// change their answer at a number the spec names or the one after it, so every
+/// combination of those numbers (each with its neighbours, plus 0 and a large
+/// value) covers each region the two could disagree in. Structural equality
+/// isn't enough: Cargo's `semver` keeps `24.22.x` and `=24.22.x` as different
+/// shapes that match the same versions.
+fn same_matches(a: &VersionPin, b: &VersionPin, spec: &str) -> bool {
+    let mut points = std::collections::BTreeSet::from([0u64, 1, 9999]);
+    for n in spec
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|t| t.parse::<u64>().ok())
+    {
+        points.extend([n.saturating_sub(1), n, n.saturating_add(1)]);
+    }
+    points.iter().all(|major| {
+        points.iter().all(|minor| {
+            points.iter().all(|patch| {
+                let v = NodeVersion(semver::Version::new(*major, *minor, *patch));
+                v.satisfies(a) == v.satisfies(b)
+            })
+        })
     })
 }
 
@@ -544,6 +737,141 @@ mod tests {
         assert!(
             !root.join(".node-version").exists(),
             "no shadowing .node-version is created"
+        );
+    }
+
+    #[test]
+    fn pin_updates_the_dev_engines_node_entry_it_would_otherwise_lose_to() {
+        // devEngines.runtime outranks every pin file, so pin edits its node entry
+        // (object and array forms) instead of writing a .node-version that the
+        // next run would ignore.
+        let root = tmpdir("pin-devengines");
+        std::fs::write(
+            root.join("package.json"),
+            "{\n\t\"devEngines\": {\n\t\t\"runtime\": {\"name\": \"node\", \"version\": \"22.14.0\"}\n\t}\n}\n",
+        )
+        .unwrap();
+        let result = pin("^24", &root).expect("pin writes");
+        assert_eq!(result.path.file_name().unwrap(), "package.json");
+        let written = std::fs::read_to_string(root.join("package.json")).unwrap();
+        assert!(
+            written.contains("\t\"devEngines\""),
+            "tab indent kept: {written}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(json["devEngines"]["runtime"]["version"], "^24");
+        assert!(!root.join(".node-version").exists());
+        let (_, _, source) = discovery::resolve_pin_chain(&root).unwrap().pin.unwrap();
+        assert_eq!(source, "package.json#devEngines.runtime");
+
+        std::fs::write(
+            root.join("package.json"),
+            r#"{"devEngines":{"runtime":[{"name":"bun","version":"^1"},{"name":"node","version":"20.x"}]}}"#,
+        )
+        .unwrap();
+        pin("24.11.0", &root).expect("pin writes the array form");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            json["devEngines"]["runtime"][0]["version"], "^1",
+            "bun untouched"
+        );
+        assert_eq!(json["devEngines"]["runtime"][1]["version"], "24.11.0");
+
+        // npm reads the field with node-semver, which has no comma between bounds.
+        let result = pin(">=22, <25", &root).expect("pin writes");
+        assert_eq!(result.spec, ">=22 <25");
+        let json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(json["devEngines"]["runtime"][1]["version"], ">=22 <25");
+
+        let before = std::fs::read_to_string(root.join("package.json")).unwrap();
+        // A tab separates comparators too; dropping the build part keeps `<24`.
+        let err = pin(">=22.0.0+local\t<24 || 26.0.0+local, <27", &root).expect_err("refused");
+        assert!(
+            err.to_string()
+                .ends_with("as `>=22.0.0 <24 || ^26.0.0 <27`"),
+            "{err}"
+        );
+        // A prerelease gets the rule, not a rewrite npm could read differently.
+        let err = pin("<=27, >=27.0.0-rc.1", &root).expect_err("refused");
+        assert!(
+            err.to_string().contains("explicit operator") && !err.to_string().contains('`'),
+            "{err}"
+        );
+        let err = pin("24.0.0+local, <25", &root).expect_err("build metadata is refused");
+        assert!(
+            err.to_string()
+                .contains("write it without the build part as `^24.0.0 <25`"),
+            "the message spells out the rewrite, caret included: {err}"
+        );
+        pin("27.0.0-rc.x, <27.0.0", &root).expect_err("a prerelease comma range is refused");
+        assert_eq!(
+            std::fs::read_to_string(root.join("package.json")).unwrap(),
+            before,
+            "a refused pin leaves the manifest alone"
+        );
+
+        let err = pin("lts", &root).expect_err("devEngines takes no aliases");
+        assert!(err.to_string().contains("alias"), "{err}");
+    }
+
+    #[test]
+    fn comma_ranges_are_rewritten_to_what_node_semver_reads_the_same_way() {
+        // npm checks devEngines with node-semver. Each rewrite must keep the exact
+        // set of versions Nub matched before, and node-semver must agree with it.
+        let cases = [
+            (">=22, <25", ">=22 <25"),
+            ("24.0.0, <25", "^24.0.0 <25"),
+            ("22.14, <23 || >=24, <25", "^22.14 <23 || >=24 <25"),
+            ("~22.1, >22.1.3 || 26", "~22.1 >22.1.3 || 26"),
+            ("24.22.x, <25", "24.22.x <25"),
+        ];
+        let versions = [
+            "20.19.0", "22.0.0", "22.1.2", "22.1.4", "22.14.0", "22.23.5", "24.0.0", "24.22.1",
+            "24.23.0", "25.0.0", "26.13.1",
+        ];
+        for (comma, expected) in cases {
+            let rewritten = node_semver_range(comma).expect("translatable");
+            assert_eq!(rewritten, expected);
+            let before = VersionPin::parse_allowing_ranges(comma).unwrap();
+            let after = VersionPin::parse_allowing_ranges(&rewritten).unwrap();
+            let npm = node_semver::Range::parse(&rewritten).expect("node-semver reads it");
+            for v in versions {
+                let nub = v.parse::<NodeVersion>().unwrap();
+                let matched = nub.satisfies(&before);
+                assert_eq!(
+                    nub.satisfies(&after),
+                    matched,
+                    "{comma} → {rewritten} at {v}"
+                );
+                let npm_matched = node_semver::Version::parse(v).unwrap().satisfies(&npm);
+                assert_eq!(npm_matched, matched, "node-semver on {rewritten} at {v}");
+            }
+        }
+
+        // Prerelease and build parts are refused rather than translated.
+        assert_eq!(node_semver_range("27.0.0-rc.x, <27.0.0"), None);
+        assert_eq!(
+            node_semver_range(">=22.0.0+18446744073709551615, <25"),
+            None
+        );
+
+        // A dotted wildcard stays one: a caret would widen it to 24.23.0.
+        let wildcard = VersionPin::parse_allowing_ranges("24.22.x <25").unwrap();
+        assert!(
+            "24.22.1"
+                .parse::<NodeVersion>()
+                .unwrap()
+                .satisfies(&wildcard)
+        );
+        assert!(
+            !"24.23.0"
+                .parse::<NodeVersion>()
+                .unwrap()
+                .satisfies(&wildcard)
         );
     }
 

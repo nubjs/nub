@@ -851,11 +851,17 @@ fn edit_manifest(
     let serialized = serialize_manifest(&manifest, &format)
         .with_context(|| format!("serializing {}", path.display()))?;
 
-    let tmp = dir.join(format!(".package.json.nub-{}.tmp", std::process::id()));
+    // A symlinked manifest (one package.json shared by several checkouts) is
+    // edited at its target: renaming over the link itself would replace it with
+    // a private copy and leave the shared file unchanged.
+    let target =
+        std::fs::canonicalize(&path).with_context(|| format!("resolving {}", path.display()))?;
+    let target_dir = target.parent().unwrap_or(&dir);
+    let tmp = target_dir.join(format!(".package.json.nub-{}.tmp", std::process::id()));
     std::fs::write(&tmp, &serialized).with_context(|| format!("writing {}", tmp.display()))?;
-    if let Err(e) = std::fs::rename(&tmp, &path) {
+    if let Err(e) = std::fs::rename(&tmp, &target) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(e).with_context(|| format!("replacing {}", path.display()));
+        return Err(e).with_context(|| format!("replacing {}", target.display()));
     }
 
     Ok(path)
@@ -1302,6 +1308,31 @@ mod tests {
                 .version
                 .as_deref(),
             Some("4.2.2+sha512.abc")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_manifest_is_edited_at_its_target_and_stays_a_link() {
+        let shared = tmpdir("manifest-target");
+        write_pkg(&shared, "{\n  \"name\": \"app\"\n}\n");
+        let proj = tmpdir("manifest-link");
+        std::os::unix::fs::symlink(shared.join("package.json"), proj.join("package.json")).unwrap();
+
+        write_declared_pm("pnpm", "9.1.0", "abc", &proj, false).unwrap();
+
+        let link = std::fs::symlink_metadata(proj.join("package.json")).unwrap();
+        assert!(
+            link.file_type().is_symlink(),
+            "the link must survive the edit"
+        );
+        let target: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(shared.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            target["packageManager"].as_str(),
+            Some("pnpm@9.1.0+sha512.abc"),
+            "the shared target carries the edit"
         );
     }
 

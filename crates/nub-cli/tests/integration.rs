@@ -13148,6 +13148,88 @@ fn node_which_unsatisfiable_pin_gives_nub_remedy_not_nvm() {
     );
 }
 
+/// A range in `.nvmrc` is not a pin. With nothing else to resolve, `nub node
+/// which` must name that file rather than report a bare "no Node on PATH",
+/// which points the user away from the actual problem.
+#[test]
+fn node_which_names_a_pin_file_holding_a_range() {
+    let work = unique_test_cache();
+    let proj = work.join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(proj.join(".nvmrc"), "^22.18.0\n").unwrap();
+    let empty_nvm = work.join("empty-nvm");
+    std::fs::create_dir_all(&empty_nvm).unwrap();
+
+    let out = Command::new(nub_binary())
+        .args(["node", "which"])
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("NVM_DIR", &empty_nvm)
+        .env("PATH", "")
+        .env_remove("NODE_EXECUTABLE")
+        .output()
+        .expect("spawn nub node which");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_ne!(out.status.code(), Some(0), "nothing resolves: {stderr:?}");
+    assert!(
+        stderr.contains(".nvmrc pins \"^22.18.0\"") && stderr.contains("engines.node"),
+        "the error names the file and where a range goes: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("no Node binary found on PATH"),
+        "{stderr:?}"
+    );
+}
+
+/// A skipped pin file costs only a warning on a run: with no node on PATH the
+/// run still takes the unpinned fallback, here the newest Node in a warm store,
+/// so no network is involved. (Unix only — the stored `node` is `#!/bin/sh`.)
+#[cfg(unix)]
+#[test]
+fn run_with_a_range_in_nvmrc_warns_and_uses_the_store() {
+    let work = unique_test_cache();
+    let proj = work.join("proj");
+    let bin = work
+        .join("cache")
+        .join("nub")
+        .join("node")
+        .join("24.0.0")
+        .join("bin");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(work.join("empty-nvm")).unwrap();
+    std::fs::write(proj.join(".nvmrc"), "^22.18.0\n").unwrap();
+    std::fs::write(proj.join("app.js"), "").unwrap();
+    let node = bin.join("node");
+    std::fs::write(&node, "#!/bin/sh\necho stored-node-ran\n").unwrap();
+    let mut perms = std::fs::metadata(&node).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&node, perms).unwrap();
+
+    let out = Command::new(nub_binary())
+        .arg("app.js")
+        .current_dir(&proj)
+        .env("XDG_CACHE_HOME", work.join("cache"))
+        .env("NVM_DIR", work.join("empty-nvm"))
+        .env("PATH", "")
+        .env_remove("NODE_EXECUTABLE")
+        .env_remove("NODE_COMPAT")
+        .output()
+        .expect("spawn nub app.js");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = std::fs::remove_dir_all(&work);
+
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr:?}");
+    assert!(stdout.contains("stored-node-ran"), "stdout: {stdout:?}");
+    assert!(
+        stderr.contains("ignoring .nvmrc \"^22.18.0\""),
+        "the skipped file is named: {stderr:?}"
+    );
+}
+
 /// `nub run`/`nub exec` must report a ROLE-AWARE `npm_config_user_agent`, the
 /// same incumbent-first UA the engine's lifecycle path sends — not a hardcoded
 /// `nub/<v> npm/?`. Postinstall sniffers (only-allow, which-pm-runs) branch on

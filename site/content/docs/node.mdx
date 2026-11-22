@@ -51,7 +51,7 @@ Nub walks up from your working directory to the nearest pin. Highest precedence 
 
 The first two name a binary and skip version resolution entirely; see [`nodeExecutable`](/docs/config#nodeexecutable). Both `package.json` fields are read from the workspace root when there is one, so a monorepo pins its Node once. Dependency build scripts use that root pin during an install, while `nub run` inside a member uses the member's own pin.
 
-Both fields take the `engines.node` grammar, so either can hold a range or an exact version:
+Both fields take the `engines.node` grammar, so either can hold a range or an exact version. Nub warns about and skips a `.node-version` or `.nvmrc` that holds a range.
 
 ```json title="package.json"
 {
@@ -60,7 +60,7 @@ Both fields take the `engines.node` grammar, so either can hold a range or an ex
 }
 ```
 
-An exact version pins the patch too, and a range resolves to the newest published release that satisfies it. The `onFail` policy does not apply to the `node` entry. A `devEngines.runtime` that names only another runtime, such as Bun, stops the run unless its `onFail` is `"warn"` or `"ignore"`.
+An exact version pins the patch too. A range uses a Node already on your machine that satisfies it, otherwise the newest published release in it. The `onFail` policy does not apply to the `node` entry. A `devEngines.runtime` that names only another runtime, such as Bun, stops the run unless its `onFail` is `"warn"` or `"ignore"`.
 
 <Callout>
 Read the [full docs](https://docs.npmjs.com/cli/v11/configuring-npm/package-json#devengines) for the `devEngines` and `engines` fields on docs.npmjs.com.
@@ -129,6 +129,7 @@ pinned Node {{NODE_MAJOR}} → /path/to/project/.node-version
 
 - **Location** — the project root (the nearest `package.json` directory), or the workspace root in a monorepo, wherever you run it from.
 - **Existing file** — a project with a `.nvmrc` and no `.node-version` gets its `.nvmrc` updated in place.
+- **devEngines** — a project with a `node` entry in `devEngines.runtime` gets that entry's `version` updated, since it outranks the pin files. It takes a version or range, not an alias.
 - **Spec** — written verbatim, aliases like `lts` included, with no network access.
 
 Other version managers, including `nvm`, `fnm`, Volta, and `asdf`, read `.node-version` too.

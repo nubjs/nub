@@ -51,6 +51,19 @@ pub enum DiscoveryError {
     )]
     NoNodeOnPath,
 
+    /// [`NoNodeOnPath`](Self::NoNodeOnPath), when the project does have a pin
+    /// file but its content isn't a version — naming the file is the diagnosis,
+    /// where "no Node on PATH" would send the user looking in the wrong place.
+    #[error(
+        "{file} pins \"{raw}\", which is not a Node version, and there is no node on PATH\n\
+         \x20\x20{hint}"
+    )]
+    UnusablePin {
+        file: String,
+        raw: String,
+        hint: String,
+    },
+
     /// The discovered Node is older than `NodeVersion::MIN_SUPPORTED`
     /// (18.19.0). No hook API exists below this floor that can carry
     /// Nub's feature surface, so Nub refuses to run. Canonical wording
@@ -581,6 +594,49 @@ pub fn check_min_version(node: &ResolvedNode) -> Result<(), DiscoveryError> {
 /// orders all five; this helper is only the pin-file middle of the chain.
 // @lat: [[research/node-version-discovery#Node version discovery and pin-file resolution#2. Pin-file conventions matrix]]
 fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
+    walk_up_for_pin_noting(cwd, &mut None)
+}
+
+/// A `.node-version` / `.nvmrc` the walk found but could not use as a pin. The
+/// walk steps past it either way (a parent's pin may still apply); this record is
+/// what keeps that from being silent — [`resolve_pin_chain`] turns it into a
+/// warning, and [`discover_node`] into an error naming the file when nothing else
+/// resolves.
+#[derive(Debug, Clone)]
+pub struct IgnoredPin {
+    pub file: String,
+    pub raw: String,
+    /// The content is a semver range. Ranges belong in `engines.node` /
+    /// `devEngines.runtime`: nvm, fnm and asdf read only a version-ish from these
+    /// files, so Nub keeps the files' meaning portable rather than widening it.
+    range: bool,
+}
+
+impl IgnoredPin {
+    pub fn warning(&self) -> String {
+        let why = if self.range {
+            "pin files take a version, not a range; put the range in package.json#engines.node"
+        } else {
+            "not a version nub can model"
+        };
+        format!("Warning: ignoring {} \"{}\" — {why}.", self.file, self.raw)
+    }
+
+    fn remedy(&self) -> String {
+        if self.range {
+            "Move the range to package.json#engines.node, or pin a version: nub node pin <version>"
+                .to_string()
+        } else {
+            "Pin a version: nub node pin <version>".to_string()
+        }
+    }
+}
+
+/// [`walk_up_for_pin`], recording in `ignored` the first pin file it had to skip.
+fn walk_up_for_pin_noting(
+    cwd: &Path,
+    ignored: &mut Option<IgnoredPin>,
+) -> Option<(String, VersionPin, String)> {
     let home = dirs_next::home_dir();
     let mut dir = cwd.to_path_buf();
     let max_depth = 16;
@@ -616,6 +672,19 @@ fn walk_up_for_pin(cwd: &Path) -> Option<(String, VersionPin, String)> {
                             content = trimmed,
                             "pin file found but unparseable — skipping"
                         );
+                        // `system` is nvm's "the node on PATH", which is exactly
+                        // where an unpinned run lands, so skipping it is honoring it.
+                        if ignored.is_none() && !trimmed.eq_ignore_ascii_case("system") {
+                            // Several lines left after comments is not one spec, even
+                            // when the range grammar would read them as AND-ed bounds.
+                            let one_line = !trimmed.contains('\n');
+                            *ignored = Some(IgnoredPin {
+                                file: (*filename).to_string(),
+                                raw: trimmed.escape_debug().to_string(),
+                                range: one_line
+                                    && VersionPin::parse_allowing_ranges(trimmed).is_ok(),
+                            });
+                        }
                     }
                 }
             }
@@ -853,6 +922,9 @@ pub struct PinChain {
     /// invocation by the entry point ([`discover_node`], or the `nub node`
     /// verbs when they resolve the chain themselves).
     pub(crate) warnings: Vec<String>,
+    /// A pin file the walk skipped (its warning is already in `warnings`). Every
+    /// run continues past it; only [`explain_no_node`] turns it into an error.
+    pub ignored_pin: Option<IgnoredPin>,
 }
 
 /// The pin-source chain in spec precedence order
@@ -875,6 +947,7 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
                 return Ok(PinChain {
                     pin: Some((raw, pin, DEV_ENGINES_RUNTIME_SOURCE.to_string())),
                     warnings,
+                    ignored_pin: None,
                 });
             }
             RuntimeOutcome::Refuse { runtime } => {
@@ -883,10 +956,16 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
             RuntimeOutcome::FallThrough { warnings: w } => warnings = w,
         }
     }
-    if let Some(pin) = walk_up_for_pin(cwd) {
+    let mut ignored_pin = None;
+    let walked = walk_up_for_pin_noting(cwd, &mut ignored_pin);
+    if let Some(ignored) = &ignored_pin {
+        warnings.push(ignored.warning());
+    }
+    if let Some(pin) = walked {
         return Ok(PinChain {
             pin: Some(pin),
             warnings,
+            ignored_pin,
         });
     }
     // #5: engines.node — a resolution *range* ("resolve to the newest available
@@ -898,6 +977,7 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
                 return Ok(PinChain {
                     pin: Some((range, pin, source)),
                     warnings,
+                    ignored_pin,
                 });
             }
             Err(_) => warnings.push(format!(
@@ -909,7 +989,35 @@ pub fn resolve_pin_chain(cwd: &Path) -> Result<PinChain, DiscoveryError> {
     Ok(PinChain {
         pin: None,
         warnings,
+        ignored_pin,
     })
+}
+
+/// For `nub node which` and the bare `nub node` status: a [`NoNodeOnPath`] in a
+/// project whose pin file was skipped is better reported as that file. Run paths
+/// never call this; they fall back to the unpinned provisioning, so the skipped
+/// file only ever costs a warning there.
+///
+/// [`NoNodeOnPath`]: DiscoveryError::NoNodeOnPath
+pub fn explain_no_node(cwd: &Path, error: DiscoveryError) -> DiscoveryError {
+    if !matches!(error, DiscoveryError::NoNodeOnPath) {
+        return error;
+    }
+    // Only when nothing valid pins the version: a lower source that does (say
+    // `engines.node`) is what failed to resolve, and the skipped file is beside
+    // the point.
+    let ignored = resolve_pin_chain(cwd)
+        .ok()
+        .filter(|chain| chain.pin.is_none())
+        .and_then(|chain| chain.ignored_pin);
+    match ignored {
+        Some(ignored) => DiscoveryError::UnusablePin {
+            hint: ignored.remedy(),
+            file: ignored.file,
+            raw: ignored.raw,
+        },
+        None => error,
+    }
 }
 
 /// Warn when pin sources disagree — a project misconfiguration the user should
@@ -3153,6 +3261,48 @@ mod tests {
             "the warning names the field and the raw spec: {}",
             chain.warnings[0]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn range_in_a_pin_file_warns_naming_the_file_and_falls_through() {
+        // Pin files take a version, not a range. Nub must not drop one silently:
+        // the chain names the file and points at engines.node, then takes the
+        // next source.
+        let dir = resolution_tmpdir("pinfile-range");
+        std::fs::write(dir.join(".nvmrc"), "^22.18.0\n").unwrap();
+        std::fs::write(dir.join("package.json"), r#"{"engines":{"node":"^24"}}"#).unwrap();
+        let chain = resolve_pin_chain(&dir).unwrap();
+        let (_, _, source) = chain.pin.expect("falls through to engines.node");
+        assert_eq!(source, ENGINES_NODE_SOURCE);
+        assert_eq!(chain.warnings.len(), 1, "{:?}", chain.warnings);
+        let warning = &chain.warnings[0];
+        assert!(
+            warning.contains(".nvmrc \"^22.18.0\"") && warning.contains("engines.node"),
+            "the warning names the file, the range and where ranges go: {warning}"
+        );
+
+        // `system` means "the node on PATH", which an unpinned run already uses.
+        std::fs::write(dir.join(".nvmrc"), "system\n").unwrap();
+        let chain = resolve_pin_chain(&dir).unwrap();
+        assert!(chain.warnings.is_empty() && chain.ignored_pin.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_node_blames_a_skipped_pin_file_only_when_nothing_else_pins() {
+        let dir = resolution_tmpdir("explain-no-node");
+        std::fs::write(dir.join(".nvmrc"), "^22\n").unwrap();
+        assert!(matches!(
+            explain_no_node(&dir, DiscoveryError::NoNodeOnPath),
+            DiscoveryError::UnusablePin { ref file, .. } if file == ".nvmrc"
+        ));
+        // engines.node pins the version, so the skipped file isn't why nothing ran.
+        std::fs::write(dir.join("package.json"), r#"{"engines":{"node":"^24"}}"#).unwrap();
+        assert!(matches!(
+            explain_no_node(&dir, DiscoveryError::NoNodeOnPath),
+            DiscoveryError::NoNodeOnPath
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
