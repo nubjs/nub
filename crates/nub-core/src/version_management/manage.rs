@@ -431,7 +431,7 @@ fn comma_to_spaces(spec: &str) -> Option<(String, bool)> {
     let mut alternatives = Vec::new();
     for alt in spec.split("||") {
         if !alt.contains(',') {
-            alternatives.push(alt.trim().to_string());
+            alternatives.push(alt.split_whitespace().collect::<Vec<_>>().join(" "));
             continue;
         }
         let mut comparators = Vec::new();
@@ -463,16 +463,21 @@ fn comma_to_spaces(spec: &str) -> Option<(String, bool)> {
     Some((alternatives.join(" || "), suffixed))
 }
 
-/// Why [`node_semver_range`] refused `spec`, with the spelling to use instead.
-/// Swapping the commas for spaces alone would drop the caret an operator-less
-/// version has in the comma form, so the suggestion is always the full rewrite.
+/// Why [`node_semver_range`] refused `spec`. A concrete spelling is offered only
+/// for build metadata, and only when the spec without it passes the same
+/// translation and match check a pin would; every other refusal (prereleases
+/// included) gets the rule alone, since an unchecked rewrite can read differently
+/// in npm. Swapping commas for spaces alone isn't the rule: it drops the caret
+/// an operator-less version has in the comma form.
 fn untranslatable(spec: &str) -> String {
+    let shown = spec.escape_debug();
     let mut without_build = String::new();
     let mut in_build = false;
     for c in spec.chars() {
         in_build = match c {
             '+' => true,
-            ',' | '|' | ' ' => false,
+            ',' | '|' => false,
+            c if c.is_whitespace() => false,
             _ => in_build,
         };
         if !in_build {
@@ -483,14 +488,13 @@ fn untranslatable(spec: &str) -> String {
         && let Some(rewritten) = node_semver_range(&without_build)
     {
         return format!(
-            "\"{spec}\" has build metadata, which the range syntax npm reads devEngines \
+            "\"{shown}\" has build metadata, which the range syntax npm reads devEngines \
              with can't carry; write it without the build part as `{rewritten}`"
         );
     }
-    let example = comma_to_spaces(spec).map_or_else(|| ">=22 <25".to_string(), |(r, _)| r);
     format!(
-        "\"{spec}\" can't be written in the range syntax npm reads devEngines with; \
-         use explicit operators separated by spaces, e.g. `{example}`"
+        "\"{shown}\" can't be rewritten for the range syntax npm reads devEngines with; \
+         write each comparator with an explicit operator, separated by spaces"
     )
 }
 
@@ -784,6 +788,19 @@ mod tests {
         assert_eq!(json["devEngines"]["runtime"][1]["version"], ">=22 <25");
 
         let before = std::fs::read_to_string(root.join("package.json")).unwrap();
+        // A tab separates comparators too; dropping the build part keeps `<24`.
+        let err = pin(">=22.0.0+local\t<24 || 26.0.0+local, <27", &root).expect_err("refused");
+        assert!(
+            err.to_string()
+                .ends_with("as `>=22.0.0 <24 || ^26.0.0 <27`"),
+            "{err}"
+        );
+        // A prerelease gets the rule, not a rewrite npm could read differently.
+        let err = pin("<=27, >=27.0.0-rc.1", &root).expect_err("refused");
+        assert!(
+            err.to_string().contains("explicit operator") && !err.to_string().contains('`'),
+            "{err}"
+        );
         let err = pin("24.0.0+local, <25", &root).expect_err("build metadata is refused");
         assert!(
             err.to_string()
