@@ -2777,6 +2777,7 @@ dependencies = [
  "hex",
  "libc",
  "liblzma",
+ "node-semver",
  "num_cpus",
  "regex",
  "reqwest",

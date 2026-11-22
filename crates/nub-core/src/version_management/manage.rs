@@ -363,8 +363,6 @@ fn is_node_entry(entry: &serde_json::Value) -> bool {
 /// takes the `engines.node` grammar, so a range is accepted; an nvm alias is not
 /// (npm rejects `devEngines.runtime` versions like `lts`).
 fn pin_dev_engines(spec: &str, cwd: &Path) -> Result<PinResult> {
-    let spec = node_semver_range(spec);
-    let spec = spec.as_str();
     match VersionPin::parse_allowing_ranges(spec) {
         Ok(VersionPin::Alias(_)) => bail!(
             "nub node pin: \"{spec}\" is an alias, and this project pins Node in \
@@ -373,6 +371,13 @@ fn pin_dev_engines(spec: &str, cwd: &Path) -> Result<PinResult> {
         Ok(_) => {}
         Err(_) => bail!("nub node pin: \"{spec}\" is not a valid Node version or range"),
     }
+    let Some(spec) = node_semver_range(spec) else {
+        bail!(
+            "nub node pin: \"{spec}\" can't be written in the range syntax npm reads \
+             devEngines with; separate the bounds with spaces instead (e.g. >=22 <25)"
+        );
+    };
+    let spec = spec.as_str();
     let path = crate::pm::resolve::edit_root_manifest(cwd, |obj| {
         let Some(runtime) = obj.get_mut("devEngines").and_then(|d| d.get_mut("runtime")) else {
             return;
@@ -395,24 +400,49 @@ fn pin_dev_engines(spec: &str, cwd: &Path) -> Result<PinResult> {
 }
 
 /// Spell a range the way node-semver does, which is what npm checks
-/// `devEngines` with. The range parser behind [`VersionPin::parse_allowing_ranges`]
-/// also takes Cargo's comma between AND-ed comparators (`>=22, <25`), which
+/// `devEngines` with. The parser behind [`VersionPin::parse_allowing_ranges`]
+/// also takes Cargo's form, comparators joined by commas (`>=22, <25`), which
 /// node-semver rejects outright (npm then fails every command with
-/// `EBADDEVENGINES`). A comma there means the same as node-semver's space, so
-/// rewriting it loses nothing; every other spelling is kept as typed.
-fn node_semver_range(spec: &str) -> String {
+/// `EBADDEVENGINES`). Each comma-joined alternative is rewritten comparator by
+/// comparator: the comma becomes a space, and an operator-less version gains the
+/// caret Cargo gives it (node-semver would read `24.0.0` as exactly 24.0.0).
+/// Alternatives without a comma, and specs without one, are kept as typed.
+///
+/// `None` when the rewrite would not read back as the same requirement, so the
+/// caller refuses rather than write a pin that means something else.
+fn node_semver_range(spec: &str) -> Option<String> {
     if !spec.contains(',') {
-        return spec.to_string();
+        return Some(spec.to_string());
     }
-    spec.split("||")
-        .map(|alt| {
-            alt.replace(',', " ")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join(" || ")
+    let mut alternatives = Vec::new();
+    for alt in spec.split("||") {
+        if !alt.contains(',') {
+            alternatives.push(alt.trim().to_string());
+            continue;
+        }
+        let mut comparators = Vec::new();
+        for comparator in alt.split(',') {
+            let comparator: String = comparator.split_whitespace().collect();
+            let op_len = comparator
+                .find(|c: char| !matches!(c, '>' | '<' | '=' | '^' | '~'))
+                .unwrap_or(comparator.len());
+            let (op, version) = comparator.split_at(op_len);
+            if version.is_empty() {
+                return None;
+            }
+            let op = match op {
+                "" if matches!(version, "*" | "x" | "X") => "",
+                "" => "^",
+                ">" | ">=" | "<" | "<=" | "=" | "^" | "~" => op,
+                _ => return None,
+            };
+            comparators.push(format!("{op}{version}"));
+        }
+        alternatives.push(comparators.join(" "));
+    }
+    let rewritten = alternatives.join(" || ");
+    let original = VersionPin::parse_allowing_ranges(spec).ok()?;
+    (VersionPin::parse_allowing_ranges(&rewritten).ok()? == original).then_some(rewritten)
 }
 
 #[cfg(test)]
@@ -682,6 +712,40 @@ mod tests {
 
         let err = pin("lts", &root).expect_err("devEngines takes no aliases");
         assert!(err.to_string().contains("alias"), "{err}");
+    }
+
+    #[test]
+    fn comma_ranges_are_rewritten_to_what_node_semver_reads_the_same_way() {
+        // npm checks devEngines with node-semver. Each rewrite must keep the exact
+        // set of versions Nub matched before, and node-semver must agree with it.
+        let cases = [
+            (">=22, <25", ">=22 <25"),
+            ("24.0.0, <25", "^24.0.0 <25"),
+            ("22.14, <23 || >=24, <25", "^22.14 <23 || >=24 <25"),
+            ("~22.1, >22.1.3 || 26", "~22.1 >22.1.3 || 26"),
+        ];
+        let versions = [
+            "20.19.0", "22.0.0", "22.1.2", "22.1.4", "22.14.0", "22.23.5", "24.0.0", "24.22.1",
+            "25.0.0", "26.13.1",
+        ];
+        for (comma, expected) in cases {
+            let rewritten = node_semver_range(comma).expect("translatable");
+            assert_eq!(rewritten, expected);
+            let before = VersionPin::parse_allowing_ranges(comma).unwrap();
+            let after = VersionPin::parse_allowing_ranges(&rewritten).unwrap();
+            let npm = node_semver::Range::parse(&rewritten).expect("node-semver reads it");
+            for v in versions {
+                let nub = v.parse::<NodeVersion>().unwrap();
+                let matched = nub.satisfies(&before);
+                assert_eq!(
+                    nub.satisfies(&after),
+                    matched,
+                    "{comma} → {rewritten} at {v}"
+                );
+                let npm_matched = node_semver::Version::parse(v).unwrap().satisfies(&npm);
+                assert_eq!(npm_matched, matched, "node-semver on {rewritten} at {v}");
+            }
+        }
     }
 
     #[test]

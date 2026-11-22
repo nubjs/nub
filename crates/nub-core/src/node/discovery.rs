@@ -1003,10 +1003,14 @@ pub fn explain_no_node(cwd: &Path, error: DiscoveryError) -> DiscoveryError {
     if !matches!(error, DiscoveryError::NoNodeOnPath) {
         return error;
     }
-    match resolve_pin_chain(cwd)
+    // Only when nothing valid pins the version: a lower source that does (say
+    // `engines.node`) is what failed to resolve, and the skipped file is beside
+    // the point.
+    let ignored = resolve_pin_chain(cwd)
         .ok()
-        .and_then(|chain| chain.ignored_pin)
-    {
+        .filter(|chain| chain.pin.is_none())
+        .and_then(|chain| chain.ignored_pin);
+    match ignored {
         Some(ignored) => DiscoveryError::UnusablePin {
             hint: ignored.remedy(),
             file: ignored.file,
@@ -3282,6 +3286,23 @@ mod tests {
         std::fs::write(dir.join(".nvmrc"), "system\n").unwrap();
         let chain = resolve_pin_chain(&dir).unwrap();
         assert!(chain.warnings.is_empty() && chain.ignored_pin.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_node_blames_a_skipped_pin_file_only_when_nothing_else_pins() {
+        let dir = resolution_tmpdir("explain-no-node");
+        std::fs::write(dir.join(".nvmrc"), "^22\n").unwrap();
+        assert!(matches!(
+            explain_no_node(&dir, DiscoveryError::NoNodeOnPath),
+            DiscoveryError::UnusablePin { ref file, .. } if file == ".nvmrc"
+        ));
+        // engines.node pins the version, so the skipped file isn't why nothing ran.
+        std::fs::write(dir.join("package.json"), r#"{"engines":{"node":"^24"}}"#).unwrap();
+        assert!(matches!(
+            explain_no_node(&dir, DiscoveryError::NoNodeOnPath),
+            DiscoveryError::NoNodeOnPath
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
