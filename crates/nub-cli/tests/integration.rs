@@ -9482,6 +9482,83 @@ fn watch_reloads_explicit_env_file_across_restarts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Node's own parser reads `EMPTY= ` as taking the next line, so in `a.env` it
+/// swallows `OVERRIDDEN=a` and the `CONFIG` line, then reads the quoted value's
+/// inner `PORT=9999` as an assignment. The watched child must see Nub's values
+/// anyway, while `OVERRIDDEN`, which `b.env` sets and Node therefore reads
+/// correctly, keeps reloading from the file.
+#[test]
+fn watch_delivers_values_node_misparses_and_keeps_the_rest_live() {
+    if !node_reloads_watched_env_files() {
+        eprintln!("skipping: target Node does not restart on --env-file edits");
+        return;
+    }
+
+    let dir = unique_test_cache();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("a.env"),
+        "PORT=3000\nEMPTY= \nOVERRIDDEN=a\nBLANK=\t\nCONFIG=\"header\nPORT=9999\nfooter\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("b.env"), "OVERRIDDEN=b\n").unwrap();
+    let snapshots = dir.join("snapshots.ndjson");
+    let stderr = dir.join("stderr.txt");
+    std::fs::write(
+        dir.join("probe.cjs"),
+        format!(
+            "const fs = require('fs');\n\
+             const pick = ['PORT', 'EMPTY', 'BLANK', 'CONFIG', 'OVERRIDDEN'];\n\
+             const snapshot = Object.fromEntries(pick.map((k) => [k, process.env[k] ?? null]));\n\
+             fs.appendFileSync({path:?}, JSON.stringify(snapshot) + '\\n');\n",
+            path = snapshots.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    let stderr_file = std::fs::File::create(&stderr).unwrap();
+    let mut cmd = Command::new(nub_binary());
+    cmd.args([
+        "--env-file=a.env",
+        "--env-file=b.env",
+        "--watch",
+        "probe.cjs",
+    ])
+    .current_dir(&dir)
+    .env("XDG_CACHE_HOME", dir.join("cache"))
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::from(stderr_file));
+    remove_ambient_watch_control_vars(&mut cmd);
+    let mut child = spawn_watch_probe(&mut cmd);
+
+    let first = wait_for_watch_snapshot(&snapshots, r#""OVERRIDDEN":"b""#, &mut child, &stderr);
+    let expected = r#"{"PORT":"3000","EMPTY":"","BLANK":"","CONFIG":"header\nPORT=9999\nfooter","OVERRIDDEN":"b"}"#;
+    assert_eq!(first.trim(), expected, "first child");
+
+    let b_env = dir.join("b.env");
+    std::fs::write(&b_env, "OVERRIDDEN=b2\n").unwrap();
+    let reloaded = wait_for_watch_reload(
+        &snapshots,
+        r#""OVERRIDDEN":"b2""#,
+        &mut child,
+        &stderr,
+        || {
+            let _ = std::fs::write(&b_env, "OVERRIDDEN=b2\n");
+        },
+    );
+    finish_watch_probe(&mut child);
+
+    let last = reloaded.lines().last().unwrap_or_default();
+    assert_eq!(
+        last,
+        expected.replace(r#""b""#, r#""b2""#),
+        "reloaded child"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Ambient runtime-control values remain shell-wins. The cleanup preload must run
 /// before the user's ambient preload and restore the sanitized NODE_OPTIONS text
 /// rather than exposing Nub's temporary guard token.

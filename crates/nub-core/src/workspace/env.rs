@@ -576,63 +576,17 @@ pub fn load_env_files(project_root: &Path) -> HashMap<String, String> {
 /// their inner quotes and backslash escapes. Later keys override earlier ones
 /// (Node's `insert_or_assign` / last-writer-wins), preserving first-seen order
 /// for callers that fold these pairs into a `HashMap`.
+///
+/// Where Node's parser misreads a file, this one follows dotenv instead: an
+/// empty value followed by spaces does not take the next line, a byte order
+/// mark is dropped, an empty `export KEY=` sets `KEY`, and every line is
+/// trimmed before it is read. [`parse_env_as_node`] keeps Node's reading.
 pub fn parse_env(content: &str) -> Vec<(String, String)> {
-    parse_env_reporting(content).pairs
-}
-
-/// Keys whose value Node's own `--env-file` parser reads differently from
-/// [`parse_env`], where Nub deliberately departs from Node:
-///
-/// - `KEY=` followed by spaces or tabs: Node trims the newline with them and
-///   takes the next line as the value, so it also loses the next pair.
-/// - A leading byte order mark: Node keeps it on the first key.
-/// - `export KEY=` with an empty value: Node stores it under `export KEY`.
-///
-/// `nub watch` hands env files to Node as `--env-file` and injects only what
-/// Node would not deliver itself; these keys go through injection so the
-/// watched program sees the values `nub <file>` gives it. The set errs wide (a
-/// pair after a comment line is listed though Node reads it): an extra key
-/// only loses live reload, while a missing one would deliver Node's value.
-pub fn keys_node_misreads(content: &str) -> Vec<String> {
-    parse_env_reporting(content).node_misreads
-}
-
-#[derive(Default)]
-struct ParsedEnv {
-    pairs: Vec<(String, String)>,
-    seen: HashMap<String, usize>,
-    node_misreads: Vec<String>,
-    /// Node also misreads the next pair: it swallowed that pair's line, or the
-    /// pair carries the byte order mark.
-    node_misreads_next: bool,
-}
-
-impl ParsedEnv {
-    fn insert(&mut self, key: &str, value: String) {
-        if std::mem::take(&mut self.node_misreads_next) {
-            self.node_misreads.push(key.to_string());
-        }
-        if let Some(&idx) = self.seen.get(key) {
-            self.pairs[idx].1 = value;
-        } else {
-            self.seen.insert(key.to_string(), self.pairs.len());
-            self.pairs.push((key.to_string(), value));
-        }
-    }
-}
-
-fn parse_env_reporting(content: &str) -> ParsedEnv {
-    let mut parsed = ParsedEnv::default();
     // Node removes carriage returns before scanning.
     let content = content.replace('\r', "");
-    let content = match content.strip_prefix('\u{feff}') {
-        Some(stripped) => {
-            parsed.node_misreads_next = true;
-            stripped
-        }
-        None => &content,
-    };
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
     let mut rest = trim_env_spaces(content);
+    let mut pairs = EnvPairs::default();
 
     while !rest.is_empty() {
         if rest.starts_with('\n') || rest.starts_with('#') {
@@ -650,7 +604,6 @@ fn parse_env_reporting(content: &str) -> ParsedEnv {
 
         let mut key = trim_env_spaces(&rest[..equal_or_newline]);
         rest = &rest[equal_or_newline + 1..];
-        let exported = key.starts_with("export ");
         if let Some(stripped) = key.strip_prefix("export ") {
             key = trim_env_spaces(stripped);
         }
@@ -659,26 +612,18 @@ fn parse_env_reporting(content: &str) -> ParsedEnv {
             continue;
         }
 
-        // Skip only spaces and tabs here: trimming the newline too would make
-        // `KEY= ` take the next line as its value. Node's parser does exactly
-        // that; dotenv reads the value as empty, and so do we.
-        let value_start = rest.trim_start_matches([' ', '\t']);
-        if value_start.is_empty() || value_start.starts_with('\n') {
-            let swallows_next = value_start.len() < rest.len() && !value_start.is_empty();
-            if exported || swallows_next {
-                parsed.node_misreads.push(key.to_string());
-            }
-            parsed.insert(key, String::new());
-            parsed.node_misreads_next |= swallows_next;
-            rest = trim_env_spaces(skip_line(value_start));
+        // Skip only spaces and tabs: trimming the newline too would make
+        // `KEY= ` take the next line as its value.
+        rest = rest.trim_start_matches([' ', '\t']);
+        if rest.is_empty() || rest.starts_with('\n') {
+            pairs.insert(key, String::new());
+            rest = trim_env_spaces(skip_line(rest));
             continue;
         }
-        rest = value_start;
 
         if rest.starts_with('"') {
             if let Some(closing_quote) = closing_quote(rest, '"') {
-                let value = rest[1..closing_quote].replace("\\n", "\n");
-                parsed.insert(key, value);
+                pairs.insert(key, rest[1..closing_quote].replace("\\n", "\n"));
                 rest = trim_env_spaces(after_value_line(rest, closing_quote + 1));
                 continue;
             }
@@ -686,25 +631,125 @@ fn parse_env_reporting(content: &str) -> ParsedEnv {
 
         if let Some(quote) = leading_quote(rest) {
             if let Some(closing_quote) = closing_quote(rest, quote) {
-                let value = rest[1..closing_quote].to_string();
-                parsed.insert(key, value);
+                pairs.insert(key, rest[1..closing_quote].to_string());
                 rest = trim_env_spaces(after_value_line(rest, closing_quote + 1));
                 continue;
             }
 
             let (line, next) = split_line(rest);
-            parsed.insert(key, line.to_string());
+            pairs.insert(key, line.to_string());
             rest = trim_env_spaces(next);
             continue;
         }
 
         let (line, next) = split_line(rest);
         let value = line.split_once('#').map(|(value, _)| value).unwrap_or(line);
-        parsed.insert(key, trim_env_spaces(value).to_string());
+        pairs.insert(key, trim_env_spaces(value).to_string());
         rest = trim_env_spaces(next);
     }
 
-    parsed
+    pairs.pairs
+}
+
+/// What Node's own `--env-file` parser reads from `content`: `ParseContent` in
+/// Node 26.11's `src/node_dotenv.cc`, ported branch for branch, misreadings
+/// included. `nub watch` hands env files to Node as `--env-file` and compares
+/// this against [`parse_env`] to find the values Node gets wrong, which it then
+/// injects itself.
+pub fn parse_env_as_node(content: &str) -> Vec<(String, String)> {
+    let lines = content.replace('\r', "");
+    let mut content = trim_env_spaces(&lines);
+    let mut pairs = EnvPairs::default();
+
+    while !content.is_empty() {
+        if content.starts_with('\n') || content.starts_with('#') {
+            content = skip_line(content);
+            continue;
+        }
+
+        let Some(equal_or_newline) = content.find(['=', '\n']) else {
+            break;
+        };
+        if content.as_bytes()[equal_or_newline] == b'\n' {
+            content = trim_env_spaces(&content[equal_or_newline + 1..]);
+            continue;
+        }
+
+        let mut key = trim_env_spaces(&content[..equal_or_newline]);
+        content = &content[equal_or_newline + 1..];
+        if content.is_empty() || content.starts_with('\n') {
+            pairs.insert(key, String::new());
+            continue;
+        }
+
+        // Trims the newline as well, so `KEY= ` reads the next line.
+        content = trim_env_spaces(content);
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(stripped) = key.strip_prefix("export ") {
+            key = trim_env_spaces(stripped);
+        }
+        if content.is_empty() {
+            pairs.insert(key, String::new());
+            break;
+        }
+
+        if content.starts_with('"') {
+            if let Some(closing_quote) = closing_quote(content, '"') {
+                pairs.insert(key, content[1..closing_quote].replace("\\n", "\n"));
+                content = after_value_line(content, closing_quote + 1);
+                continue;
+            }
+        }
+
+        if let Some(quote) = leading_quote(content) {
+            match closing_quote(content, quote) {
+                Some(closing_quote) => {
+                    pairs.insert(key, content[1..closing_quote].to_string());
+                    content = after_value_line(content, closing_quote + 1);
+                    continue;
+                }
+                None => match content.find('\n') {
+                    Some(newline) => {
+                        pairs.insert(key, content[..newline].to_string());
+                        content = &content[newline + 1..];
+                    }
+                    None => {
+                        pairs.insert(key, content.to_string());
+                        break;
+                    }
+                },
+            }
+        } else {
+            let (line, next) = split_line(content);
+            let value = line.split_once('#').map(|(value, _)| value).unwrap_or(line);
+            pairs.insert(key, trim_env_spaces(value).to_string());
+            content = next;
+        }
+
+        content = trim_env_spaces(content);
+    }
+
+    pairs.pairs
+}
+
+/// Pairs in first-seen order, with a later assignment replacing an earlier one.
+#[derive(Default)]
+struct EnvPairs {
+    pairs: Vec<(String, String)>,
+    seen: HashMap<String, usize>,
+}
+
+impl EnvPairs {
+    fn insert(&mut self, key: &str, value: String) {
+        if let Some(&idx) = self.seen.get(key) {
+            self.pairs[idx].1 = value;
+        } else {
+            self.seen.insert(key.to_string(), self.pairs.len());
+            self.pairs.push((key.to_string(), value));
+        }
+    }
 }
 
 fn trim_env_spaces(input: &str) -> &str {
@@ -1240,15 +1285,33 @@ mod tests {
         assert_eq!(pairs, expected);
     }
 
-    /// Each listed key is one Node's `util.parseEnv` (26.11.1) reads differently:
-    /// `A` takes `B=b` as its value and `B` goes unset, the byte order mark stays
-    /// on `BOM`, and the empty `export` value lands under `export E`.
+    /// Node 26.11.1's `util.parseEnv` on the same inputs: the empty value takes
+    /// the next line, a quoted continuation line then reads as its own
+    /// assignment, the byte order mark stays on the key, an empty `export`
+    /// value keeps the prefix, and an indented comment after a quoted value
+    /// reads as a key.
     #[test]
-    fn keys_node_misreads_lists_keys_node_parses_differently() {
-        assert_eq!(keys_node_misreads("A= \nB=b\nC=c\n"), ["A", "B"]);
-        assert_eq!(keys_node_misreads("\u{feff}BOM=1\nC=c\n"), ["BOM"]);
-        assert_eq!(keys_node_misreads("export E=\nC=c\n"), ["E"]);
-        assert!(keys_node_misreads("A=\nB=b\nexport C=c\nD= # x\n").is_empty());
+    fn parse_env_as_node_keeps_nodes_misreadings() {
+        let node = |content| {
+            parse_env_as_node(content)
+                .into_iter()
+                .collect::<HashMap<_, _>>()
+        };
+        let pairs = |list: &[(&str, &str)]| {
+            list.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<HashMap<_, _>>()
+        };
+        assert_eq!(
+            node("PORT=3000\nEMPTY= \nCONFIG=\"header\nPORT=9999\nfooter\"\n"),
+            pairs(&[("PORT", "9999"), ("EMPTY", "CONFIG=\"header")]),
+        );
+        assert_eq!(node("\u{feff}A=1\n"), pairs(&[("\u{feff}A", "1")]));
+        assert_eq!(node("export E=\n"), pairs(&[("export E", "")]));
+        assert_eq!(
+            node("A=\"x\"\n  # C=value\n"),
+            pairs(&[("A", "x"), ("# C", "value")]),
+        );
     }
 
     #[test]
