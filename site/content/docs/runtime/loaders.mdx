@@ -158,6 +158,15 @@ import raw from "./config.yaml" with { type: "text" };   // YAML, unparsed
 Read the [full docs](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import/with) for import attributes on developer.mozilla.org.
 </Callout>
 
+TypeScript 7.1 types every text import from one declaration in a `.d.ts` file:
+
+```ts title="text.d.ts"
+declare module "*" with { type: "text" } {
+  const text: string;
+  export default text;
+}
+```
+
 ## Custom extensions
 
 Map an extension of your own onto one of Nub's loaders in a [nub.jsonc](/docs/config#loader).

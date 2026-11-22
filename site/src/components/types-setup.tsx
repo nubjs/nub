@@ -19,7 +19,7 @@ function CopyIcon({ copied }: { copied: boolean }) {
   );
 }
 
-const DEFAULT_INSTALL = 'npm i -D @nubjs/types @types/node@25';
+const DEFAULT_INSTALL = 'npm i -D @nubjs/types @types/node@26';
 const DEFAULT_TSCONFIG = `{ "compilerOptions": { "types": ["node", "@nubjs/types"] } }`;
 
 export function TypesSetup({

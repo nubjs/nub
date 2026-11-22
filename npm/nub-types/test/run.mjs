@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Typecheck-fixture runner for @nubjs/types.
 //
-// Runs `tsc --noEmit` on each fixture under four compilers spanning both sides of the
+// Runs `tsc --noEmit` on each fixture under five compilers spanning both sides of the
 // package's `typesVersions` boundary, and asserts the expected pass/fail outcome. This
 // catches broken declarations, lost wildcards, accidental module conversion, collisions
 // with current or future standard-library members, and — from the oldest leg — a
@@ -15,6 +15,8 @@
 //   stepaside-stub  — a separate DOM-shaped lib declares global Worker → step aside → PASS
 //   negative-export — common.d.ts + `export {}` breaks wildcards/globals → FAIL
 //   handler-typo    — a misspelled `fetch` key under `satisfies ExportedHandler` → FAIL
+//   text-attributes — the docs' `type: "text"` declaration beside the `*.yaml` wildcard
+//                     (TypeScript 7.1+, the first to parse it) → PASS
 //
 // Usage: node run.mjs   (run from npm/nub-types/test, after `npm install`)
 
@@ -24,6 +26,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
+const previewTsc = join(here, "node_modules", "typescript-7-1", "lib", "tsc.js");
 const currentTsc = join(here, "node_modules", "typescript", "lib", "tsc.js");
 const modernTsc = join(here, "node_modules", "typescript-6-0", "lib", "tsc.js");
 const legacyTsc = join(here, "node_modules", "typescript-5-9", "lib", "tsc.js");
@@ -35,7 +38,7 @@ const legacyTsc = join(here, "node_modules", "typescript-5-9", "lib", "tsc.js");
 const floorTsc = join(here, "node_modules", "typescript-5-8", "lib", "tsc.js");
 const commonDts = join(here, "node_modules", "@nubjs", "types", "common.d.ts");
 
-if (!existsSync(currentTsc) || !existsSync(modernTsc) || !existsSync(legacyTsc) || !existsSync(floorTsc)) {
+if (!existsSync(previewTsc) || !existsSync(currentTsc) || !existsSync(modernTsc) || !existsSync(legacyTsc) || !existsSync(floorTsc)) {
   console.error("TypeScript fixture compilers are missing — install npm/nub-types/test dependencies first.");
   process.exit(1);
 }
@@ -48,7 +51,7 @@ writeFileSync(
   `${readFileSync(commonDts, "utf8")}\ndeclare namespace Temporal { interface Instant {} }\nexport {};\n`,
 );
 
-/** @type {{name: string, dir: string, expect: "pass" | "fail", dom?: boolean}[]} */
+/** @type {{name: string, dir: string, expect: "pass" | "fail", dom?: boolean, since?: number}[]} */
 const fixtures = [
   { name: "positive", dir: "positive", expect: "pass" },
   { name: "future-stdlib", dir: "future-stdlib", expect: "pass" },
@@ -56,6 +59,7 @@ const fixtures = [
   { name: "stepaside-stub", dir: "stepaside-stub", expect: "pass", dom: true },
   { name: "negative-export", dir: "negative-export", expect: "fail" },
   { name: "handler-typo", dir: "handler-typo", expect: "fail" },
+  { name: "text-attributes", dir: "text-attributes", expect: "pass", since: 7.1 },
 ];
 
 // `dom: false` marks a compiler whose OWN lib.dom is incompatible with the pinned
@@ -64,11 +68,13 @@ const fixtures = [
 // step-aside fixtures are the only ones that pull lib.dom, so they are skipped
 // there and the skip is printed rather than silently dropped. Every other fixture,
 // including the one that would catch a missing-lib TS2726, still runs.
+// `version` gates a `since` fixture, which uses syntax older compilers cannot parse.
 const compilers = [
-  { name: "TypeScript 7.0", command: process.execPath, args: [currentTsc] },
-  { name: "TypeScript 6.0", command: process.execPath, args: [modernTsc] },
-  { name: "TypeScript 5.9", command: process.execPath, args: [legacyTsc] },
-  { name: "TypeScript 5.8", command: process.execPath, args: [floorTsc], dom: false },
+  { name: "TypeScript 7.1", version: 7.1, command: process.execPath, args: [previewTsc] },
+  { name: "TypeScript 7.0", version: 7.0, command: process.execPath, args: [currentTsc] },
+  { name: "TypeScript 6.0", version: 6.0, command: process.execPath, args: [modernTsc] },
+  { name: "TypeScript 5.9", version: 5.9, command: process.execPath, args: [legacyTsc] },
+  { name: "TypeScript 5.8", version: 5.8, command: process.execPath, args: [floorTsc], dom: false },
 ];
 
 /** Run one compiler on a fixture's tsconfig; return { ok, output }. */
@@ -92,7 +98,12 @@ function runTsc(compiler, dir) {
 let failed = 0;
 let skipped = 0;
 for (const compiler of compilers) {
-  for (const { name, dir, expect, dom } of fixtures) {
+  for (const { name, dir, expect, dom, since } of fixtures) {
+    if (since && compiler.version < since) {
+      skipped++;
+      console.log(`– ${compiler.name} / ${name}: skipped (needs TypeScript ${since}+)`);
+      continue;
+    }
     if (dom && compiler.dom === false) {
       skipped++;
       console.log(`– ${compiler.name} / ${name}: skipped (its lib.dom conflicts with the pinned @types/node)`);
