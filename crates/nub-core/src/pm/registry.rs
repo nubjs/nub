@@ -457,9 +457,18 @@ fn parse_npmrc_auth(
         }
     }
 
-    // Longest `//host[/path]` prefix that is a prefix of the base wins.
+    // Longest `//host[/path]` prefix that is a prefix of the base AND carries a
+    // credential wins — the engine's `has_credential_material` rule. A
+    // path-scoped entry holding only TLS settings (`cafile`) or a lone half of
+    // a username/password pair must not shadow the host's token.
+    let has_credential = |f: &Fields| {
+        let set = |v: &Option<String>| v.as_ref().is_some_and(|v| !v.is_empty());
+        set(&f.auth_token) || set(&f.auth_basic) || (set(&f.username) && set(&f.password))
+    };
     let best = by_prefix
-        .keys()
+        .iter()
+        .filter(|(_, fields)| has_credential(fields))
+        .map(|(prefix, _)| prefix)
         .filter(|prefix| {
             let p = prefix.trim_start_matches("//");
             let base = base_nerf.trim_start_matches("//");
@@ -1844,6 +1853,21 @@ mod tests {
         );
         assert_eq!(nerf_dart("http://h:80/x/"), "//h/x");
         assert_eq!(nerf_dart("http://h:443/x/"), "//h:443/x");
+    }
+
+    /// Only an entry carrying a credential competes for the longest-prefix
+    /// match: a path-scoped `cafile` (here spelled with `:443`) leaves the
+    /// host's token in force.
+    #[test]
+    fn a_tls_only_path_entry_does_not_shadow_the_host_token() {
+        let npmrc = "//mirror.example.test/:_authToken=tok\n\
+                     //mirror.example.test:443/npm/:cafile=/etc/ssl/mirror.pem\n";
+        assert_eq!(
+            parse_npmrc_auth(&[(npmrc, true)], "https://mirror.example.test/npm/", |_| {
+                None
+            }),
+            Some(Auth::Bearer("tok".to_string()))
+        );
     }
 
     /// The environment's credential travels with the environment's registry and
