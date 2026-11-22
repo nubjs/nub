@@ -97,6 +97,9 @@ pub struct TsconfigResult {
     pub custom_conditions: Vec<String>,
     /// Problems found reading the config ([`diagnostics`]). Empty on a clean parse.
     pub diagnostics: Vec<String>,
+    /// The config is one a parent process already settled the warning for
+    /// ([`reported_by_parent`]).
+    pub reported_by_parent: bool,
 }
 
 /// The cached, fully-resolved tsconfig for one importer directory.
@@ -182,6 +185,7 @@ pub fn load_tsconfig(dir: &str, explicit: Option<&str>) -> TsconfigResult {
         tsconfig_hash: loaded.tsconfig_hash.clone(),
         custom_conditions: loaded.custom_conditions.clone(),
         diagnostics: loaded.diagnostics.clone(),
+        reported_by_parent: loaded.path.as_deref().is_some_and(reported_by_parent),
     }
 }
 
@@ -344,10 +348,10 @@ fn report_diagnostics(config_path: &str, diags: &[String], report: Report) {
     if diags.is_empty() {
         return;
     }
-    let path = slash(config_path);
-    if std::env::var(REPORTED_ENV).is_ok_and(|v| v.split('\n').any(|already| already == path)) {
+    if reported_by_parent(config_path) {
         return;
     }
+    let path = report_key(config_path);
     let mut seen = reported().lock().unwrap_or_else(|e| e.into_inner());
     if seen.iter().any(|p| p == &path) {
         return;
@@ -358,6 +362,48 @@ fn report_diagnostics(config_path: &str, diags: &[String], report: Report) {
         for diag in diags {
             eprintln!("Nub: {diag}");
         }
+    }
+}
+
+/// Whether a parent process already settled the warning for `config_path`: it is
+/// listed in [`REPORTED_ENV`] under any spelling of the same file.
+pub fn reported_by_parent(config_path: &str) -> bool {
+    std::env::var(REPORTED_ENV).is_ok_and(|listed| lists(&listed, config_path))
+}
+
+/// Whether a newline-separated [`REPORTED_ENV`] value names `config_path`. Both
+/// sides go through [`report_key`]: the CLI and the addon reach one file under
+/// different spellings (the CLI canonicalizes an entry's directory; Node keeps a
+/// Windows working directory's 8.3 short form), and a plain string match then
+/// warns twice.
+fn lists(listed: &str, config_path: &str) -> bool {
+    let key = report_key(config_path);
+    listed
+        .split('\n')
+        .filter(|entry| !entry.is_empty())
+        .any(|entry| report_key(entry) == key)
+}
+
+/// One spelling per config file: symlinks resolved, and on Windows the long form
+/// of an 8.3 short name (what `canonicalize` returns), without the `\\?\` prefix
+/// and compared case-insensitively. A path that does not resolve keeps its own.
+fn report_key(path: &str) -> String {
+    let resolved = std::fs::canonicalize(path).map_or_else(
+        |_| path.to_string(),
+        |p| {
+            let p = p.to_string_lossy();
+            if let Some(unc) = p.strip_prefix(r"\\?\UNC\") {
+                format!(r"\\{unc}")
+            } else {
+                p.strip_prefix(r"\\?\").unwrap_or(&p).to_string()
+            }
+        },
+    );
+    let key = slash(&resolved);
+    if cfg!(windows) {
+        key.to_lowercase()
+    } else {
+        key
     }
 }
 
@@ -1599,6 +1645,26 @@ mod tests {
 
     fn read(dir: &tempfile::TempDir) -> Vec<String> {
         custom_conditions(&dir.path().to_string_lossy(), None)
+    }
+
+    /// A config the parent listed under one spelling is recognised under another:
+    /// here a symlinked directory, the Unix stand-in for a Windows 8.3 short name.
+    #[cfg(unix)]
+    #[test]
+    fn a_reported_config_matches_under_another_spelling() {
+        let dir = project(&[("real/tsconfig.json", "{}"), ("real/other.json", "{}")]);
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        let spell = |sub: &str| dir.path().join(sub).to_string_lossy().into_owned();
+        let (real, link) = (spell("real/tsconfig.json"), spell("link/tsconfig.json"));
+        assert!(
+            super::lists(&link, &real),
+            "listed via the link, read via the real path"
+        );
+        assert!(super::lists(&format!("{real}\n"), &link), "and the reverse");
+        assert!(
+            !super::lists(&spell("link/other.json"), &real),
+            "a different file is not listed"
+        );
     }
 
     /// The memo is keyed by DIRECTORY, so it is unbounded by construction — and it

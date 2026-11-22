@@ -126,13 +126,12 @@ function foreignAsyncLoaderPresent(includeRequire = false) {
 // thread already passed.
 function refuseUnreadableTsconfig() {
   if (!__require("node:worker_threads").isMainThread) return;
-  const reported = (process.env.__NUB_TSCONFIG_REPORTED || "").split("\n");
   const dirs = [process.cwd()];
   const entry = entryPath();
   if (entry && !core.isDependency(pathToFileURL(entry).href)) dirs.push(dirname(entry));
   const unreadable = dirs.some((dir) => {
-    const { path, diagnostics } = core.getTsconfigForDir(dir);
-    return path && diagnostics && diagnostics.length > 0 && !reported.includes(path);
+    const { path, diagnostics, reportedByParent } = core.getTsconfigForDir(dir);
+    return path && diagnostics && diagnostics.length > 0 && !reportedByParent;
   });
   if (!unreadable) return;
   process.stderr.write(

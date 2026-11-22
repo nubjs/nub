@@ -42,6 +42,8 @@ pub struct TsconfigResult {
     pub custom_conditions: Vec<String>,
     /// Why the config could not be read in full; empty on a clean parse.
     pub diagnostics: Vec<String>,
+    /// A parent `nub` already settled this config's warning (`__NUB_TSCONFIG_REPORTED`).
+    pub reported_by_parent: bool,
 }
 
 /// Parse + resolve the project's tsconfig: `explicit` when the project names one, else
@@ -55,5 +57,6 @@ pub fn load_tsconfig(dir: String, explicit: Option<String>) -> TsconfigResult {
         tsconfig_hash: r.tsconfig_hash,
         custom_conditions: r.custom_conditions,
         diagnostics: r.diagnostics,
+        reported_by_parent: r.reported_by_parent,
     }
 }
