@@ -70,8 +70,9 @@ function listenOptions(env) {
 }
 
 function parsePort(value, source) {
-  if (value === undefined || value === null || value === "") return undefined;
-  const n = typeof value === "number" ? value : Number(String(value).trim());
+  const text = nonEmpty(String(value ?? ""));
+  if (text === undefined) return undefined;
+  const n = Number(text);
   if (!Number.isInteger(n) || n < 0 || n > 65535) {
     throw new Error(`${source} must be an integer from 0 to 65535, got ${JSON.stringify(value)}`);
   }
