@@ -19,6 +19,7 @@
 
 use std::path::{Path, PathBuf};
 
+use napi::Either;
 use napi_derive::napi;
 
 use nub_tsconfig as tsconfig;
@@ -26,7 +27,8 @@ use nub_tsconfig as tsconfig;
 const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 
 /// The additive TS resolution. `Some(absolute path)` ⇒ nub short-circuits; `None`
-/// ⇒ fall through to Node (the compat boundary). `parent_path` is the importer's
+/// ⇒ fall through to Node (the compat boundary); a [`PackageRedirect`] ⇒ fall
+/// through to Node with a rewritten specifier. `parent_path` is the importer's
 /// absolute filesystem path (empty for the entry).
 /// `tsconfig_path` is the project's configured tsconfig when one is set, so
 /// `paths` resolution reads the file the project names instead of rediscovering
@@ -40,7 +42,7 @@ pub fn resolve_ts(
     parent_path: String,
     tsconfig_path: Option<String>,
     preserve_symlinks: Option<bool>,
-) -> Option<String> {
+) -> Option<Either<String, PackageRedirect>> {
     let preserve_symlinks = preserve_symlinks.unwrap_or(false);
     // Classify and DISCOVER from where the importer really lives. Under
     // `--preserve-symlinks` Node hands over the un-realpathed path, so a file inside a
@@ -72,14 +74,18 @@ pub fn resolve_ts(
     if !is_relative && !is_absolute && !is_file_url && !is_node_modules(&parent_path) {
         let candidates = tsconfig::match_paths(&parent_dir, &specifier, tsconfig_path.as_deref());
         for candidate in candidates {
+            if let Some(mut redirect) = package_redirect(&candidate) {
+                redirect.fallback = try_resolve_file(&candidate, true, probe_order(&parent_ext));
+                return Some(Either::B(redirect));
+            }
             if let Some(resolved) = try_resolve_file(&candidate, true, probe_order(&parent_ext)) {
-                return Some(resolved);
+                return Some(Either::A(resolved));
             }
         }
         // No alias matched. A bare package NAME still belongs entirely to Node
         // (`main`/`exports`); only a SUBPATH into an `exports`-less dependency is
         // ours to probe.
-        return resolve_bare_subpath(&specifier, &parent_dir, preserve_symlinks);
+        return resolve_bare_subpath(&specifier, &parent_dir, preserve_symlinks).map(Either::A);
     }
 
     // Extensionless / emit-swap branch — only when the importer is itself a TS
@@ -87,11 +93,67 @@ pub fn resolve_ts(
     if is_ts_parent(&parent_ext) && is_relative && !names_a_directory(&specifier) {
         let target = path_join_resolve(&parent_dir, &specifier);
         if let Some(resolved) = try_resolve_file(&target, true, probe_order(&parent_ext)) {
-            return Some(resolved);
+            return Some(Either::A(resolved));
         }
     }
 
     None
+}
+
+/// A `paths` target that lands in an installed package, handed back to Node as the
+/// bare specifier it stands for.
+///
+/// `"*": ["./node_modules/*"]` is a common tsconfig line, and probing its target as a
+/// path reads the package's legacy `main` and never its `exports` — so `import "dep"`
+/// silently loaded a different file than plain Node does (a dual package's CommonJS
+/// build under `import`, say). `tsc` and tsconfig-paths take `main` there too, but
+/// they answer a different question: `tsc` is looking for TYPES (`types` first), and
+/// the runtime module is Node's to choose. Node resolves `specifier` as if imported
+/// from a file in `base` — the directory holding that `node_modules` — so `exports`,
+/// the active conditions and Node's own errors all apply.
+///
+/// Only a package that declares `exports` is redirected: without one, Node's own
+/// answer IS `main` plus probing, which [`try_resolve_file`] already gives. A target
+/// naming an existing file by its full name is left alone too; a path the author
+/// spelled out is not a package lookup. Where `exports` refuses the specifier
+/// (`ERR_PACKAGE_PATH_NOT_EXPORTED`, a deep path the package does not export), the
+/// caller loads `fallback`, the file the target names, as it did before.
+#[napi(object)]
+pub struct PackageRedirect {
+    pub specifier: String,
+    pub base: String,
+    pub fallback: Option<String>,
+}
+
+fn package_redirect(candidate: &str) -> Option<PackageRedirect> {
+    let components: Vec<_> = Path::new(candidate).components().collect();
+    let nm = components
+        .iter()
+        .rposition(|c| c.as_os_str() == "node_modules")?;
+    let first = components.get(nm + 1)?.as_os_str().to_str()?;
+    let name_end = nm + 1 + if first.starts_with('@') { 2 } else { 1 };
+    if components.len() < name_end {
+        return None;
+    }
+    let pkg_dir: PathBuf = components[..name_end].iter().collect();
+    let text = std::fs::read_to_string(pkg_dir.join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // Presence, not truthiness: `"exports": null` still owns the package's subpaths.
+    manifest.get("exports")?;
+    if components.len() > name_end && !extname(candidate).is_empty() && is_file(candidate) {
+        return None;
+    }
+    let specifier = components[nm + 1..]
+        .iter()
+        .map(|c| c.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()?
+        .join("/");
+    let base: PathBuf = components[..nm].iter().collect();
+    Some(PackageRedirect {
+        specifier,
+        base: base.to_string_lossy().into_owned(),
+        fallback: None,
+    })
 }
 
 /// Extension probing for a bare package SUBPATH (`pkg/sub`, `@scope/pkg/a/b`).

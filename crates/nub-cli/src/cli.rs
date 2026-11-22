@@ -4676,7 +4676,7 @@ pub(crate) fn runtime_node_options_with(
         // other config-derived behavior. The lifecycle path (`BestEffort`) is the one
         // exception, and it takes the same "guess at nothing" line: no conditions at
         // all from a config it cannot read.
-        let conditions = match tsconfig_gate {
+        let mut conditions = match tsconfig_gate {
             TsconfigGate::Required => {
                 ensure_tsconfig_parses(&cwd, explicit)?;
                 nub_tsconfig::custom_conditions(&cwd, explicit)
@@ -4688,6 +4688,25 @@ pub(crate) fn runtime_node_options_with(
             }
             TsconfigGate::BestEffort => Vec::new(),
         };
+        // The entry's own tsconfig joins too: `nub app/main.ts` from outside `app/`
+        // should resolve the way it does from inside. The addon also adds each
+        // importer's conditions as it resolves, but only where Node honors a
+        // condition a resolve hook passes on; a `--conditions` flag works on every
+        // version and reaches a dependency's imports as well. No refusal here — the
+        // entry gate in the caller owns that — so a config that will not read just
+        // contributes nothing.
+        if let Some(anchor) = runtime.content_mapper_anchor.as_deref() {
+            let anchor = anchor.to_string_lossy();
+            let readable = match tsconfig_gate {
+                TsconfigGate::Required => nub_tsconfig::diagnostics(&anchor, explicit).is_empty(),
+                TsconfigGate::BestEffort => {
+                    nub_tsconfig::probe_diagnostics(&anchor, explicit).is_empty()
+                }
+            };
+            if readable {
+                conditions.extend(nub_tsconfig::custom_conditions(&anchor, explicit));
+            }
+        }
         for condition in conditions {
             // A condition name with whitespace is a user error in THEIR tsconfig that
             // `tsc` itself tolerates, so it cannot be fatal here the way a bad

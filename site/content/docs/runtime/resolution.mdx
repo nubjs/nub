@@ -43,7 +43,7 @@ import { db } from "@db";
 import { Button } from "@/components/Button";
 ```
 
-Matching follows the `tsc` rules: an exact pattern wins, then the longest matching wildcard prefix. Node builtins always win, so `import "os"` is `node:os`, never `baseUrl/os.ts`.
+Matching follows the `tsc` rules: an exact pattern wins, then the longest matching wildcard prefix. Node builtins always win, so `import "os"` is `node:os`, never `baseUrl/os.ts`. A target inside `node_modules`, such as `"*": ["./node_modules/*"]`, resolves through the package's `exports`, as a plain import would.
 
 <Callout>
 Read the [full docs](https://www.typescriptlang.org/tsconfig/paths.html) for `paths` on typescriptlang.org.

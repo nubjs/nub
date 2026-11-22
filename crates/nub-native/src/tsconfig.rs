@@ -38,6 +38,10 @@ pub struct TsconfigResult {
     pub path: Option<String>,
     pub compiler_options: Option<TsCompilerOptions>,
     pub tsconfig_hash: String,
+    /// `compilerOptions.customConditions`, merged through `extends`, verbatim.
+    pub custom_conditions: Vec<String>,
+    /// Why the config could not be read in full; empty on a clean parse.
+    pub diagnostics: Vec<String>,
 }
 
 /// Parse + resolve the project's tsconfig: `explicit` when the project names one, else
@@ -49,5 +53,7 @@ pub fn load_tsconfig(dir: String, explicit: Option<String>) -> TsconfigResult {
         path: r.path,
         compiler_options: r.compiler_options.map(Into::into),
         tsconfig_hash: r.tsconfig_hash,
+        custom_conditions: r.custom_conditions,
+        diagnostics: r.diagnostics,
     }
 }

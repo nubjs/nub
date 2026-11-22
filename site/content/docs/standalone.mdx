@@ -95,7 +95,7 @@ The package registers the same resolve and transpile hooks as the `nub` command,
 - Syntax newer than the running Node, such as `using`, downleveled by the transpiler
 - Inline source maps on every transpiled file
 
-Both `import` and `require()` of a `.ts` file work. Worker threads pick up the hooks automatically, because Node passes `--import` down to them. Dependencies under `node_modules` are never transpiled.
+Both `import` and `require()` of a `.ts` file work. Worker threads pick up the hooks automatically, because Node passes `--import` down to them. Dependencies under `node_modules` are never transpiled. A `tsconfig.json` the runner cannot read in full stops the run, as it does under `nub`.
 
 Module formats follow Node's rules: a `.cts` file is CommonJS and a `.mts` file is an ES module. The runner does not convert one format into the other, so a `.cts` file uses `module.exports`.
 

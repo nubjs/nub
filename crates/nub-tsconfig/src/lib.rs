@@ -93,6 +93,10 @@ pub struct TsconfigResult {
     /// `JSON.stringify`-equivalent of the FULL merged compilerOptions — the exact
     /// string the cache key folds in (`tsconfigHash`). Empty when no tsconfig.
     pub tsconfig_hash: String,
+    /// Merged `compilerOptions.customConditions`, verbatim ([`custom_conditions`]).
+    pub custom_conditions: Vec<String>,
+    /// Problems found reading the config ([`diagnostics`]). Empty on a clean parse.
+    pub diagnostics: Vec<String>,
 }
 
 /// The cached, fully-resolved tsconfig for one importer directory.
@@ -176,6 +180,8 @@ pub fn load_tsconfig(dir: &str, explicit: Option<&str>) -> TsconfigResult {
         path: loaded.path.clone(),
         compiler_options: loaded.compiler_options.clone(),
         tsconfig_hash: loaded.tsconfig_hash.clone(),
+        custom_conditions: loaded.custom_conditions.clone(),
+        diagnostics: loaded.diagnostics.clone(),
     }
 }
 
@@ -1191,9 +1197,16 @@ fn read_jsonc(path: &str) -> Result<Value, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH, nub_json_guard::Dialect::Jsonc)
         .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
-    // The `Option` is the deserialization target, not a wrapper the parser adds.
-    // It collapses an empty document and a literal `null` into `None`; a tsconfig
-    // that is either is unusable, so both fall through to the same error.
+    // A document with no value at all (empty, whitespace, or only comments) is `{}`
+    // to `tsc`, so it is here too. `parse_to_value` is the probe because it keeps
+    // that case (`None`) apart from a literal `null`, which the serde path below
+    // collapses into the same `None` and which stays an error.
+    if matches!(
+        jsonc_parser::parse_to_value(text, &jsonc_parse_options()),
+        Ok(None)
+    ) {
+        return Ok(Value::Object(serde_json::Map::new()));
+    }
     jsonc_parser::parse_to_serde_value::<Option<Value>>(text, &jsonc_parse_options())
         .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?
         .ok_or_else(|| format!("Failed to parse tsconfig at: {path}"))

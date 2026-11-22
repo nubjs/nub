@@ -116,6 +116,25 @@ function foreignAsyncLoaderPresent(includeRequire = false) {
   return tokens.some((t) => t && !isOwnLoaderToken(t));
 }
 
+// A tsconfig that cannot be read in full stops the run, as it does under the `nub`
+// CLI (`ensure_tsconfig_parses`): carrying on would transpile and resolve under
+// options its author never wrote. Same anchor as the CLI — the working directory,
+// where Node also resolves this preload's own specifier from. A config path a
+// parent `nub` already settled (`__NUB_TSCONFIG_REPORTED`, the lifecycle path that
+// lets a script generate its `extends` target) is not this process's call. Main
+// thread only: a worker inherits the preload after the main thread already passed.
+function refuseUnreadableTsconfig() {
+  if (!__require("node:worker_threads").isMainThread) return;
+  const { path, diagnostics } = core.getTsconfigForDir(process.cwd());
+  if (!path || !diagnostics || diagnostics.length === 0) return;
+  if ((process.env.__NUB_TSCONFIG_REPORTED || "").split("\n").includes(path)) return;
+  process.stderr.write(
+    "Error: the project's tsconfig.json could not be read in full (see above).\n" +
+      "Fix the config, or run without the @nubjs/runner preload.\n",
+  );
+  process.exit(1);
+}
+
 // Arm the loader. `esm` = the ESM hook surface (module.registerHooks on the fast
 // tier, the module.register loader worker on the compat tier); `cjs` = the
 // CommonJS require() surface (Module._resolveFilename + the classic transpile
@@ -139,6 +158,8 @@ export function arm({ esm = true, cjs = true } = {}) {
     );
     return;
   }
+
+  refuseUnreadableTsconfig();
 
   // The loader ships no polyfill packages, so the clobber map's synthetic
   // modules (re-exports of globals the CLI runtime installs) would hand users
