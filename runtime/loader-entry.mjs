@@ -23,7 +23,7 @@ import * as core from "./transform-core.mjs";
 
 const __require = createRequire(import.meta.url);
 const module_ = __require("node:module");
-const { fileURLToPath } = __require("node:url");
+const { fileURLToPath, pathToFileURL } = __require("node:url");
 const { dirname, isAbsolute, resolve: resolvePath, sep } = __require("node:path");
 const common = __require("./preload-common.cjs");
 
@@ -118,21 +118,43 @@ function foreignAsyncLoaderPresent(includeRequire = false) {
 
 // A tsconfig that cannot be read in full stops the run, as it does under the `nub`
 // CLI (`ensure_tsconfig_parses`): carrying on would transpile and resolve under
-// options its author never wrote. Same anchor as the CLI — the working directory,
-// where Node also resolves this preload's own specifier from. A config path a
-// parent `nub` already settled (`__NUB_TSCONFIG_REPORTED`, the lifecycle path that
-// lets a script generate its `extends` target) is not this process's call. Main
-// thread only: a worker inherits the preload after the main thread already passed.
+// options its author never wrote. The same two configs the CLI checks: the working
+// directory's, and the file entry's (`node --import <pkg> app/main.ts` from the
+// root). A config path a parent `nub` already settled (`__NUB_TSCONFIG_REPORTED`,
+// the lifecycle path that lets a script generate its `extends` target) is not this
+// process's call. Main thread only: a worker inherits the preload after the main
+// thread already passed.
 function refuseUnreadableTsconfig() {
   if (!__require("node:worker_threads").isMainThread) return;
-  const { path, diagnostics } = core.getTsconfigForDir(process.cwd());
-  if (!path || !diagnostics || diagnostics.length === 0) return;
-  if ((process.env.__NUB_TSCONFIG_REPORTED || "").split("\n").includes(path)) return;
+  const reported = (process.env.__NUB_TSCONFIG_REPORTED || "").split("\n");
+  const dirs = [process.cwd()];
+  const entry = entryPath();
+  if (entry && !core.isDependency(pathToFileURL(entry).href)) dirs.push(dirname(entry));
+  const unreadable = dirs.some((dir) => {
+    const { path, diagnostics } = core.getTsconfigForDir(dir);
+    return path && diagnostics && diagnostics.length > 0 && !reported.includes(path);
+  });
+  if (!unreadable) return;
   process.stderr.write(
     "Error: the project's tsconfig.json could not be read in full (see above).\n" +
       "Fix the config, or run without the @nubjs/runner preload.\n",
   );
   process.exit(1);
+}
+
+// The file entry as the transform will see it: Node has already resolved
+// `argv[1]`, and follows a symlink to it unless `--preserve-symlinks-main` is set.
+// Null for `-e`, the REPL and stdin.
+function entryPath() {
+  const main = process.argv[1];
+  if (typeof main !== "string" || main === "-" || !isAbsolute(main)) return null;
+  const flags = [...process.execArgv, ...(process.env.NODE_OPTIONS || "").split(/\s+/)];
+  if (flags.some((f) => f.replace(/_/g, "-") === "--preserve-symlinks-main")) return main;
+  try {
+    return __require("node:fs").realpathSync(main);
+  } catch {
+    return main;
+  }
 }
 
 // Arm the loader. `esm` = the ESM hook surface (module.registerHooks on the fast

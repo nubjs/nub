@@ -509,7 +509,7 @@ let resolvingInternal = false;
 
 // Resolve a specifier the way both hook tiers do. Returns `{ url, shortCircuit }`
 // to short-circuit Node's resolver, `null` to fall through to `nextResolve`, or
-// `{ redirect }` to fall through with another specifier (see `nextResolveArgs`).
+// `{ redirect }` for Node to answer from installed packages (see `resolveRedirect`).
 // `parentURL` is the importer (a file: URL string), or "" for the entry.
 // `fromRequire` is true when the fast tier's hook is resolving a `require()`.
 export function resolveSpec(specifier, parentURL, fromRequire = false) {
@@ -588,26 +588,26 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
   const parentPath = parent.startsWith("file:") ? fileURLToPath(parent) : "";
   const resolved = resolveTs(specifier, parentPath);
   if (typeof resolved === "string") return { url: pathToFileURL(resolved).href, shortCircuit: true };
-  // A `paths` target inside an installed package that declares `exports`: Node
-  // answers it, as the bare specifier, from the directory holding that node_modules.
+  // `paths` targets inside installed packages that declare `exports`, for Node to
+  // answer (`resolveRedirect`).
   if (resolved) {
-    const fallbackURL = resolved.fallback ? pathToFileURL(resolved.fallback).href : null;
-    return { redirect: { specifier: resolved.specifier, parentURL: dirURL(resolved.base), fallbackURL } };
+    const packages = resolved.packages.map((p) => ({
+      specifier: p.specifier,
+      parentURL: pathToFileURL(p.packageJson).href,
+      fileURL: p.file ? pathToFileURL(p.file).href : null,
+    }));
+    const otherwiseURL = resolved.otherwise ? pathToFileURL(resolved.otherwise).href : null;
+    return { redirect: { packages, otherwiseURL } };
   }
 
   return null;
 }
 
-function dirURL(dir) {
-  const href = pathToFileURL(dir).href;
-  return href.endsWith("/") ? href : `${href}/`;
-}
-
 // The `compilerOptions.customConditions` of the tsconfig governing an importer, the
-// same config its `paths` come from. The CLI also passes the working directory's set
-// as `--conditions`, which covers the whole process; this covers an importer whose
-// tsconfig is a different one — run from outside the project, or under the
-// standalone loader, which has no CLI to read a tsconfig first. A dependency's
+// same config its `paths` come from. The CLI also passes the entry's set as
+// `--conditions`, which covers the whole process; this covers an importer whose
+// tsconfig is a different one, and the standalone loader, which has no CLI to read
+// a tsconfig first. A dependency's
 // imports get none, as with `paths`.
 function tsconfigConditionsFor(parentURL) {
   const parent = String(parentURL || "");
@@ -631,26 +631,49 @@ function withTsconfigConditions(conditions, parentURL) {
   return merged;
 }
 
-// The `(specifier, context)` a resolve hook hands `nextResolve` when nub did not
-// answer: the importer's tsconfig conditions added, and a `resolveSpec` redirect
-// applied.
-// Node refusing a redirect through `exports` (a deep path the package does not
-// export, or no branch for the active conditions) is answered with the file the
-// `paths` target names, which is what nub loaded before it asked Node at all.
-export function redirectFallback(r, err) {
-  if (!r || !r.redirect || !r.redirect.fallbackURL) return null;
-  if (!err || err.code !== "ERR_PACKAGE_PATH_NOT_EXPORTED") return null;
-  return { url: r.redirect.fallbackURL, shortCircuit: true };
+// The context a resolve hook hands `nextResolve` when nub did not answer: the
+// importer's tsconfig conditions added.
+export function nextResolveContext(context) {
+  const conditions = withTsconfigConditions(context.conditions, context.parentURL);
+  return conditions === context.conditions ? context : { ...context, conditions };
 }
 
-export function nextResolveArgs(specifier, context, r) {
-  let next = context;
-  const conditions = withTsconfigConditions(context.conditions, context.parentURL);
-  if (conditions !== context.conditions) next = { ...next, conditions };
-  if (r && r.redirect) {
-    return [r.redirect.specifier, { ...next, parentURL: r.redirect.parentURL }];
+// Node declining a `paths` target in a package: not exported, or nothing at the
+// mapped path. Anything else is a real error in that package and surfaces.
+export function isPackageRefusal(err) {
+  const code = err && err.code;
+  return code === "ERR_PACKAGE_PATH_NOT_EXPORTED" || code === "ERR_MODULE_NOT_FOUND" ||
+    code === "MODULE_NOT_FOUND";
+}
+
+// Resolve a `resolveSpec` redirect through an `import` hook's `nextResolve`. Each
+// package is asked for its own self-reference from its own `package.json`, so
+// `exports` and the import conditions apply to the exact copy `paths` named. A
+// refusal falls to the file the target names, then to the next target. Null: none
+// answered, and the caller resolves the original specifier.
+export function resolveRedirect(redirect, context, next) {
+  for (const p of redirect.packages) {
+    try {
+      return next(p.specifier, { ...context, parentURL: p.parentURL });
+    } catch (err) {
+      if (!isPackageRefusal(err)) throw err;
+      if (p.fileURL) return { url: p.fileURL, shortCircuit: true };
+    }
   }
-  return [specifier, next];
+  return redirect.otherwiseURL ? { url: redirect.otherwiseURL, shortCircuit: true } : null;
+}
+
+// `resolveRedirect` for an async `nextResolve` (the `module.register` tier).
+export async function resolveRedirectAsync(redirect, context, next) {
+  for (const p of redirect.packages) {
+    try {
+      return await next(p.specifier, { ...context, parentURL: p.parentURL });
+    } catch (err) {
+      if (!isPackageRefusal(err)) throw err;
+      if (p.fileURL) return { url: p.fileURL, shortCircuit: true };
+    }
+  }
+  return redirect.otherwiseURL ? { url: redirect.otherwiseURL, shortCircuit: true } : null;
 }
 
 // CommonJS `require()` resolution for the compat-tier Module._resolveFilename
@@ -660,8 +683,8 @@ export function nextResolveArgs(specifier, context, r) {
 // a URL) and never handles clobber/vendored/builtin — those are import-only, and
 // a clobber's data: URL can't be a require target. `parentPath` is the requiring
 // file's absolute path (from the CJS parent Module), or null for the entry.
-// A `{ specifier, base }` object is the native `paths` redirect: the caller asks
-// Node for that bare specifier from `base`.
+// A `{ packages, otherwise }` object is the native `paths` redirect: the caller asks
+// Node for each package's self-reference from inside it (see `resolveRedirect`).
 export function resolveCjsPath(request, parentPath) {
   if (request.startsWith("node:") || request.startsWith("data:") ||
       module.isBuiltin(request)) {

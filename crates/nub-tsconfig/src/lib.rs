@@ -1197,19 +1197,18 @@ fn read_jsonc(path: &str) -> Result<Value, String> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     nub_json_guard::check_nesting_depth(text, MAX_NESTING_DEPTH, nub_json_guard::Dialect::Jsonc)
         .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
-    // A document with no value at all (empty, whitespace, or only comments) is `{}`
-    // to `tsc`, so it is here too. `parse_to_value` is the probe because it keeps
-    // that case (`None`) apart from a literal `null`, which the serde path below
-    // collapses into the same `None` and which stays an error.
-    if matches!(
-        jsonc_parser::parse_to_value(text, &jsonc_parse_options()),
-        Ok(None)
-    ) {
-        return Ok(Value::Object(serde_json::Map::new()));
+    let parsed = jsonc_parser::parse_to_serde_value::<Option<Value>>(text, &jsonc_parse_options())
+        .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?;
+    if let Some(value) = parsed {
+        return Ok(value);
     }
-    jsonc_parser::parse_to_serde_value::<Option<Value>>(text, &jsonc_parse_options())
-        .map_err(|e| format!("Failed to parse tsconfig at: {path}: {e}"))?
-        .ok_or_else(|| format!("Failed to parse tsconfig at: {path}"))
+    // `None` is either a literal `null`, which `tsc` refuses (TS5092), or a document
+    // with no value at all (empty, whitespace, or only comments), which `tsc` reads
+    // as `{}`. The AST tells the two apart.
+    match jsonc_parser::parse_to_value(text, &jsonc_parse_options()) {
+        Ok(None) => Ok(Value::Object(serde_json::Map::new())),
+        _ => Err(format!("Failed to parse tsconfig at: {path}")),
+    }
 }
 
 // ── compilerOptions normalization (get-tsconfig's `normalizeCompilerOptions`) ──

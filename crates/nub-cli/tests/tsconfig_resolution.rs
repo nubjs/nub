@@ -101,33 +101,95 @@ console.log(which, require("dual").which, internal);
     assert_eq!(stdout(&out, "nub main.ts"), "import require internal");
 }
 
-/// `nub app/main.ts` from outside `app/` applies `app/tsconfig.json`'s
-/// `customConditions`, as running it from inside does.
+/// A `paths` target names one installed copy, and that copy answers: not a nested
+/// copy nearer the importer, and not the project itself when it shares the
+/// package's name. A target Node refuses falls to the next candidate.
+#[test]
+fn a_paths_target_resolves_the_package_copy_it_names() {
+    // Once as a project of another name, once as one named like the package.
+    for project in [
+        r#"{"type":"module"}"#,
+        r#"{"name":"dual","type":"module","exports":"./self.js"}"#,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "package.json", project);
+        write(root, "self.js", "export const which = 'self';\n");
+        write(
+            root,
+            "tsconfig.json",
+            r#"{"compilerOptions":{"paths":{
+            "alias":["./node_modules/dual"],
+            "second":["./node_modules/dual/missing","./second.cjs"]}}}"#,
+        );
+        write(root, "second.cjs", "exports.which = 'second';\n");
+        for (copy, label) in [
+            ("node_modules/dual", "root"),
+            ("src/node_modules/dual", "nested"),
+        ] {
+            write(
+                root,
+                &format!("{copy}/package.json"),
+                r#"{"name":"dual","exports":{".":{"import":"./esm.mjs","require":"./cjs.cjs"}}}"#,
+            );
+            write(
+                root,
+                &format!("{copy}/esm.mjs"),
+                &format!("export const which = '{label} import';"),
+            );
+            write(
+                root,
+                &format!("{copy}/cjs.cjs"),
+                &format!("exports.which = '{label} require';"),
+            );
+        }
+        write(
+            root,
+            "src/main.ts",
+            r#"import { which as a } from "alias";
+import { which as b } from "second";
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+console.log([a, require("alias").which, b, require("second").which].join(", "));
+"#,
+        );
+        let out = nub(root, &root.join(".cache"), &["src/main.ts"]);
+        assert_eq!(
+            stdout(&out, project),
+            "root import, root require, second, second"
+        );
+    }
+}
+
+/// With a file entry, the entry's tsconfig alone supplies `customConditions`, so
+/// `nub app/main.ts` from the root resolves as `cd app && nub main.ts` does.
 #[test]
 fn custom_conditions_come_from_the_entrys_tsconfig() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
+    write(
+        root,
+        "tsconfig.json",
+        r#"{"compilerOptions":{"customConditions":["root"]}}"#,
+    );
     write(root, "app/package.json", r#"{"type":"module"}"#);
     write(
         root,
         "app/tsconfig.json",
-        r#"{"compilerOptions":{"customConditions":["dev"]}}"#,
+        r#"{"compilerOptions":{"customConditions":["app"]}}"#,
     );
     write(
         root,
         "app/node_modules/cond/package.json",
-        r#"{"name":"cond","exports":{"dev":"./dev.cjs","default":"./prod.cjs"}}"#,
+        r#"{"name":"cond","exports":{"root":"./root.cjs","app":"./app.cjs","default":"./default.cjs"}}"#,
     );
-    write(
-        root,
-        "app/node_modules/cond/dev.cjs",
-        "module.exports = 'dev';\n",
-    );
-    write(
-        root,
-        "app/node_modules/cond/prod.cjs",
-        "module.exports = 'prod';\n",
-    );
+    for label in ["root", "app", "default"] {
+        write(
+            root,
+            &format!("app/node_modules/cond/{label}.cjs"),
+            &format!("module.exports = '{label}';"),
+        );
+    }
     write(
         root,
         "app/main.ts",
@@ -136,36 +198,48 @@ import { createRequire } from "node:module";
 console.log(cond, createRequire(import.meta.url)("cond"));
 "#,
     );
-    let out = nub(root, &root.join(".cache"), &["app/main.ts"]);
-    assert_eq!(stdout(&out, "nub app/main.ts"), "dev dev");
+    let cache = root.join(".cache");
+    let from_root = nub(root, &cache, &["app/main.ts"]);
+    assert_eq!(stdout(&from_root, "nub app/main.ts"), "app app");
+    let from_app = nub(&root.join("app"), &cache, &["main.ts"]);
+    assert_eq!(stdout(&from_app, "cd app && nub main.ts"), "app app");
 }
 
 /// The loader stops on a tsconfig it cannot read in full, as `nub` does, rather than
-/// running under options the author never wrote.
+/// running under options the author never wrote: the working directory's, and the
+/// one governing a file entry launched from above it.
 #[cfg(unix)]
 #[test]
 fn the_standalone_loader_stops_on_an_unreadable_tsconfig() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    write(root, "tsconfig.json", r#"{"extends":"./missing.json"}"#);
-    write(root, "main.ts", "console.log('ran');\n");
-    let out = loader(
-        None,
-        "loader-register.mjs",
-        root,
-        &root.join(".cache"),
-        "main.ts",
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "the run must stop: {stderr}");
-    assert!(
-        !String::from_utf8_lossy(&out.stdout).contains("ran"),
-        "the entry must not run: {stderr}"
-    );
-    assert!(
-        stderr.contains("missing.json"),
-        "the failure names the file: {stderr}"
-    );
+    for (config, entry) in [
+        ("tsconfig.json", "main.ts"),
+        ("app/tsconfig.json", "app/main.ts"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, config, r#"{"extends":"./missing.json"}"#);
+        write(root, entry, "console.log('ran');\n");
+        let out = loader(
+            None,
+            "loader-register.mjs",
+            root,
+            &root.join(".cache"),
+            entry,
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{entry}: the run must stop: {stderr}"
+        );
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("ran"),
+            "{entry}: the entry must not run: {stderr}"
+        );
+        assert!(
+            stderr.contains("missing.json"),
+            "{entry}: the failure names the file: {stderr}"
+        );
+    }
 }
 
 /// An empty, whitespace-only or comment-only tsconfig is `{}`, as it is to `tsc`. A

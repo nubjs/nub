@@ -29,7 +29,7 @@
 import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, CLOBBER_MAP, dataExtsFor,
-  extname, isFileUrl, resolveSpec, nextResolveArgs, redirectFallback, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
+  extname, isFileUrl, resolveSpec, nextResolveContext, resolveRedirectAsync, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
   noteRuntimeV8FlagSource, outerHookOwnsFormat, explainMappedExtension,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
@@ -121,7 +121,7 @@ export async function resolve(specifier, context, nextResolve) {
   if (utilFacade) return utilFacade;
   const r = resolveSpec(specifier, context.parentURL);
   if (r && !r.redirect) return r;
-  const [nextSpecifier, nextContext] = nextResolveArgs(specifier, context, r);
+  const nextContext = nextResolveContext(context);
   // Yarn PnP: resolve deps through PnP's own resolver — identical to the fast tier,
   // via the shared helper (resolveRequest with the import conditions + format
   // detection), so dual packages resolve to their `import` build.
@@ -131,13 +131,11 @@ export async function resolve(specifier, context, nextResolve) {
       if (res) return res;
     } catch { /* fall through to Node's resolver */ }
   }
-  try {
-    return await nextResolve(nextSpecifier, nextContext);
-  } catch (err) {
-    const refused = redirectFallback(r, err);
-    if (refused) return refused;
-    throw err;
+  if (r) {
+    const hit = await resolveRedirectAsync(r.redirect, nextContext, nextResolve);
+    if (hit) return hit;
   }
+  return nextResolve(specifier, nextContext);
 }
 
 // ── Load hook ───────────────────────────────────────────────────────

@@ -824,7 +824,7 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     const fromRequire = context.importAttributes === undefined;
     const r = core.resolveSpec(specifier, context.parentURL, fromRequire);
     if (r && !r.redirect) return r;
-    const [nextSpecifier, nextContext] = core.nextResolveArgs(specifier, context, r);
+    const nextContext = core.nextResolveContext(context);
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
     // be resolved explicitly — through `pnpapi.resolveRequest`, passing Node's
     // `context.conditions` (the import-side set) so a DUAL package resolves to its
@@ -840,10 +840,15 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
       } catch { /* fall through to Node's resolver */ }
     }
     try {
-      return restoreSchemeOnlyBuiltinURL(nextResolve(nextSpecifier, nextContext));
+      // A `paths` redirect for `require()` is left to the `_resolveFilename` patch,
+      // which Node's default step calls with the original specifier and the real
+      // parent: Node's CommonJS resolver ignores a `parentURL` passed here.
+      if (r && !fromRequire) {
+        const hit = core.resolveRedirect(r.redirect, nextContext, nextResolve);
+        if (hit) return hit;
+      }
+      return restoreSchemeOnlyBuiltinURL(nextResolve(specifier, nextContext));
     } catch (err) {
-      const refused = core.redirectFallback(r, err);
-      if (refused) return refused;
       if (isAsyncLoaderSyncStub(err)) {
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
         if (fallback) return fallback;
@@ -1285,16 +1290,27 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       resolved = core.resolveCjsPath(request, parentPath);
     } catch { /* fall through to Node */ }
     if (resolved !== null && typeof resolved === "object") {
-      // A `paths` redirect: Node's own CommonJS resolver answers the bare specifier
-      // from the directory holding that node_modules, `exports` and conditions
-      // included. The parent keeps everything but its lookup paths, so an error
-      // still names the real requiring file.
-      const base = { __proto__: parent ?? null, paths: module_._nodeModulePaths(resolved.base) };
-      try {
-        return ReflectApply(origResolveFilename, this, [resolved.specifier, base, false, options]);
-      } catch (err) {
-        if (!resolved.fallback || !err || err.code !== "ERR_PACKAGE_PATH_NOT_EXPORTED") throw err;
-        resolved = resolved.fallback;
+      // A `paths` redirect (see transform-core `resolveRedirect`). Node's CommonJS
+      // resolver tries a self-reference from the parent's own package first, so a
+      // parent whose filename is the target's `package.json` makes it answer from
+      // that exact copy, with the require conditions and `options.conditions`.
+      const redirect = resolved;
+      resolved = redirect.otherwise ?? null;
+      for (const p of redirect.packages) {
+        const anchor = {
+          __proto__: parent ?? null,
+          filename: p.packageJson,
+          paths: module_._nodeModulePaths(dirname(p.packageJson)),
+        };
+        try {
+          return ReflectApply(origResolveFilename, this, [p.specifier, anchor, false, options]);
+        } catch (err) {
+          if (!core.isPackageRefusal(err)) throw err;
+          if (p.file) {
+            resolved = p.file;
+            break;
+          }
+        }
       }
     }
     if (resolved) {

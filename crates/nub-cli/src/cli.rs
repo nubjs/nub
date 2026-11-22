@@ -4657,8 +4657,7 @@ pub(crate) fn runtime_node_options_with(
     // contradicted by this, since conditions are a SET and it is the order of keys
     // inside `exports` that decides which one wins.
     //
-    // Anchored at the CWD, which is where nub already discovers `nub.jsonc` from and
-    // where Node resolves a bare `--import`/`--require` specifier from — one rule, and
+    // Read from the entry's tsconfig when there is a file entry, else the CWD's, and
     // it reaches a `customConditions` declared in the base config a leaf package
     // `extends`. Skipped entirely in compat mode by the caller, like every other
     // config-derived flag.
@@ -4676,37 +4675,30 @@ pub(crate) fn runtime_node_options_with(
         // other config-derived behavior. The lifecycle path (`BestEffort`) is the one
         // exception, and it takes the same "guess at nothing" line: no conditions at
         // all from a config it cannot read.
-        let mut conditions = match tsconfig_gate {
-            TsconfigGate::Required => {
-                ensure_tsconfig_parses(&cwd, explicit)?;
-                nub_tsconfig::custom_conditions(&cwd, explicit)
-            }
-            TsconfigGate::BestEffort
-                if nub_tsconfig::probe_diagnostics(&cwd, explicit).is_empty() =>
-            {
-                nub_tsconfig::custom_conditions(&cwd, explicit)
-            }
-            TsconfigGate::BestEffort => Vec::new(),
-        };
-        // The entry's own tsconfig joins too: `nub app/main.ts` from outside `app/`
-        // should resolve the way it does from inside. The addon also adds each
-        // importer's conditions as it resolves, but only where Node honors a
-        // condition a resolve hook passes on; a `--conditions` flag works on every
-        // version and reaches a dependency's imports as well. No refusal here — the
-        // entry gate in the caller owns that — so a config that will not read just
-        // contributes nothing.
-        if let Some(anchor) = runtime.content_mapper_anchor.as_deref() {
-            let anchor = anchor.to_string_lossy();
-            let readable = match tsconfig_gate {
-                TsconfigGate::Required => nub_tsconfig::diagnostics(&anchor, explicit).is_empty(),
-                TsconfigGate::BestEffort => {
-                    nub_tsconfig::probe_diagnostics(&anchor, explicit).is_empty()
-                }
-            };
-            if readable {
-                conditions.extend(nub_tsconfig::custom_conditions(&anchor, explicit));
-            }
+        if tsconfig_gate == TsconfigGate::Required {
+            ensure_tsconfig_parses(&cwd, explicit)?;
         }
+        // With a file entry, the entry's own tsconfig supplies the conditions, alone:
+        // `nub app/main.ts` from the root resolves the way `cd app && nub main.ts`
+        // does. A `--conditions` flag works on every Node version and reaches a
+        // dependency's imports, which a condition the addon passes from its resolve
+        // hook does not. No refusal for the entry here — the entry gate in the caller
+        // owns that — so a config that will not read just contributes nothing.
+        let source = runtime.content_mapper_anchor.as_deref().map_or_else(
+            || cwd.to_string(),
+            |anchor| anchor.to_string_lossy().into_owned(),
+        );
+        let readable = match tsconfig_gate {
+            TsconfigGate::Required => nub_tsconfig::diagnostics(&source, explicit).is_empty(),
+            TsconfigGate::BestEffort => {
+                nub_tsconfig::probe_diagnostics(&source, explicit).is_empty()
+            }
+        };
+        let conditions = if readable {
+            nub_tsconfig::custom_conditions(&source, explicit)
+        } else {
+            Vec::new()
+        };
         for condition in conditions {
             // A condition name with whitespace is a user error in THEIR tsconfig that
             // `tsc` itself tolerates, so it cannot be fatal here the way a bad
