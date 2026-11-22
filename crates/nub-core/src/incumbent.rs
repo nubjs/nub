@@ -24,9 +24,11 @@ pub struct IncumbentProbe {
     /// The user-level `.npmrc` the engine reads (`NPM_CONFIG_USERCONFIG` or
     /// `~/.npmrc`), so the package-manager download reads the same file.
     pub user_npmrc: fn() -> Option<PathBuf>,
-    /// The default registry the environment sets, by the engine's rules
-    /// (`npm_config_registry` in either case, and the incumbent's own variables).
-    pub env_registry: fn() -> Option<String>,
+    /// The registry-client settings the environment sets, as `.npmrc` entries
+    /// lowest precedence first, by the engine's rules (`npm_config_*` in either
+    /// case, and the incumbent's own variables): the default `registry` and the
+    /// auth that goes with it.
+    pub env_config: fn() -> Vec<(String, String)>,
     /// The integrity `<dir>/pnpm-lock.yaml` records for the pinned pnpm at a
     /// version (its `packageManagerDependencies`), as an SRI string.
     pub pnpm_lockfile_integrity: fn(&Path, &str) -> Option<String>,
@@ -60,13 +62,16 @@ pub(crate) fn user_npmrc() -> Option<PathBuf> {
     }
 }
 
-/// See [`IncumbentProbe::env_registry`]. Unregistered, `npm_config_registry`.
-pub(crate) fn env_registry() -> Option<String> {
+/// See [`IncumbentProbe::env_config`]. Unregistered, `npm_config_registry`.
+pub(crate) fn env_config() -> Vec<(String, String)> {
     match PROBE.get() {
-        Some(p) => (p.env_registry)(),
-        None => std::env::var("npm_config_registry").ok(),
+        Some(p) => (p.env_config)(),
+        None => std::env::var("npm_config_registry")
+            .ok()
+            .map(|r| ("registry".to_string(), r))
+            .into_iter()
+            .collect(),
     }
-    .filter(|v| !v.trim().is_empty())
 }
 
 /// See [`IncumbentProbe::pnpm_lockfile_integrity`]. Unregistered, `None`.

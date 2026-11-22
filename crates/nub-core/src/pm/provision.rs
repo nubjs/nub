@@ -193,6 +193,24 @@ pub fn provision_pm_announced(
         Err(err) => return Err(err),
     };
 
+    // A classic yarn range that resolved to Yarn 2+ provisions that release as
+    // Berry: its own package, launcher and store directory.
+    if pm == super::Pm::Yarn
+        && super::resolve::yarn_range_major(&dist.version).is_some_and(|m| m >= 2)
+    {
+        let berry = PmPin {
+            pm: super::Pm::YarnBerry,
+            version: Some(dist.version),
+        };
+        return provision_pm_announced(
+            &berry,
+            store_root,
+            project_root,
+            resolved_from,
+            on_resolved,
+        );
+    }
+
     // The concrete version is now known (a range/dist-tag resolved). Fire the hook
     // before the cache check / install so the shim header precedes any progress.
     if let Some(cb) = on_resolved {
@@ -212,9 +230,17 @@ pub fn provision_pm_announced(
     // project-pinned digest is the integrity `pnpm-lock.yaml` records instead.
     let lockfile_integrity = (pm == super::Pm::Pnpm && pin_hash.is_none())
         .then(|| {
+            // Looked up by the version the project pinned, never by what the
+            // registry reports (`resolve_version_authed` refuses a mismatch on
+            // an exact request); a range's pick is its own record.
+            let pinned = if semver::Version::parse(spec).is_ok() {
+                spec
+            } else {
+                &dist.version
+            };
             crate::incumbent::pnpm_lockfile_integrity(
                 &super::resolve::pin_target_dir(project_root),
-                &dist.version,
+                pinned,
             )
         })
         .flatten()
@@ -782,6 +808,30 @@ pub fn resolve_pm_dist(
     pm: super::Pm,
     spec: &str,
 ) -> Result<registry::VersionDist> {
+    // A classic-classified range can admit Yarn 2+ too (`>=1 <5`), whose
+    // releases live in `@yarnpkg/cli-dist`: the newest match across both
+    // packages wins, and a Berry pick provisions as Berry.
+    if pm == super::Pm::Yarn
+        && semver::Version::parse(spec.trim()).is_err()
+        && semver::VersionReq::parse(&registry::normalize_range(spec)).is_ok()
+    {
+        let classic = registry::resolve_version_authed(cfg, pm.registry_package(), spec);
+        let berry =
+            registry::resolve_version_authed(cfg, super::Pm::YarnBerry.registry_package(), spec);
+        return match (classic, berry) {
+            (Ok(c), Ok(b)) => {
+                let newer = |a: &str, b: &str| {
+                    semver::Version::parse(a)
+                        .ok()
+                        .zip(semver::Version::parse(b).ok())
+                        .is_some_and(|(a, b)| a > b)
+                };
+                Ok(if newer(&b.version, &c.version) { b } else { c })
+            }
+            (Ok(dist), Err(_)) | (Err(_), Ok(dist)) => Ok(dist),
+            (Err(err), Err(_)) => Err(err),
+        };
+    }
     let resolved = registry::resolve_version_authed(cfg, pm.registry_package(), spec);
     if pm != super::Pm::YarnBerry {
         return resolved;

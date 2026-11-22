@@ -1703,9 +1703,9 @@ pub(crate) fn register_incumbent_probe() {
             ensure_engine_config_policy();
             aube_registry::config::user_npmrc_path()
         },
-        env_registry: || {
+        env_config: || {
             ensure_engine_config_policy();
-            aube_registry::config::env_default_registry()
+            aube_registry::config::env_config_entries()
         },
         pnpm_lockfile_integrity,
     });

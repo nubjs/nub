@@ -1028,12 +1028,15 @@ pub fn user_npmrc_path() -> Option<PathBuf> {
     resolve_user_rc_path(home_dir().as_deref())
 }
 
-/// The default registry the process environment sets, with the engine's
-/// precedence: Yarn env (when Yarn mirroring is on), then `npm_config_registry`
-/// / `NPM_CONFIG_REGISTRY` (and pnpm 11's `pnpm_config_registry` when enabled),
-/// then Bun's `BUN_CONFIG_REGISTRY` (when Bun mirroring is on) — last wins, as in
-/// the tagged loader above. `None` when no environment variable sets one.
-pub fn env_default_registry() -> Option<String> {
+/// The registry-client settings the process environment sets, as `.npmrc`
+/// entries in the engine's precedence order, lowest first (last write wins):
+/// Yarn env (when Yarn mirroring is on), then `npm_config_*` / `NPM_CONFIG_*`
+/// (and pnpm 11's `pnpm_config_*` when enabled), then Bun's env (when Bun
+/// mirroring is on). Carries the default `registry` with the auth that goes
+/// with it (`YARN_NPM_AUTH_TOKEN` arrives scoped to `YARN_NPM_REGISTRY_SERVER`),
+/// for an embedder that reads `.npmrc` files itself and must layer the
+/// environment on top the way the engine does.
+pub fn env_config_entries() -> Vec<(String, String)> {
     let env: Vec<(String, String)> = std::env::vars().collect();
     let mut entries = Vec::new();
     if aube_util::engine_context().read_yarn_config {
@@ -1044,10 +1047,6 @@ pub fn env_default_registry() -> Option<String> {
         entries.extend(bun_env_entries_from(&env));
     }
     entries
-        .into_iter()
-        .rev()
-        .find(|(k, v)| k == "registry" && !v.trim().is_empty())
-        .map(|(_, v)| v)
 }
 
 /// Resolve the builtin + global `npmrc` paths the way npm does, reading

@@ -110,13 +110,23 @@ pub fn registry_config(root: &std::path::Path) -> RegistryConfig {
         .find_map(|(path, trusted)| read_npmrc_key(path, "registry").map(|r| (Some(r), *trusted)))
         .unwrap_or((None, false));
     let user_registry = home_npmrc().and_then(|p| read_npmrc_key(&p, "registry"));
+    let env = crate::incumbent::env_config();
+    let env_registry = env
+        .iter()
+        .rev()
+        .find(|(k, v)| k == "registry" && !v.trim().is_empty())
+        .map(|(_, v)| v.clone());
     let base = resolve_base(
-        crate::incumbent::env_registry(),
+        env_registry.clone(),
         project_registry,
         user_registry,
         project_trusted,
     );
-    let auth = npmrc_auth_for(&project, &base);
+    let auth = npmrc_auth_for(
+        &project,
+        &env_auth_text(&env, env_registry.as_deref()),
+        &base,
+    );
     RegistryConfig { base, auth }
 }
 
@@ -318,7 +328,38 @@ fn interpolate_with(value: &str, mut lookup: impl FnMut(&str) -> Option<String>)
 /// matching `registry_base`. This is npm's nerfDart resolution: an auth line is
 /// keyed by a registry URL minus its scheme (`//npm.example.com/path/:_authToken`),
 /// and the most-specific (longest) matching prefix wins.
-fn npmrc_auth_for(project: &[(PathBuf, bool)], registry_base: &str) -> Option<Auth> {
+/// The environment's auth entries as `.npmrc` text: `//host/:key=value` lines
+/// as the environment scoped them (`YARN_NPM_AUTH_TOKEN` arrives scoped to
+/// `YARN_NPM_REGISTRY_SERVER`), and an unscoped `_authToken` / `_auth` (Bun's
+/// `BUN_CONFIG_TOKEN`) scoped to the registry the environment names, the only
+/// one it can mean. With no environment registry an unscoped credential is
+/// dropped rather than sent to whatever host the files pick.
+fn env_auth_text(env: &[(String, String)], env_registry: Option<&str>) -> String {
+    let mut text = String::new();
+    for (key, value) in env {
+        let line = if key.starts_with("//") {
+            format!("{key}={value}")
+        } else if matches!(key.as_str(), "_authToken" | "_auth")
+            && let Some(registry) = env_registry
+        {
+            format!(
+                "{}/:{key}={value}",
+                strip_scheme(registry).trim_end_matches('/')
+            )
+        } else {
+            continue;
+        };
+        text.push_str(&line);
+        text.push('\n');
+    }
+    text
+}
+
+fn npmrc_auth_for(
+    project: &[(PathBuf, bool)],
+    env_auth: &str,
+    registry_base: &str,
+) -> Option<Auth> {
     let project: Vec<(String, bool)> = project
         .iter()
         .map(|(path, trusted)| (std::fs::read_to_string(path).unwrap_or_default(), *trusted))
@@ -335,6 +376,8 @@ fn npmrc_auth_for(project: &[(PathBuf, bool)], registry_base: &str) -> Option<Au
         .map(|(text, trusted)| (text.as_str(), *trusted))
         .collect();
     sources.push((&user, true));
+    // The environment outranks both files, as it does for the registry URL.
+    sources.push((env_auth, true));
     parse_npmrc_auth(&sources, registry_base, |name| std::env::var(name).ok())
 }
 
@@ -828,6 +871,23 @@ const CORGI_ACCEPT: &str = "application/vnd.npm.install-v1+json";
 /// check, that package installs into the store as pnpm 10.9.0, where every
 /// later exact `pnpm@10.9.0` pin on the machine takes it as a cache hit.
 pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
+    let dist = resolve_version_unchecked(cfg, pkg, spec)?;
+    // An exact request is answered by that version or not at all. A registry
+    // that returns another one (a version manifest naming a different version,
+    // or a packument missing the key, whose fallback reads the spec as a caret
+    // range) would otherwise be installed, and checked, as a release nobody
+    // pinned.
+    let spec = spec.trim();
+    if semver::Version::parse(spec).is_ok() && dist.version != spec {
+        bail!(
+            "the registry answered {pkg}@{spec} with version {} — refusing a release other than the one pinned",
+            dist.version
+        );
+    }
+    Ok(dist)
+}
+
+fn resolve_version_unchecked(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
     let spec = spec.trim();
     let base = cfg.base.trim_end_matches('/');
     let is_exact = semver::Version::parse(spec).is_ok();
@@ -1699,6 +1759,39 @@ mod tests {
             Some(Auth::Bearer("${NPM_TOKEN}".to_string())),
             "an untrusted auth line must stay literal, never expand the secret"
         );
+    }
+
+    /// The environment's credential travels with the environment's registry and
+    /// stays scoped to it: Yarn's pair arrives host-scoped, Bun's token unscoped
+    /// and is pinned to the registry the environment names, and it outranks the
+    /// files.
+    #[test]
+    fn env_auth_goes_with_the_env_registry_and_outranks_the_files() {
+        let reg = "http://127.0.0.1:4873/";
+        let none = |_: &str| None;
+        let yarn = env_auth_text(
+            &[
+                ("registry".into(), reg.into()),
+                ("//127.0.0.1:4873/:_authToken".into(), "yarn-tok".into()),
+            ],
+            Some(reg),
+        );
+        let user = "//127.0.0.1:4873/:_authToken=file-tok\n";
+        assert_eq!(
+            parse_npmrc_auth(&[(user, true), (&yarn, true)], reg, none),
+            Some(Auth::Bearer("yarn-tok".to_string()))
+        );
+        assert_eq!(
+            parse_npmrc_auth(&[(&yarn, true)], "https://registry.npmjs.org/", none),
+            None,
+            "the token must not reach another host"
+        );
+        let bun = env_auth_text(&[("_authToken".into(), "bun-tok".into())], Some(reg));
+        assert_eq!(
+            parse_npmrc_auth(&[(&bun, true)], reg, none),
+            Some(Auth::Bearer("bun-tok".to_string()))
+        );
+        assert!(env_auth_text(&[("_authToken".into(), "bun-tok".into())], None).is_empty());
     }
 
     /// A TRUSTED source (the user `~/.npmrc`, or a project file opted in via the

@@ -11871,14 +11871,20 @@ fn shim_plan_at(
     use nub_core::pm::resolve::{self, PmTarget};
     use nub_core::pm::shim::{self, Nesting, ShimDecision, ShimName};
 
-    let target = resolve::resolve_target(cwd);
-    // A pin field nub can't use (a dist-tag such as `yarn@stable`) runs the
-    // project unpinned — but says so, naming the field and why.
-    if target.is_none()
-        && let Some(w) = resolve::unusable_pin(cwd)
-    {
+    let resolution = resolve::resolve_target_with_source(cwd);
+    // A range pnpm 10+ ignores in `packageManager` still runs, with the warning
+    // `nub pm which` prints. A pin field nub can't use at all (a dist-tag such
+    // as `yarn@stable`) runs the project unpinned — but says so too.
+    if let Some(res) = &resolution {
+        for w in &res.warnings {
+            if matches!(w, resolve::PinWarning::RangeInPackageManager { .. }) {
+                eprintln!("{w}");
+            }
+        }
+    } else if let Some(w) = resolve::unusable_pin(cwd) {
         eprintln!("{w}");
     }
+    let target = resolution.map(|r| r.target);
     let pin_state = shim_pin_state(cwd, target.as_ref());
 
     // A GLOBAL op (`npm install -g`, `yarn global add`, `npm ls -g`) writes the
