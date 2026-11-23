@@ -626,12 +626,33 @@ pub(crate) fn pnpm_lockfile_integrity(dir: &Path, version: &str) -> Option<Strin
         .map(str::to_string)
 }
 
+/// The pnpm version `<dir>/pnpm-lock.yaml`'s env document records — what a
+/// pnpm 11.1.3+ `devEngines.packageManager` range runs when it allows it.
+pub(crate) fn pnpm_lockfile_version(dir: &Path) -> Option<String> {
+    let file = std::fs::File::open(dir.join("pnpm-lock.yaml")).ok()?;
+    let env = aube_lockfile::pnpm::read_env_document(file).ok()??;
+    aube_lockfile::pnpm::EnvLockfile::parse(&env)?
+        .package_manager_dependencies()?
+        .get("pnpm")
+        .map(|dep| dep.version.clone())
+}
+
 pub(crate) fn sync_pnpm_package_manager_pin(root: &Path) -> Result<Option<String>> {
+    record_pnpm_package_manager_pin(root, None)
+}
+
+/// [`sync_pnpm_package_manager_pin`], moving a range pin's record to `target`
+/// (`nub pm update`) instead of keeping the version already recorded.
+pub(crate) fn record_pnpm_package_manager_pin(
+    root: &Path,
+    target: Option<&str>,
+) -> Result<Option<String>> {
     let session = engine_session_quiet(Some(root))?;
     session
         .runtime
-        .block_on(aube::package_manager_pin::sync_pnpm_env_lockfile(
+        .block_on(aube::package_manager_pin::record_pnpm_env_lockfile(
             root,
+            target,
             aube_registry::NetworkMode::Online,
         ))
         .map_err(|report| anyhow::anyhow!("{}", present::render_report(&report)))
@@ -1708,6 +1729,7 @@ pub(crate) fn register_incumbent_probe() {
             aube_registry::config::env_config_entries()
         },
         pnpm_lockfile_integrity,
+        pnpm_lockfile_version,
     });
 }
 

@@ -344,8 +344,7 @@ const TAG_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// npm rejects publishing a tag that parses as a version or range, so the three
 /// classes are disjoint.
 fn is_dist_tag(spec: &str) -> bool {
-    semver::Version::parse(spec).is_err()
-        && semver::VersionReq::parse(&registry::normalize_range(spec)).is_err()
+    semver::Version::parse(spec).is_err() && registry::PmRange::parse(spec).is_none()
 }
 
 /// The tag-resolution record: `<pm_store>/.resolved-tags.json`, a flat
@@ -447,7 +446,7 @@ pub fn pm_version_cached(pm: super::Pm, version: &str, store_root: &Path) -> boo
 /// out of the scan, and an incomplete version dir is passed over for the next
 /// highest runnable one.
 fn best_cached_match(pm_store: &Path, spec: &str) -> Option<(String, PathBuf)> {
-    let req = semver::VersionReq::parse(&registry::normalize_range(spec)).ok()?;
+    let req = registry::PmRange::parse(spec)?;
     let versions = std::fs::read_dir(pm_store).ok()?;
     let (best, bin) = versions
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
@@ -823,8 +822,8 @@ pub fn resolve_pm_dist(
     // releases live in `@yarnpkg/cli-dist`: the newest match across both
     // packages wins, and a Berry pick provisions as Berry.
     if pm == super::Pm::Yarn
-        && semver::Version::parse(spec.trim()).is_err()
-        && semver::VersionReq::parse(&registry::normalize_range(spec)).is_ok()
+        && semver::Version::parse(aube_semver::js_trim(spec)).is_err()
+        && registry::PmRange::parse(spec).is_some()
     {
         let classic = registry::resolve_version_authed(cfg, pm.registry_package(), spec);
         let berry =

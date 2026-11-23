@@ -66,6 +66,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "aube-semver"
+version = "2.2.9"
+dependencies = [
+ "regex",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1005,6 +1012,7 @@ name = "nub-core"
 version = "0.11.2"
 dependencies = [
  "anyhow",
+ "aube-semver",
  "blake3",
  "camino",
  "dirs-next",

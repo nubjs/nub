@@ -53,6 +53,9 @@ pub enum PinSource {
     PackageManager,
     /// The `package.json#devEngines.packageManager` fallback.
     DevEngines,
+    /// The pnpm `pnpm-lock.yaml` records in `packageManagerDependencies`, inside
+    /// a `devEngines.packageManager` range (see [`apply_pnpm_lockfile_pin`]).
+    PnpmLockfile,
 }
 
 impl std::fmt::Display for PinSource {
@@ -62,6 +65,7 @@ impl std::fmt::Display for PinSource {
             PinSource::YarnPath => ".yarnrc.yml yarnPath",
             PinSource::PackageManager => "packageManager",
             PinSource::DevEngines => "devEngines.packageManager",
+            PinSource::PnpmLockfile => "pnpm-lock.yaml within devEngines.packageManager",
         })
     }
 }
@@ -211,6 +215,7 @@ pub fn resolve_target_with_source(cwd: &Path) -> Option<PmTargetResolution> {
         // here (resolve_pin_with_source is the channel that returns them).
         return None;
     };
+    let (pin, source) = apply_pnpm_lockfile_pin(pin, source, &manifest, cwd);
     Some(PmTargetResolution {
         target: PmTarget::Provision(apply_yarnrc_signal(pin, cwd)),
         source,
@@ -244,6 +249,7 @@ pub fn resolve_pin_with_source(cwd: &Path) -> Option<PmPinResolution> {
     let manifest = root_manifest(cwd)?;
     let resolved = pin_from_manifest(&manifest);
     let (pin, source) = resolved.pin?;
+    let (pin, source) = apply_pnpm_lockfile_pin(pin, source, &manifest, cwd);
     Some(PmPinResolution {
         pin: apply_yarnrc_signal(pin, cwd),
         source,
@@ -270,6 +276,74 @@ pub fn unusable_pin(cwd: &Path) -> Option<PinWarning> {
         matches!(w, PinWarning::Ignored { spec, .. }
             if matches!(spec.split('@').next(), Some("npm" | "pnpm" | "yarn")))
     })
+}
+
+/// A pnpm `devEngines.packageManager` range with no `packageManager` field runs
+/// the pnpm `pnpm-lock.yaml` records in `packageManagerDependencies`, when the
+/// range allows it, as pnpm itself does: pnpm 11.1.3 and later record the pnpm
+/// they run there and keep that record while the range allows it. Without
+/// this, every run would re-resolve the newest release in range, drifting from
+/// the lockfile as new releases ship, and a cold download would find no
+/// project-pinned digest for the version it fetched. A record the range does
+/// not allow, or one below 11.1.3, leaves the range to resolve as before. So
+/// does `onFail: "ignore"`, under which pnpm neither records nor follows the
+/// pin and stays on the pnpm that launched it.
+fn apply_pnpm_lockfile_pin(
+    pin: PmPin,
+    source: PinSource,
+    manifest: &serde_json::Value,
+    cwd: &Path,
+) -> (PmPin, PinSource) {
+    if source != PinSource::DevEngines || pin.pm != Pm::Pnpm || dev_engines_ignored(manifest) {
+        return (pin, source);
+    }
+    let Some(range) = pin.version.as_deref() else {
+        return (pin, source);
+    };
+    if semver::Version::parse(range).is_ok() {
+        return (pin, source);
+    }
+    let recorded = crate::incumbent::pnpm_lockfile_version(&pin_target_dir(cwd))
+        .filter(|v| pnpm_records_own_pin(v) && pnpm_range_allows(range, v));
+    match recorded {
+        Some(version) => (
+            PmPin {
+                pm: Pm::Pnpm,
+                version: Some(version),
+            },
+            PinSource::PnpmLockfile,
+        ),
+        None => (pin, source),
+    }
+}
+
+/// Whether the manifest's `devEngines.packageManager` sets `onFail: "ignore"`.
+fn dev_engines_ignored(manifest: &serde_json::Value) -> bool {
+    manifest
+        .get("devEngines")
+        .and_then(|d| d.get("packageManager"))
+        .and_then(|p| p.get("onFail"))
+        .and_then(|f| f.as_str())
+        == Some("ignore")
+}
+
+/// Whether the workspace-root `devEngines.packageManager` sets
+/// `onFail: "ignore"`: pnpm then keeps no record of the pin in
+/// `pnpm-lock.yaml`, so `nub pm update` keeps the hashed `packageManager`.
+pub fn pnpm_pin_ignored(cwd: &Path) -> bool {
+    root_manifest(cwd).is_some_and(|m| dev_engines_ignored(&m))
+}
+
+/// Whether `range` admits `version`, read with npm's grammar as pnpm reads it
+/// and as provisioning resolves the range against the registry.
+fn pnpm_range_allows(range: &str, version: &str) -> bool {
+    match (
+        super::registry::PmRange::parse(range),
+        semver::Version::parse(version),
+    ) {
+        (Some(range), Ok(version)) => range.matches(&version),
+        _ => false,
+    }
 }
 
 /// A version-less yarn pin (a name-only `devEngines` entry, a URL
@@ -427,8 +501,7 @@ fn disagreement_warning(
     let parsed = semver::Version::parse(pm_bare).ok()?;
     let accepts = |(_, version): &(&str, Option<&str>)| {
         version.is_none_or(|range| {
-            semver::VersionReq::parse(&crate::pm::registry::normalize_range(range))
-                .map_or(true, |req| req.matches(&parsed))
+            crate::pm::registry::PmRange::parse(range).is_none_or(|req| req.matches(&parsed))
         })
     };
     if same_pm.iter().any(accepts) {
@@ -877,6 +950,26 @@ pub fn pnpm_compares_pin_hashes(version: &str) -> bool {
     semver::Version::parse(version).is_ok_and(|v| v >= semver::Version::new(11, 8, 0))
 }
 
+/// Whether pnpm `version`, pinned by `devEngines.packageManager`, records its
+/// own integrity in `pnpm-lock.yaml`'s `packageManagerDependencies` on its
+/// first command, creating the lockfile when there is none. 11.1.3 is the
+/// first release that does; 11.0.0 to 11.1.2 leave the pin out of the
+/// lockfile (measured against every minor from 11.0 to 11.29, and 12.23).
+pub fn pnpm_records_own_pin(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v >= semver::Version::new(11, 1, 3))
+}
+
+/// Drop `packageManager` from the workspace-root manifest, for a pnpm 11.1.3+
+/// project pinned by a `devEngines.packageManager` range: pnpm warns on every
+/// command when the two fields hold different versions, and the version a
+/// range resolves to lives in `pnpm-lock.yaml` instead.
+pub fn remove_package_manager_pin(cwd: &Path) -> Result<()> {
+    edit_manifest(cwd, |obj| {
+        obj.shift_remove("packageManager");
+    })?;
+    Ok(())
+}
+
 /// Whether `packageManager: pnpm@<v>` and a `devEngines.packageManager.version`
 /// form the pnpm 11+ pair [`write_declared_pm`] writes (and `pnpm init` writes):
 /// the same exact version in both, hash ignored. `nub pm update` floats such a
@@ -899,6 +992,43 @@ pub fn nub_shaped_range(range: &str) -> bool {
     range
         .strip_prefix('^')
         .is_some_and(|v| semver::Version::parse(v).is_ok())
+}
+
+/// Whether `nub pm update` rewrites `devEngines.packageManager` along with the
+/// pin, given its `range` and the `packageManager` version beside it (`None`
+/// when that field is absent). Only the pairs Nub itself writes move with the
+/// pin: a pnpm 11+ exact pair, or `^x.y.z` beside `packageManager` x.y.z with
+/// the `onFail: "warn"` Nub writes. Any other range is the user's and is kept:
+/// a bare `^x.y.z` with no `packageManager` (what `pnpm init` writes), or a
+/// caret under another `onFail` beside the hashed pin an earlier update left
+/// as its fallback. No range at all gets one.
+pub fn update_rewrites_dev_engines(
+    name: &str,
+    range: Option<&str>,
+    package_manager_version: Option<&str>,
+    on_fail: Option<&str>,
+) -> bool {
+    let Some(range) = range else {
+        return true;
+    };
+    let Some(pin) = package_manager_version else {
+        return false;
+    };
+    let bare = pin.split_once('+').map_or(pin, |(b, _)| b).trim();
+    is_pnpm_11_pair(name, range, pin)
+        || (nub_shaped_range(range)
+            && range.strip_prefix('^') == Some(bare)
+            && on_fail == Some("warn"))
+}
+
+/// The workspace-root `devEngines.packageManager.onFail`, when set.
+pub fn dev_engines_on_fail(cwd: &Path) -> Option<String> {
+    root_manifest(cwd)?
+        .get("devEngines")?
+        .get("packageManager")?
+        .get("onFail")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Detected surface formatting of a manifest: the per-level indent unit (taken
@@ -1575,6 +1705,60 @@ mod tests {
                 !nub_shaped_range(hand_written),
                 "{hand_written:?} must read as hand-written"
             );
+        }
+    }
+
+    #[test]
+    fn update_moves_only_the_dev_engines_ranges_nub_writes() {
+        // Nub's own pairs move with the pin.
+        assert!(update_rewrites_dev_engines(
+            "pnpm",
+            Some("^9.1.0"),
+            Some("9.1.0+sha512.ab"),
+            Some("warn")
+        ));
+        assert!(update_rewrites_dev_engines(
+            "pnpm",
+            Some("11.29.0"),
+            Some("11.29.0"),
+            Some("warn")
+        ));
+        assert!(update_rewrites_dev_engines(
+            "pnpm",
+            None,
+            Some("9.1.0"),
+            None
+        ));
+        // `pnpm init` writes a caret range with no packageManager: the user's.
+        assert!(!update_rewrites_dev_engines(
+            "pnpm",
+            Some("^11.8.0"),
+            None,
+            Some("download")
+        ));
+        // A caret over another version, or a hand-written range, stays too.
+        assert!(!update_rewrites_dev_engines(
+            "pnpm",
+            Some("^11.8.0"),
+            Some("11.29.0"),
+            Some("warn")
+        ));
+        assert!(!update_rewrites_dev_engines(
+            "pnpm",
+            Some(">=11.20.0 <12"),
+            Some("11.29.0"),
+            Some("warn")
+        ));
+        // A second update of an authored `^11.29.0` under `onFail: "ignore"`
+        // finds the hashed pin the first one left; that is not Nub's pair, which
+        // always carries `onFail: "warn"`.
+        for on_fail in [Some("ignore"), Some("download"), None] {
+            assert!(!update_rewrites_dev_engines(
+                "pnpm",
+                Some("^11.29.0"),
+                Some("11.29.0+sha512.ab"),
+                on_fail
+            ));
         }
     }
 

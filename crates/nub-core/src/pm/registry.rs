@@ -640,7 +640,7 @@ fn origin_of(url: &str) -> Option<&str> {
 /// `>=9 <11` pin resolves rather than erroring. The `||` OR operator is NOT
 /// supported (Cargo's `semver` has no OR) — vanishingly rare in a PM pin.
 fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
-    let spec = spec.trim();
+    let spec = aube_semver::js_trim(spec);
     let versions = packument
         .get("versions")
         .and_then(Value::as_object)
@@ -664,7 +664,7 @@ fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
     }
 
     // 3. Otherwise treat the spec as a semver range and pick the highest match.
-    let req = semver::VersionReq::parse(&normalize_range(spec)).with_context(|| {
+    let req = PmRange::parse(spec).with_context(|| {
         format!("\"{spec}\" is not an exact version, dist-tag, or semver range")
     })?;
     let best = versions
@@ -675,6 +675,34 @@ fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
         .map(|(_, key)| key)
         .with_context(|| format!("no published version satisfies \"{spec}\""))?;
     dist_from_meta(best, &versions[best])
+}
+
+/// A package-manager version range, read and matched as npm's `semver` reads
+/// them, which is how pnpm and the vendored engine read them
+/// (`11.20.0 - 11.29.0`, `^11.20.0 || ^12.0.0`). npm's grammar has no commas,
+/// so a comma-separated spec keeps Cargo's reading, as before npm's grammar
+/// was used; any other spec npm rejects is no range.
+pub(crate) enum PmRange {
+    Npm(aube_semver::Range),
+    Cargo(semver::VersionReq),
+}
+
+impl PmRange {
+    pub(crate) fn parse(spec: &str) -> Option<Self> {
+        if spec.contains(',') {
+            return semver::VersionReq::parse(&normalize_range(spec))
+                .ok()
+                .map(PmRange::Cargo);
+        }
+        aube_semver::Range::parse(spec).map(PmRange::Npm)
+    }
+
+    pub(crate) fn matches(&self, version: &semver::Version) -> bool {
+        match self {
+            PmRange::Npm(range) => range.satisfies_str(&version.to_string()),
+            PmRange::Cargo(req) => req.matches(version),
+        }
+    }
 }
 
 /// Translate a node-semver range into the form Cargo's `semver` crate parses:
@@ -928,7 +956,7 @@ pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Re
     // or a packument missing the key, whose fallback reads the spec as a caret
     // range) would otherwise be installed, and checked, as a release nobody
     // pinned.
-    let spec = spec.trim();
+    let spec = aube_semver::js_trim(spec);
     if semver::Version::parse(spec).is_ok() && dist.version != spec {
         bail!(
             "the registry answered {pkg}@{spec} with version {} — refusing a release other than the one pinned",
@@ -939,10 +967,10 @@ pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Re
 }
 
 fn resolve_version_unchecked(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
-    let spec = spec.trim();
+    let spec = aube_semver::js_trim(spec);
     let base = cfg.base.trim_end_matches('/');
     let is_exact = semver::Version::parse(spec).is_ok();
-    let is_range = !is_exact && semver::VersionReq::parse(&normalize_range(spec)).is_ok();
+    let is_range = !is_exact && PmRange::parse(spec).is_some();
     if !is_range {
         let url = format!("{base}/{pkg}/{spec}");
         match download::fetch_text_accept_auth(&url, None, cfg.auth.as_ref()) {
@@ -1254,6 +1282,147 @@ mod tests {
             format!("{err:#}").contains("resolving pnpm@../npm/10.9.0"),
             "a traversing spec must fail to resolve: {err:#}"
         );
+    }
+
+    #[test]
+    fn registry_resolution_reads_npm_range_grammar() {
+        let meta = |v: &str| {
+            serde_json::json!({
+                "name": "pnpm",
+                "bin": { "pnpm": "bin/pnpm.cjs" },
+                "dist": { "tarball": format!("https://r/pnpm-{v}.tgz"), "shasum": "00" }
+            })
+        };
+        let packument = serde_json::json!({
+            "dist-tags": { "latest": "13.0.0" },
+            "versions": {
+                "11.19.0": meta("11.19.0"),
+                "11.29.0": meta("11.29.0"),
+                "12.23.0": meta("12.23.0"),
+                "13.0.0": meta("13.0.0")
+            }
+        });
+        let pick = |spec: &str| resolve_dist(&packument, spec).map(|d| d.version);
+        assert_eq!(pick("^11.20.0 || ^12.0.0").unwrap(), "12.23.0");
+        assert_eq!(pick("11.20.0 - 11.29.0").unwrap(), "11.29.0");
+        // npm reads the first set as empty, so only the second can match.
+        assert_eq!(pick(">=11.29.0 <=11.20.* || 11.19.0").unwrap(), "11.19.0");
+        assert!(pick(">=12 <11").is_err());
+        // Trimmed as JavaScript trims, as the lockfile check reads the range:
+        // U+FEFF is whitespace there, U+0085 is not.
+        assert_eq!(
+            pick("\u{FEFF}^11.20.0 || ^12.0.0\u{FEFF}").unwrap(),
+            "12.23.0"
+        );
+        assert!(pick("\u{85}^11.20.0").is_err());
+        assert!(pick("^11.20.0\u{85}").is_err());
+    }
+
+    /// A range npm rejects is rejected, never rewritten into one it accepts,
+    /// and no part's arithmetic can overflow. Verdicts are npm `semver`
+    /// 7.8.6's `validRange` and `satisfies`.
+    #[test]
+    fn pm_ranges_reject_what_npm_rejects() {
+        for spec in [
+            "<=11.029",
+            "1.02.3",
+            "<=01",
+            "~1.02",
+            "<=99999999999999999999",
+            "<=18446744073709551615",
+            "^18446744073709551615",
+            "<=9007199254740991",
+        ] {
+            assert!(PmRange::parse(spec).is_none(), "{spec}");
+        }
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        let empty = PmRange::parse(">=11.29.0 <=11.20.0").expect("npm accepts an empty set");
+        assert!(
+            ["11.0.0", "11.20.0", "11.29.0", "12.0.0"]
+                .iter()
+                .all(|x| !empty.matches(&v(x)))
+        );
+        let either = PmRange::parse(">=11.29.0 <=11.20.* || 11.15.0").expect("parses");
+        assert!(either.matches(&v("11.15.0")));
+        assert!(!either.matches(&v("11.20.0")) && !either.matches(&v("11.29.0")));
+    }
+
+    /// Every range × version verdict here is npm's own: `semver` 7.8.6's
+    /// `satisfies`, recorded 2026-11-23. A comma-separated range, which npm
+    /// rejects, keeps Cargo's reading, as before npm's grammar was used.
+    #[test]
+    fn pm_ranges_match_npm_semver() {
+        let versions = [
+            "10.0.0",
+            "11.0.0-rc.1",
+            "11.0.0",
+            "11.2.0",
+            "11.2.3",
+            "11.2.9",
+            "11.3.0",
+            "11.29.0",
+            "11.29.5",
+            "11.30.0",
+            "12.0.0-rc.1",
+            "12.0.0",
+            "13.0.0",
+        ];
+        let npm = [
+            ("<=11", "YnYYYYYYYYnnn"),
+            ("<= 11", "YnYYYYYYYYnnn"),
+            ("<=11.x", "YnYYYYYYYYnnn"),
+            ("<=11.*", "YnYYYYYYYYnnn"),
+            ("<=11.2", "YnYYYYnnnnnnn"),
+            ("<=11.2.x", "YnYYYYnnnnnnn"),
+            ("<=11.2.3", "YnYYYnnnnnnnn"),
+            ("<11", "Ynnnnnnnnnnnn"),
+            ("<11.2", "YnYnnnnnnnnnn"),
+            (">11", "nnnnnnnnnnnYY"),
+            (">11.2", "nnnnnnYYYYnYY"),
+            (">=11.x", "nnYYYYYYYYnYY"),
+            ("~11.2", "nnnYYYnnnnnnn"),
+            ("^11.2", "nnnYYYYYYYnnn"),
+            (">=9 <=11", "YnYYYYYYYYnnn"),
+            ("<=11 || >=13", "YnYYYYYYYYnnY"),
+            (">=11.20.0 <=11.29", "nnnnnnnYYnnnn"),
+            ("11.20.0 - 11.29", "nnnnnnnYYnnnn"),
+            ("^11.20.0 || ^12.0.0", "nnnnnnnYYYnYn"),
+        ];
+        for (range, row) in npm {
+            let parsed = PmRange::parse(range).unwrap_or_else(|| panic!("{range} parses"));
+            for (version, want) in versions.iter().zip(row.chars()) {
+                let got = parsed.matches(&semver::Version::parse(version).unwrap());
+                assert_eq!(got, want == 'Y', "{range} against {version}");
+            }
+        }
+        let comma = PmRange::parse(">=11.25.0, <12.0.0").expect("comma range parses");
+        assert!(!comma.matches(&semver::Version::parse("11.20.0").unwrap()));
+        assert!(comma.matches(&semver::Version::parse("11.29.0").unwrap()));
+    }
+
+    #[test]
+    fn pm_ranges_read_npm_grammar() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        let allows = |spec: &str, version: &str| {
+            PmRange::parse(spec)
+                .unwrap_or_else(|| panic!("{spec} parses"))
+                .matches(&v(version))
+        };
+        // Ranges Cargo's grammar can't read, which pnpm writes and accepts.
+        assert!(allows("11.20.0 - 11.29.0", "11.29.0"));
+        assert!(!allows("11.20.0 - 11.29.0", "11.29.1"));
+        assert!(allows("^11.20.0 || ^12.0.0", "12.23.0"));
+        assert!(!allows("^11.20.0 || ^12.0.0", "11.19.0"));
+        // The forms read before keep their meaning.
+        assert!(allows(">= 9 < 10", "9.5.0") && !allows(">= 9 < 10", "10.0.0"));
+        assert!(allows("9.1.0", "9.1.0") && !allows("9.1.0", "9.1.1"));
+        assert!(allows("9.1", "9.1.7") && !allows("9.1", "9.2.0"));
+        assert!(allows("10", "10.4.0") && allows(">=9, <11", "10.0.0"));
+        assert!(!allows("^11.0.0", "11.1.0-rc.1"));
+        // Dist-tags are not ranges.
+        for tag in ["latest", "next", "berry", "stable"] {
+            assert!(PmRange::parse(tag).is_none(), "{tag}");
+        }
     }
 
     #[test]
