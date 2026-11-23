@@ -69,9 +69,12 @@ reqwest = { version = "0.13", default-features = false, features = [
 regex = "1"
 rustc-hash = "2"
 semver = "1"
-# npm's range grammar for package-manager pins (`11.20.0 - 11.29.0`,
-# `^11 || ^12`), the grammar pnpm and the vendored engine read them with.
-node-semver = "2"
+# Package-manager pin ranges (`11.20.0 - 11.29.0`, `^11 || ^12`), read and
+# matched exactly as npm's `semver` does, which is how pnpm reads them. The
+# vendored engine reads pins through the same crate, so the version a range
+# launches and the version pnpm-lock.yaml records agree. A dependency-free leaf
+# (regex only), unlike the rest of the engine.
+aube-semver = { path = "../../vendor/aube/crates/aube-semver" }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` makes serde_json::Map keep INSERTION order (IndexMap-backed).
 # Load-bearing for the pin writers in `pm::resolve`: a `package.json` round-trip
@@ -160,6 +163,9 @@ signal-hook = "0.3"
 
 [dev-dependencies]
 criterion = "0.5"
+# npm's range grammar, to check that `nub node pin` writes devEngines ranges npm
+# reads the same way Nub does. Already in the workspace through the vendored PM.
+node-semver = "2"
 blake3 = "1"
 # Encoder for the runtime_cache unit tests (they build a tiny tar.zst to exercise
 # the decode/unpack/rename/GC path). The PRODUCT decodes with pure-Rust `ruzstd`;

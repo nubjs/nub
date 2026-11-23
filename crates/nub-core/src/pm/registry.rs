@@ -677,13 +677,13 @@ fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
     dist_from_meta(best, &versions[best])
 }
 
-/// A package-manager version range, read with npm's grammar as pnpm and the
-/// vendored engine read it (`11.20.0 - 11.29.0`, `^11.20.0 || ^12.0.0`). npm's
-/// grammar has no commas, and the `node_semver` crate silently drops the
-/// comparator before one, so a comma-separated spec is read with Cargo's
-/// grammar alone, as it was before npm's.
+/// A package-manager version range, read and matched as npm's `semver` reads
+/// them, which is how pnpm and the vendored engine read them
+/// (`11.20.0 - 11.29.0`, `^11.20.0 || ^12.0.0`). npm's grammar has no commas,
+/// so a comma-separated spec keeps Cargo's reading, as before npm's grammar
+/// was used; any other spec npm rejects is no range.
 pub(crate) enum PmRange {
-    Npm(node_semver::Range),
+    Npm(aube_semver::Range),
     Cargo(semver::VersionReq),
 }
 
@@ -694,73 +694,14 @@ impl PmRange {
                 .ok()
                 .map(PmRange::Cargo);
         }
-        node_semver::Range::parse(desugar_partial_lte(spec))
-            .ok()
-            .map(PmRange::Npm)
-            .or_else(|| {
-                semver::VersionReq::parse(&normalize_range(spec))
-                    .ok()
-                    .map(PmRange::Cargo)
-            })
+        aube_semver::Range::parse(spec).map(PmRange::Npm)
     }
 
     pub(crate) fn matches(&self, version: &semver::Version) -> bool {
         match self {
-            PmRange::Npm(range) => {
-                node_semver::Version::parse(version.to_string()).is_ok_and(|v| range.satisfies(&v))
-            }
+            PmRange::Npm(range) => range.satisfies_str(&version.to_string()),
             PmRange::Cargo(req) => req.matches(version),
         }
-    }
-}
-
-/// Rewrite `<=` over a partial version the way npm's `semver` reads it:
-/// `<=11` is `<12.0.0-0` and `<=11.2` is `<11.3.0-0`. The `node_semver` crate
-/// reads them as `<=11.0.0-0` and `<=11.2.0-0`, which leaves out every stable
-/// 11.x (or 11.2.x) npm admits. Every other comparator already agrees with
-/// npm. The vendored engine's `package_manager_pin` carries the same rewrite,
-/// so the version a range resolves to and the record pnpm-lock.yaml keeps agree.
-pub(crate) fn desugar_partial_lte(spec: &str) -> String {
-    spec.split("||")
-        .map(|set| {
-            let mut tokens: Vec<String> = Vec::new();
-            for token in set.split_whitespace() {
-                match tokens.last_mut() {
-                    Some(op) if op == "<=" => op.push_str(token),
-                    _ => tokens.push(token.to_string()),
-                }
-            }
-            tokens
-                .into_iter()
-                .map(|token| match token.strip_prefix("<=") {
-                    Some(version) => partial_upper_bound(version).unwrap_or(token),
-                    None => token,
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join(" || ")
-}
-
-/// `11` or `11.x` → `<12.0.0-0`; `11.2` or `11.2.*` → `<11.3.0-0`. `None` for a
-/// full version or anything else, which stays as written.
-fn partial_upper_bound(version: &str) -> Option<String> {
-    let version = version.trim_start_matches(['v', '=']);
-    let wildcard = |p: &str| matches!(p, "x" | "X" | "*");
-    let parts: Vec<&str> = version.split('.').collect();
-    let numbers: Vec<u64> = parts
-        .iter()
-        .take_while(|p| !wildcard(p))
-        .map(|p| p.parse().ok())
-        .collect::<Option<_>>()?;
-    if parts.len() > 3 || !parts[numbers.len()..].iter().all(|p| wildcard(p)) {
-        return None;
-    }
-    match numbers.as_slice() {
-        [major] => Some(format!("<{}.0.0-0", major + 1)),
-        [major, minor] => Some(format!("<{major}.{}.0-0", minor + 1)),
-        _ => None,
     }
 }
 
@@ -1364,6 +1305,38 @@ mod tests {
         let pick = |spec: &str| resolve_dist(&packument, spec).map(|d| d.version);
         assert_eq!(pick("^11.20.0 || ^12.0.0").unwrap(), "12.23.0");
         assert_eq!(pick("11.20.0 - 11.29.0").unwrap(), "11.29.0");
+        // npm reads the first set as empty, so only the second can match.
+        assert_eq!(pick(">=11.29.0 <=11.20.* || 11.19.0").unwrap(), "11.19.0");
+        assert!(pick(">=12 <11").is_err());
+    }
+
+    /// A range npm rejects is rejected, never rewritten into one it accepts,
+    /// and no part's arithmetic can overflow. Verdicts are npm `semver`
+    /// 7.8.6's `validRange` and `satisfies`.
+    #[test]
+    fn pm_ranges_reject_what_npm_rejects() {
+        for spec in [
+            "<=11.029",
+            "1.02.3",
+            "<=01",
+            "~1.02",
+            "<=99999999999999999999",
+            "<=18446744073709551615",
+            "^18446744073709551615",
+            "<=9007199254740991",
+        ] {
+            assert!(PmRange::parse(spec).is_none(), "{spec}");
+        }
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        let empty = PmRange::parse(">=11.29.0 <=11.20.0").expect("npm accepts an empty set");
+        assert!(
+            ["11.0.0", "11.20.0", "11.29.0", "12.0.0"]
+                .iter()
+                .all(|x| !empty.matches(&v(x)))
+        );
+        let either = PmRange::parse(">=11.29.0 <=11.20.* || 11.15.0").expect("parses");
+        assert!(either.matches(&v("11.15.0")));
+        assert!(!either.matches(&v("11.20.0")) && !either.matches(&v("11.29.0")));
     }
 
     /// Every range × version verdict here is npm's own: `semver` 7.8.6's

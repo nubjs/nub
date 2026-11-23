@@ -146,69 +146,16 @@ fn engine_packages(version: &node_semver::Version) -> &'static [&'static str] {
     }
 }
 
-/// A pin's range as npm's `semver` reads it, which is how pnpm reads it.
-/// npm's grammar has no commas, and `node_semver` silently drops the
-/// comparator before one, so a comma makes the range invalid, as it is to
-/// pnpm. `<=` over a partial version is rewritten first, because
-/// `node_semver` reads `<=11` as `<=11.0.0-0` where npm reads `<12.0.0-0`.
-/// nub-core's `PmRange` reads a range the same way, so the version a range
-/// launches and the version recorded here agree.
-fn npm_range(spec: &str) -> Option<node_semver::Range> {
-    if spec.contains(',') {
-        return None;
-    }
-    node_semver::Range::parse(desugar_partial_lte(spec)).ok()
-}
-
-/// `<=11` → `<12.0.0-0`, `<=11.2` → `<11.3.0-0`; every other comparator is
-/// left as written.
-fn desugar_partial_lte(spec: &str) -> String {
-    spec.split("||")
-        .map(|set| {
-            let mut tokens: Vec<String> = Vec::new();
-            for token in set.split_whitespace() {
-                match tokens.last_mut() {
-                    Some(op) if op == "<=" => op.push_str(token),
-                    _ => tokens.push(token.to_string()),
-                }
-            }
-            tokens
-                .into_iter()
-                .map(|token| match token.strip_prefix("<=") {
-                    Some(version) => partial_upper_bound(version).unwrap_or(token),
-                    None => token,
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect::<Vec<_>>()
-        .join(" || ")
-}
-
-fn partial_upper_bound(version: &str) -> Option<String> {
-    let version = version.trim_start_matches(['v', '=']);
-    let wildcard = |p: &str| matches!(p, "x" | "X" | "*");
-    let parts: Vec<&str> = version.split('.').collect();
-    let numbers: Vec<u64> = parts
-        .iter()
-        .take_while(|p| !wildcard(p))
-        .map(|p| p.parse().ok())
-        .collect::<Option<_>>()?;
-    if parts.len() > 3 || !parts[numbers.len()..].iter().all(|p| wildcard(p)) {
-        return None;
-    }
-    match numbers.as_slice() {
-        [major] => Some(format!("<{}.0.0-0", major + 1)),
-        [major, minor] => Some(format!("<{major}.{}.0-0", minor + 1)),
-        _ => None,
-    }
+/// A pin's range as npm's `semver` reads it, which is how pnpm reads it. A
+/// comma, which npm's grammar lacks, makes it no range, as it is to pnpm.
+/// nub-core's `PmRange` reads a range through the same crate, so the version
+/// a range launches and the version recorded here agree.
+fn npm_range(spec: &str) -> Option<aube_semver::Range> {
+    aube_semver::Range::parse(spec)
 }
 
 fn satisfies(version: &str, range: &str) -> bool {
-    match (node_semver::Version::parse(version), npm_range(range)) {
-        (Ok(v), Some(r)) => r.satisfies(&v),
-        _ => false,
-    }
+    aube_semver::satisfies(version, range)
 }
 
 /// What the env document needs, decided without the network.
@@ -255,8 +202,12 @@ fn plan(manifest: &Value, existing: Option<&EnvLockfile>, target: Option<&str>) 
     });
     let Some(version) = locked.or_else(|| offline_version(&wanted)) else {
         // A range below pnpm 11 records nothing whichever release it picks.
+        // `node_semver` intersects the comparators of a satisfiable set
+        // correctly; only an empty set, which the satisfiable form leaves
+        // out, does it misread.
         let records = node_semver::Range::parse(">=11.0.0-0").ok();
         let below_11 = npm_range(&wanted.specifier)
+            .and_then(|range| node_semver::Range::parse(range.satisfiable_form()).ok())
             .zip(records)
             .is_some_and(|(range, records)| !range.allows_any(&records));
         return if below_11 {
@@ -444,6 +395,13 @@ fn offline_version(wanted: &WantedPnpm) -> Option<String> {
         .then(|| wanted.specifier.clone())
 }
 
+/// `range` spelled so the resolver, which reads ranges with `node_semver`,
+/// admits what npm admits: npm's canonical comparators (`<=11` is
+/// `<12.0.0-0`), with every set no version satisfies left out.
+fn resolver_range(range: &str) -> String {
+    npm_range(range).map_or_else(|| range.to_string(), |r| r.satisfiable_form())
+}
+
 /// The newest release in `range` the project's `minimumReleaseAge` admits —
 /// the version pnpm itself switches to for a range pin.
 async fn newest_in_range(
@@ -452,7 +410,7 @@ async fn newest_in_range(
     network_mode: aube_registry::NetworkMode,
 ) -> miette::Result<Option<String>> {
     let manifest = aube_manifest::PackageJson {
-        dependencies: BTreeMap::from([("pnpm".to_string(), desugar_partial_lte(range))]),
+        dependencies: BTreeMap::from([("pnpm".to_string(), resolver_range(range))]),
         ..Default::default()
     };
     let graph = resolve(lockfile_dir, &manifest, true, network_mode)
@@ -634,10 +592,39 @@ mod tests {
         assert!(satisfies("12.23.0", "^11.20.0 || ^12.0.0"));
         // npm rejects a comma, so pnpm records nothing for such a pin.
         assert!(!satisfies("11.29.0", ">=11.25.0, <12.0.0"));
+        // npm reads a set whose comparators cannot all hold as empty.
+        assert!(satisfies("11.15.0", ">=11.29.0 <=11.20.* || 11.15.0"));
+        assert!(!satisfies("11.20.0", ">=11.29.0 <=11.20.* || 11.15.0"));
+        assert!(!satisfies("11.29.0", ">=11.29.0 <=11.20.0"));
+        // A range npm rejects pins nothing; no part's arithmetic overflows.
+        for spec in [
+            "<=11.029",
+            "1.02.3",
+            "<=18446744073709551615",
+            "<=9007199254740991",
+        ] {
+            assert!(!satisfies("11.29.0", spec), "{spec}");
+            assert_eq!(
+                wanted(json!({ "devEngines": { "packageManager":
+                    { "name": "pnpm", "version": spec } } })),
+                None,
+                "{spec}"
+            );
+        }
         assert_eq!(
             wanted(json!({ "devEngines": { "packageManager":
                 { "name": "pnpm", "version": ">=11.25.0, <12.0.0" } } })),
             None
+        );
+    }
+
+    #[test]
+    fn the_resolver_gets_npm_s_reading_of_a_range() {
+        assert_eq!(resolver_range("<=11"), "<12.0.0-0");
+        assert_eq!(resolver_range(">=11.29.0 <=11.20.* || 11.15.0"), "11.15.0");
+        assert_eq!(
+            resolver_range("^11.20.0 || ^12.0.0"),
+            ">=11.20.0 <12.0.0-0||>=12.0.0 <13.0.0-0"
         );
     }
 

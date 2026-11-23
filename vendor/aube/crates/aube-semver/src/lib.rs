@@ -1,0 +1,654 @@
+//! Version ranges read and matched exactly as npm's `semver` package (7.x,
+//! `loose: false`, `includePrerelease: false`) reads and matches them.
+//!
+//! The `node-semver` crate disagrees with npm on ranges real manifests use:
+//! it reads `<=11` as `<=11.0.0-0` where npm reads `<12.0.0-0`, it treats two
+//! comparators that cannot both hold (`>=2 <1`) as alternatives rather than
+//! an empty set, it drops the comparator before a comma, and it accepts
+//! leading zeros (`1.02.3`) npm rejects. Each of those picks a version npm,
+//! pnpm and yarn would not, with no error.
+//!
+//! So this is a port of npm's own algorithm rather than a grammar of its
+//! own: the same regular expressions (the bounded `safeRe` forms), the same
+//! rewrite passes in the same order, and comparators kept as a list per
+//! `||` set, every one of which must hold. Arithmetic that npm does in
+//! floating point is checked here; a result past `Number.MAX_SAFE_INTEGER`
+//! is a range npm rejects, so it is rejected, never wrapped.
+
+use regex::{Captures, Regex};
+use std::cmp::Ordering;
+use std::fmt;
+use std::sync::LazyLock;
+
+const MAX_LENGTH: usize = 256;
+const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// npm's `src` tokens, with `\d` spelled `[0-9]` because Rust's `\d` is
+/// Unicode-aware. npm runs the `safeRe` forms, which bound each repetition
+/// against backtracking; Rust's engine cannot backtrack, and bounded
+/// repetition multiplies its compile time, so digits and letters repeat
+/// freely here. Whatever only the bounds would refuse — a part over 256
+/// digits, an identifier over 250 characters — is refused anyway, by
+/// `MAX_SAFE_INTEGER` or by the 256-character limit on a version. `\s*` keeps
+/// the bounded `\s?`, which runs of whitespace never reach: a range's
+/// whitespace is collapsed to single spaces first.
+mod src {
+    pub const NUMERIC: &str = "0|[1-9][0-9]*";
+    pub const NUMERIC_LOOSE: &str = "[0-9]+";
+    pub const NON_NUMERIC: &str = "[0-9]*[a-zA-Z-][a-zA-Z0-9-]*";
+    pub const BUILD_ID: &str = "[a-zA-Z0-9-]+";
+}
+
+fn main_version(n: &str) -> String {
+    format!(r"({n})\.({n})\.({n})")
+}
+
+fn prerelease(n: &str) -> String {
+    let id = format!("(?:{}|{n})", src::NON_NUMERIC);
+    format!(r"(?:-({id}(?:\.{id})*))")
+}
+
+fn prerelease_loose() -> String {
+    let id = format!("(?:{}|{})", src::NON_NUMERIC, src::NUMERIC_LOOSE);
+    format!(r"(?:-?({id}(?:\.{id})*))")
+}
+
+fn build() -> String {
+    format!(r"(?:\+({id}(?:\.{id})*))", id = src::BUILD_ID)
+}
+
+fn full_plain() -> String {
+    format!(
+        "v?{}{}?{}?",
+        main_version(src::NUMERIC),
+        prerelease(src::NUMERIC),
+        build()
+    )
+}
+
+fn loose_plain() -> String {
+    format!(
+        r"[v=\s]*{}{}?{}?",
+        main_version(src::NUMERIC_LOOSE),
+        prerelease_loose(),
+        build()
+    )
+}
+
+fn xrange_plain() -> String {
+    let id = format!(r"{}|x|X|\*", src::NUMERIC);
+    format!(
+        r"[v=\s]*({id})(?:\.({id})(?:\.({id})(?:{})?{}?)?)?",
+        prerelease(src::NUMERIC),
+        build()
+    )
+}
+
+const GTLT: &str = "((?:<|>)?=?)";
+
+fn re(pattern: String) -> Regex {
+    Regex::new(&pattern).expect("npm semver pattern compiles")
+}
+
+static FULL: LazyLock<Regex> = LazyLock::new(|| re(format!("^{}$", full_plain())));
+static COMPARATOR: LazyLock<Regex> =
+    LazyLock::new(|| re(format!(r"^{GTLT}\s?({})$|^$", full_plain())));
+static XRANGE: LazyLock<Regex> = LazyLock::new(|| re(format!(r"^{GTLT}\s?{}$", xrange_plain())));
+static TILDE: LazyLock<Regex> = LazyLock::new(|| re(format!("^(?:~>?){}$", xrange_plain())));
+static CARET: LazyLock<Regex> = LazyLock::new(|| re(format!(r"^(?:\^){}$", xrange_plain())));
+static HYPHEN: LazyLock<Regex> =
+    LazyLock::new(|| re(format!(r"^\s?({x})\s-\s({x})\s?$", x = xrange_plain())));
+static COMPARATOR_TRIM: LazyLock<Regex> = LazyLock::new(|| {
+    re(format!(
+        r"(\s?){GTLT}\s?({}|{})",
+        loose_plain(),
+        xrange_plain()
+    ))
+});
+static TILDE_TRIM: LazyLock<Regex> = LazyLock::new(|| re(r"(\s?)(?:~>?)\s".to_string()));
+static CARET_TRIM: LazyLock<Regex> = LazyLock::new(|| re(r"(\s?)(?:\^)\s".to_string()));
+static STAR: LazyLock<Regex> = LazyLock::new(|| re(r"(<|>)?=?\s?\*".to_string()));
+static GTE0: LazyLock<Regex> = LazyLock::new(|| re(r"^\s?>=\s?0\.0\.0\s?$".to_string()));
+/// npm strips build metadata with the unbounded `src` form, globally.
+static BUILD_STRIP: LazyLock<Regex> =
+    LazyLock::new(|| re(r"(?:\+([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*))".to_string()));
+static BUILD_SAFE: LazyLock<Regex> = LazyLock::new(|| re(build()));
+static WHITESPACE: LazyLock<Regex> = LazyLock::new(|| re(r"\s+".to_string()));
+
+/// One dot-separated prerelease identifier. A numeric one keeps its digits
+/// (canonical, no leading zero), so any length compares exactly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Identifier {
+    Numeric(String),
+    Alphanumeric(String),
+}
+
+impl Identifier {
+    fn parse(id: &str) -> Self {
+        if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) {
+            Identifier::Numeric(id.to_string())
+        } else {
+            Identifier::Alphanumeric(id.to_string())
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Identifier::Numeric(s) | Identifier::Alphanumeric(s) => s,
+        }
+    }
+}
+
+impl Ord for Identifier {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Identifier::Numeric(a), Identifier::Numeric(b)) => {
+                a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+            }
+            (Identifier::Numeric(_), Identifier::Alphanumeric(_)) => Ordering::Less,
+            (Identifier::Alphanumeric(_), Identifier::Numeric(_)) => Ordering::Greater,
+            (Identifier::Alphanumeric(a), Identifier::Alphanumeric(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for Identifier {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A version as npm's `new SemVer(v)` reads it. Build metadata is dropped,
+/// since nothing compares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Version {
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
+    prerelease: Vec<Identifier>,
+}
+
+impl Version {
+    /// `None` wherever npm's `semver.valid` returns `null`: leading zeros,
+    /// a part past `Number.MAX_SAFE_INTEGER`, more than 256 characters.
+    pub fn parse(version: &str) -> Option<Self> {
+        if version.len() > MAX_LENGTH {
+            return None;
+        }
+        let caps = FULL.captures(version.trim())?;
+        let part =
+            |i: usize| -> Option<u64> { caps[i].parse().ok().filter(|n| *n <= MAX_SAFE_INTEGER) };
+        Some(Version {
+            major: part(1)?,
+            minor: part(2)?,
+            patch: part(3)?,
+            prerelease: caps
+                .get(4)
+                .map(|pr| pr.as_str().split('.').map(Identifier::parse).collect())
+                .unwrap_or_default(),
+        })
+    }
+
+    pub fn is_prerelease(&self) -> bool {
+        !self.prerelease.is_empty()
+    }
+
+    fn same_release(&self, other: &Self) -> bool {
+        (self.major, self.minor, self.patch) == (other.major, other.minor, other.patch)
+    }
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (self.major, self.minor, self.patch)
+            .cmp(&(other.major, other.minor, other.patch))
+            .then_with(
+                || match (self.prerelease.is_empty(), other.prerelease.is_empty()) {
+                    (true, true) => Ordering::Equal,
+                    (true, false) => Ordering::Greater,
+                    (false, true) => Ordering::Less,
+                    (false, false) => self.prerelease.cmp(&other.prerelease),
+                },
+            )
+    }
+}
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)?;
+        for (i, id) in self.prerelease.iter().enumerate() {
+            f.write_str(if i == 0 { "-" } else { "." })?;
+            f.write_str(id.as_str())?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Op {
+    Eq,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+impl Op {
+    fn as_str(self) -> &'static str {
+        match self {
+            Op::Eq => "",
+            Op::Gt => ">",
+            Op::Gte => ">=",
+            Op::Lt => "<",
+            Op::Lte => "<=",
+        }
+    }
+}
+
+/// One comparator; `None` is npm's `ANY`, the empty comparator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Comparator(Option<(Op, Version)>);
+
+impl Comparator {
+    fn parse(comp: &str) -> Option<Self> {
+        let comp = WHITESPACE.split(comp.trim()).collect::<Vec<_>>().join(" ");
+        let caps = COMPARATOR.captures(&comp)?;
+        let Some(version) = caps.get(2) else {
+            return Some(Comparator(None));
+        };
+        let op = match caps.get(1).map_or("", |m| m.as_str()) {
+            "" | "=" => Op::Eq,
+            ">" => Op::Gt,
+            ">=" => Op::Gte,
+            "<" => Op::Lt,
+            _ => Op::Lte,
+        };
+        Some(Comparator(Some((op, Version::parse(version.as_str())?))))
+    }
+
+    fn test(&self, version: &Version) -> bool {
+        let Some((op, bound)) = &self.0 else {
+            return true;
+        };
+        let ord = version.cmp(bound);
+        match op {
+            Op::Eq => ord == Ordering::Equal,
+            Op::Gt => ord == Ordering::Greater,
+            Op::Gte => ord != Ordering::Less,
+            Op::Lt => ord == Ordering::Less,
+            Op::Lte => ord != Ordering::Greater,
+        }
+    }
+
+    fn is_null_set(&self) -> bool {
+        self.to_string() == "<0.0.0-0"
+    }
+}
+
+impl fmt::Display for Comparator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            None => Ok(()),
+            Some((op, version)) => write!(f, "{}{version}", op.as_str()),
+        }
+    }
+}
+
+/// A range as npm's `new Range(r)` reads it: `||`-separated sets, each a
+/// list of comparators that must all hold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Range {
+    sets: Vec<Vec<Comparator>>,
+}
+
+impl Range {
+    /// `None` wherever npm's `semver.validRange` returns `null`.
+    pub fn parse(range: &str) -> Option<Self> {
+        let raw = WHITESPACE.replace_all(range.trim(), " ");
+        let mut sets = raw
+            .split("||")
+            .map(|set| parse_set(set.trim()))
+            .collect::<Option<Vec<_>>>()?;
+        if sets.len() > 1 {
+            let first = sets[0].clone();
+            sets.retain(|set| !set[0].is_null_set());
+            if sets.is_empty() {
+                sets = vec![first];
+            } else if let Some(any) = sets
+                .iter()
+                .find(|set| set.len() == 1 && set[0].0.is_none())
+                .cloned()
+            {
+                sets = vec![any];
+            }
+        }
+        Some(Range { sets })
+    }
+
+    /// npm's `range.test(version)`.
+    pub fn satisfies(&self, version: &Version) -> bool {
+        self.sets.iter().any(|set| test_set(set, version))
+    }
+
+    /// npm's `semver.satisfies(version, range)` for a range already parsed:
+    /// a version npm cannot parse satisfies nothing.
+    pub fn satisfies_str(&self, version: &str) -> bool {
+        Version::parse(version).is_some_and(|v| self.satisfies(&v))
+    }
+
+    /// The range with every set that no version can satisfy left out, in
+    /// npm's canonical comparator form — a spelling any semver reader that
+    /// intersects satisfiable comparators reads the same way. A range with
+    /// no satisfiable set is `<0.0.0-0`, npm's empty range.
+    pub fn satisfiable_form(&self) -> String {
+        let sets: Vec<String> = self
+            .sets
+            .iter()
+            .filter(|set| set_is_satisfiable(set))
+            .map(|set| format_set(set))
+            .collect();
+        match sets.join("||") {
+            _ if sets.is_empty() => "<0.0.0-0".to_string(),
+            any if any.is_empty() => "*".to_string(),
+            range => range,
+        }
+    }
+}
+
+impl fmt::Display for Range {
+    /// What `semver.validRange` returns: npm's `range.range`, or `*` for
+    /// the range that admits every release.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let sets: Vec<String> = self.sets.iter().map(|set| format_set(set)).collect();
+        match sets.join("||") {
+            any if any.is_empty() => f.write_str("*"),
+            range => f.write_str(&range),
+        }
+    }
+}
+
+/// npm's `semver.satisfies(version, range)`: false when either fails to parse.
+pub fn satisfies(version: &str, range: &str) -> bool {
+    Range::parse(range).is_some_and(|r| r.satisfies_str(version))
+}
+
+fn format_set(set: &[Comparator]) -> String {
+    set.iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// npm's `testSet`: every comparator holds, and a prerelease only matches a
+/// set that names a prerelease of the same `major.minor.patch`.
+fn test_set(set: &[Comparator], version: &Version) -> bool {
+    if !set.iter().all(|c| c.test(version)) {
+        return false;
+    }
+    if !version.is_prerelease() {
+        return true;
+    }
+    set.iter().any(|c| {
+        c.0.as_ref()
+            .is_some_and(|(_, bound)| bound.is_prerelease() && bound.same_release(version))
+    })
+}
+
+/// Whether the comparators' lower and upper bounds leave any version.
+fn set_is_satisfiable(set: &[Comparator]) -> bool {
+    let mut lower: Option<(&Version, bool)> = None;
+    let mut upper: Option<(&Version, bool)> = None;
+    for (op, v) in set.iter().filter_map(|c| c.0.as_ref()) {
+        let (is_lower, is_upper, inclusive) = match op {
+            Op::Eq => (true, true, true),
+            Op::Gt => (true, false, false),
+            Op::Gte => (true, false, true),
+            Op::Lt => (false, true, false),
+            Op::Lte => (false, true, true),
+        };
+        if is_lower && lower.is_none_or(|(l, inc)| v > l || (v == l && inc && !inclusive)) {
+            lower = Some((v, inclusive));
+        }
+        if is_upper && upper.is_none_or(|(u, inc)| v < u || (v == u && inc && !inclusive)) {
+            upper = Some((v, inclusive));
+        }
+    }
+    match (lower, upper) {
+        (Some((l, l_inc)), Some((u, u_inc))) => l < u || (l == u && l_inc && u_inc),
+        _ => true,
+    }
+}
+
+/// npm's `parseRange`: the rewrite passes, in npm's order, over one set.
+fn parse_set(set: &str) -> Option<Vec<Comparator>> {
+    let set = BUILD_STRIP.replace_all(set, "");
+    let set = match HYPHEN.captures(&set) {
+        Some(caps) => hyphen_replace(&caps)?,
+        None => set.into_owned(),
+    };
+    let set =
+        COMPARATOR_TRIM.replace_all(&set, |c: &Captures| format!("{}{}{}", &c[1], &c[2], &c[3]));
+    let set = TILDE_TRIM.replace_all(&set, "${1}~");
+    let set = CARET_TRIM.replace_all(&set, "${1}^");
+    let rewritten = set
+        .split(' ')
+        .map(parse_comparator)
+        .collect::<Option<Vec<_>>>()?
+        .join(" ");
+    let comparators = WHITESPACE
+        .split(&rewritten)
+        .map(|comp| GTE0.replace(comp.trim(), "").into_owned())
+        .map(|comp| Comparator::parse(&comp))
+        .collect::<Option<Vec<_>>>()?;
+    if let Some(null) = comparators.iter().find(|c| c.is_null_set()) {
+        return Some(vec![null.clone()]);
+    }
+    let mut unique: Vec<Comparator> = Vec::new();
+    for comp in comparators {
+        if !unique.contains(&comp) {
+            unique.push(comp);
+        }
+    }
+    if unique.len() > 1 {
+        unique.retain(|c| c.0.is_some());
+    }
+    Some(unique)
+}
+
+/// npm's `parseComparator`: carets, tildes, x-ranges, then stars. `None`
+/// where npm's floating-point arithmetic would leave a part past
+/// `Number.MAX_SAFE_INTEGER`, which npm then rejects.
+fn parse_comparator(comp: &str) -> Option<String> {
+    let comp = BUILD_SAFE.replace(comp, "");
+    let comp = each_token(comp.trim(), replace_caret)?;
+    let comp = each_token(comp.trim(), replace_tilde)?;
+    let comp = WHITESPACE
+        .split(&comp)
+        .map(replace_xrange)
+        .collect::<Option<Vec<_>>>()?
+        .join(" ");
+    Some(STAR.replace(comp.trim(), "").into_owned())
+}
+
+fn each_token(comp: &str, f: fn(&str) -> Option<String>) -> Option<String> {
+    Some(
+        WHITESPACE
+            .split(comp)
+            .map(f)
+            .collect::<Option<Vec<_>>>()?
+            .join(" "),
+    )
+}
+
+fn is_x(id: &str) -> bool {
+    id.is_empty() || id.eq_ignore_ascii_case("x") || id == "*"
+}
+
+/// `+n + 1`, checked: `None` past what npm can represent.
+fn inc(n: &str) -> Option<String> {
+    n.parse::<u64>()
+        .ok()?
+        .checked_add(1)
+        .filter(|n| *n <= MAX_SAFE_INTEGER)
+        .map(|n| n.to_string())
+}
+
+fn group<'a>(caps: &'a Captures, i: usize) -> &'a str {
+    caps.get(i).map_or("", |m| m.as_str())
+}
+
+fn replace_tilde(comp: &str) -> Option<String> {
+    let Some(caps) = TILDE.captures(comp) else {
+        return Some(comp.to_string());
+    };
+    let (major, minor, patch, pr) = (
+        group(&caps, 1),
+        group(&caps, 2),
+        group(&caps, 3),
+        group(&caps, 4),
+    );
+    Some(if is_x(major) {
+        String::new()
+    } else if is_x(minor) {
+        format!(">={major}.0.0 <{}.0.0-0", inc(major)?)
+    } else if is_x(patch) {
+        format!(">={major}.{minor}.0 <{major}.{}.0-0", inc(minor)?)
+    } else if !pr.is_empty() {
+        format!(
+            ">={major}.{minor}.{patch}-{pr} <{major}.{}.0-0",
+            inc(minor)?
+        )
+    } else {
+        format!(">={major}.{minor}.{patch} <{major}.{}.0-0", inc(minor)?)
+    })
+}
+
+fn replace_caret(comp: &str) -> Option<String> {
+    let Some(caps) = CARET.captures(comp) else {
+        return Some(comp.to_string());
+    };
+    let (major, minor, patch, pr) = (
+        group(&caps, 1),
+        group(&caps, 2),
+        group(&caps, 3),
+        group(&caps, 4),
+    );
+    let pr = if pr.is_empty() {
+        String::new()
+    } else {
+        format!("-{pr}")
+    };
+    Some(if is_x(major) {
+        String::new()
+    } else if is_x(minor) {
+        format!(">={major}.0.0 <{}.0.0-0", inc(major)?)
+    } else if is_x(patch) {
+        if major == "0" {
+            format!(">={major}.{minor}.0 <{major}.{}.0-0", inc(minor)?)
+        } else {
+            format!(">={major}.{minor}.0 <{}.0.0-0", inc(major)?)
+        }
+    } else if major == "0" {
+        if minor == "0" {
+            format!(
+                ">={major}.{minor}.{patch}{pr} <{major}.{minor}.{}-0",
+                inc(patch)?
+            )
+        } else {
+            format!(">={major}.{minor}.{patch}{pr} <{major}.{}.0-0", inc(minor)?)
+        }
+    } else {
+        format!(">={major}.{minor}.{patch}{pr} <{}.0.0-0", inc(major)?)
+    })
+}
+
+fn replace_xrange(comp: &str) -> Option<String> {
+    let comp = comp.trim();
+    let Some(caps) = XRANGE.captures(comp) else {
+        return Some(comp.to_string());
+    };
+    let (gtlt, major, minor, patch) = (
+        group(&caps, 1),
+        group(&caps, 2),
+        group(&caps, 3),
+        group(&caps, 4),
+    );
+    if (is_x(major) && !is_x(minor)) || (is_x(minor) && !patch.is_empty() && !is_x(patch)) {
+        return Some(comp.to_string());
+    }
+    let xm = is_x(major) || is_x(minor);
+    let any_x = xm || is_x(patch);
+    let gtlt = if gtlt == "=" && any_x { "" } else { gtlt };
+    Some(if is_x(major) {
+        if gtlt == ">" || gtlt == "<" {
+            "<0.0.0-0"
+        } else {
+            "*"
+        }
+        .to_string()
+    } else if !gtlt.is_empty() && any_x {
+        let minor = if xm { "0" } else { minor };
+        let (gtlt, major, minor) = match gtlt {
+            ">" if xm => (">=", inc(major)?, "0".to_string()),
+            ">" => (">=", major.to_string(), inc(minor)?),
+            "<=" if xm => ("<", inc(major)?, minor.to_string()),
+            "<=" => ("<", major.to_string(), inc(minor)?),
+            _ => (gtlt, major.to_string(), minor.to_string()),
+        };
+        let pr = if gtlt == "<" { "-0" } else { "" };
+        format!("{gtlt}{major}.{minor}.0{pr}")
+    } else if xm {
+        format!(">={major}.0.0 <{}.0.0-0", inc(major)?)
+    } else if any_x {
+        format!(">={major}.{minor}.0 <{major}.{}.0-0", inc(minor)?)
+    } else {
+        comp.to_string()
+    })
+}
+
+/// npm's `hyphenReplace`: `1.2 - 3` → `>=1.2.0 <4.0.0-0`.
+fn hyphen_replace(caps: &Captures) -> Option<String> {
+    let (from, f_major, f_minor, f_patch) = (
+        group(caps, 1),
+        group(caps, 2),
+        group(caps, 3),
+        group(caps, 4),
+    );
+    let (to, t_major, t_minor, t_patch, t_pr) = (
+        group(caps, 7),
+        group(caps, 8),
+        group(caps, 9),
+        group(caps, 10),
+        group(caps, 11),
+    );
+    let from = if is_x(f_major) {
+        String::new()
+    } else if is_x(f_minor) {
+        format!(">={f_major}.0.0")
+    } else if is_x(f_patch) {
+        format!(">={f_major}.{f_minor}.0")
+    } else {
+        format!(">={from}")
+    };
+    let to = if is_x(t_major) {
+        String::new()
+    } else if is_x(t_minor) {
+        format!("<{}.0.0-0", inc(t_major)?)
+    } else if is_x(t_patch) {
+        format!("<{t_major}.{}.0-0", inc(t_minor)?)
+    } else if !t_pr.is_empty() {
+        format!("<={t_major}.{t_minor}.{t_patch}-{t_pr}")
+    } else {
+        format!("<={to}")
+    };
+    Some(format!("{from} {to}").trim().to_string())
+}
+
+#[cfg(test)]
+mod tests;

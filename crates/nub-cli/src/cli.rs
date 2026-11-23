@@ -15573,6 +15573,12 @@ mod tests {
                 "{npm_only} is read with npm's grammar"
             );
         }
+        let empty_first_set = ">=11.29.0 <=11.20.* || 11.15.0";
+        assert_eq!(
+            resolve(&range(empty_first_set), "11.20.0"),
+            (empty_first_set.to_string(), PinSource::DevEngines),
+            "npm reads the first set as empty, so 11.20.0 is outside the range"
+        );
         assert_eq!(
             resolve(
                 r#"{"devEngines":{"packageManager":{"name":"pnpm","version":"^11.20.0","onFail":"ignore"}}}"#,

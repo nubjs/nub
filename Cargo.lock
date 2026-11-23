@@ -190,6 +190,7 @@ dependencies = [
  "aube-resolver",
  "aube-runtime",
  "aube-scripts",
+ "aube-semver",
  "aube-settings",
  "aube-store",
  "aube-util",
@@ -409,6 +410,13 @@ dependencies = [
  "tokio",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "aube-semver"
+version = "2.2.9"
+dependencies = [
+ "regex",
 ]
 
 [[package]]
@@ -2767,6 +2775,7 @@ name = "nub-core"
 version = "0.11.2"
 dependencies = [
  "anyhow",
+ "aube-semver",
  "blake3",
  "camino",
  "criterion",

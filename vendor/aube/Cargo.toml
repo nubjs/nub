@@ -215,6 +215,7 @@ aube-manifest = { path = "crates/aube-manifest", version = "2", default-features
 aube-runtime = { path = "crates/aube-runtime", version = "2" }
 aube-scripts = { path = "crates/aube-scripts", version = "2" }
 aube-workspace = { path = "crates/aube-workspace", version = "2" }
+aube-semver = { path = "crates/aube-semver", version = "2" }
 aube-util = { path = "crates/aube-util", version = "2" }
 
 [profile.dev]
