@@ -8,7 +8,7 @@ use crate::error::Error;
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeSpec {
     Exact(node_semver::Version),
-    Range(node_semver::Range),
+    Range(aube_semver::Range),
     /// Newest LTS release (`lts`, `lts/*`).
     Lts,
     /// Newest release of any kind (`latest`, `current`, `node`).
@@ -42,7 +42,7 @@ impl NodeSpec {
         if let Ok(v) = node_semver::Version::parse(unprefixed) {
             return Ok(NodeSpec::Exact(v));
         }
-        if let Ok(r) = node_semver::Range::parse(unprefixed) {
+        if let Ok(r) = aube_semver::parse_range(unprefixed) {
             return Ok(NodeSpec::Range(r));
         }
         // Bare alphabetic word → treat as an LTS codename (`jod`,
@@ -64,7 +64,7 @@ impl NodeSpec {
     pub fn satisfied_by(&self, version: &node_semver::Version) -> Option<bool> {
         match self {
             NodeSpec::Exact(v) => Some(v == version),
-            NodeSpec::Range(r) => Some(version.satisfies(r)),
+            NodeSpec::Range(r) => Some(r.satisfies_node(version)),
             NodeSpec::Lts | NodeSpec::Latest | NodeSpec::LtsCodename(_) => None,
         }
     }

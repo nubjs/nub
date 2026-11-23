@@ -483,24 +483,18 @@ mod tests {
             format!(">={NUB_TYPES_FLOOR} <={ver}")
         );
         let types_range =
-            node_semver::Range::parse(v["devDependencies"]["@nubjs/types"].as_str().unwrap())
+            aube_semver::parse_range(v["devDependencies"]["@nubjs/types"].as_str().unwrap())
                 .unwrap();
         assert!(
-            node_semver::Version::parse(NUB_TYPES_FLOOR)
-                .unwrap()
-                .satisfies(&types_range),
+            types_range.satisfies_str(NUB_TYPES_FLOOR),
             "the oldest mature declaration release must remain selectable"
         );
         assert!(
-            node_semver::Version::parse(ver)
-                .unwrap()
-                .satisfies(&types_range),
+            types_range.satisfies_str(ver),
             "the running Nub release must remain selectable after it matures"
         );
         assert!(
-            !node_semver::Version::parse("99.0.0")
-                .unwrap()
-                .satisfies(&types_range),
+            !types_range.satisfies_str("99.0.0"),
             "declarations newer than the running Nub runtime must not be selected"
         );
         assert_eq!(v["devDependencies"]["typescript"], TYPESCRIPT_RANGE);

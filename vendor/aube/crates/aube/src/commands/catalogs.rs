@@ -109,13 +109,13 @@ pub(crate) fn range_compatible(
     if user_range == catalog_range {
         return true;
     }
-    let Ok(catalog_parsed) = node_semver::Range::parse(catalog_range) else {
+    let Ok(catalog_parsed) = aube_semver::parse_range(catalog_range) else {
         return false;
     };
     let Ok(version) = node_semver::Version::parse(resolved_version) else {
         return false;
     };
-    version.satisfies(&catalog_parsed)
+    catalog_parsed.satisfies_node(&version)
 }
 
 /// Remove catalog entries from the workspace yaml that the freshly

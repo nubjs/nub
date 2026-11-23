@@ -266,7 +266,7 @@ pub(crate) fn pick_version<'a>(
     // npm and pnpm fall back to the highest non-prerelease version.
     // Do the same so `aube install foo` does not silently fail on a
     // packument that just happens to lack the tag.
-    let range = match node_semver::Range::parse(normalize_range(range_str)) {
+    let range = match aube_semver::parse_range(normalize_range(range_str)) {
         Ok(r) => r,
         Err(_) => {
             // Reject protocol-prefixed ranges that survived workspace /
@@ -346,7 +346,7 @@ pub(crate) fn pick_version<'a>(
             } else {
                 effective_range
             };
-            match node_semver::Range::parse(normalize_range(&effective_range)) {
+            match aube_semver::parse_range(normalize_range(&effective_range)) {
                 Ok(r) => r,
                 Err(_) => return PickResult::NoMatch,
             }
@@ -356,7 +356,7 @@ pub(crate) fn pick_version<'a>(
     // Prefer locked version if it satisfies and clears the cutoff.
     if let Some(locked_ver) = locked
         && let Ok(v) = node_semver::Version::parse(locked_ver)
-        && v.satisfies(&range)
+        && range.satisfies_node(&v)
         && passes_cutoff(locked_ver, Some(&v))
         && let Some(meta) = packument.versions.get(locked_ver)
     {
@@ -374,7 +374,7 @@ pub(crate) fn pick_version<'a>(
     if !pick_lowest
         && let Some(latest_ver) = packument.dist_tags.get("latest")
         && let Ok(v) = node_semver::Version::parse(latest_ver)
-        && v.satisfies(&range)
+        && range.satisfies_node(&v)
         && passes_cutoff(latest_ver, Some(&v))
         && let Some(meta) = packument.versions.get(latest_ver)
     {
@@ -397,7 +397,7 @@ pub(crate) fn pick_version<'a>(
         let Ok(v) = node_semver::Version::parse(ver_str) else {
             continue;
         };
-        if !v.satisfies(&range) {
+        if !range.satisfies_node(&v) {
             continue;
         }
 
@@ -506,7 +506,7 @@ pub(crate) fn outranks(
 /// `pick_version`: a protocol-shaped spec is never a tag.
 #[inline]
 pub(crate) fn range_resolves_via_dist_tag(packument: &Packument, range_str: &str) -> bool {
-    if node_semver::Range::parse(normalize_range(range_str)).is_ok() {
+    if aube_semver::parse_range(normalize_range(range_str)).is_ok() {
         return false;
     }
     if looks_like_protocol_range(range_str) {
@@ -532,8 +532,10 @@ pub(crate) fn range_resolves_via_dist_tag(packument: &Packument, range_str: &str
 /// (the floor of a range is exactly what was dropped), a locked version
 /// the seed does not hold, and a deprecated pick (`outranks` prefers any
 /// live version, so a dropped live one anywhere in the range beats it)
-/// refetch outright, so does anything unparseable, and
-/// `Range::allows_any` overlaps bounds without npm's prerelease rule.
+/// refetch outright, so does anything unparseable, and the gap check is
+/// `Range::overlaps`, which compares bounds without npm's prerelease rule
+/// (npm's `intersects` would let a named prerelease of another patch of
+/// the line skip the refetch).
 pub(crate) fn sparse_pick_needs_refetch(
     packument: &Packument,
     picked_version: &str,
@@ -560,7 +562,7 @@ pub(crate) fn sparse_pick_needs_refetch(
     {
         return true;
     }
-    let Ok(range) = node_semver::Range::parse(normalize_range(range_str)) else {
+    let Ok(range) = aube_semver::parse_range(normalize_range(range_str)) else {
         return true;
     };
     // Highest held version per line, keyed `(major, minor, prerelease)`.
@@ -584,7 +586,7 @@ pub(crate) fn sparse_pick_needs_refetch(
             continue;
         }
         // Where a dropped version of this line could sit above the pick.
-        // `allows_any` compares bounds only, so a prerelease line is
+        // `overlaps` compares bounds only, so a prerelease line is
         // consulted just when the range names a prerelease of that
         // `major.minor` — npm's rule for admitting one at all.
         let gap = if (major, minor, pre) == picked_line {
@@ -599,8 +601,8 @@ pub(crate) fn sparse_pick_needs_refetch(
         } else {
             format!(">={major}.{minor}.0 <{highest}")
         };
-        match node_semver::Range::parse(&gap) {
-            Ok(gap) if range.allows_any(&gap) => return true,
+        match aube_semver::parse_range(&gap) {
+            Ok(gap) if range.overlaps(&gap) => return true,
             Ok(_) => {}
             Err(_) => return true,
         }
@@ -774,7 +776,7 @@ pub(crate) fn version_satisfies(version: &str, range_str: &str) -> bool {
     with_cached_version(version, |v| {
         let Some(v) = v else { return false };
         with_cached_range(normalize_range(range_str), |r| match r {
-            Some(r) => v.satisfies(r),
+            Some(r) => r.satisfies_node(v),
             None => false,
         })
     })
@@ -806,7 +808,7 @@ pub(crate) fn normalize_range(range_str: &str) -> &str {
     }
 }
 
-/// Thread-local `node_semver::Range` parse cache.
+/// Thread-local `aube_semver::Range` parse cache.
 ///
 /// Resolver hot loops (sibling dedupe, lockfile-reuse scan,
 /// peer-context fixed-point, catalog pick) call `version_satisfies`
@@ -818,16 +820,16 @@ pub(crate) fn normalize_range(range_str: &str) -> &str {
 /// slice of ranges, lock contention would erase the parse savings.
 /// Two workers parsing the same range twice is cheaper than one
 /// lock round-trip.
-fn with_cached_range<R>(range_str: &str, f: impl FnOnce(Option<&node_semver::Range>) -> R) -> R {
+fn with_cached_range<R>(range_str: &str, f: impl FnOnce(Option<&aube_semver::Range>) -> R) -> R {
     thread_local! {
-        static CACHE: std::cell::RefCell<crate::FxHashMap<String, Option<node_semver::Range>>> =
+        static CACHE: std::cell::RefCell<crate::FxHashMap<String, Option<aube_semver::Range>>> =
             std::cell::RefCell::default();
     }
     CACHE.with(|cell| {
         let mut map = cell.borrow_mut();
         if !map.contains_key(range_str) {
             core::hint::cold_path();
-            let parsed = node_semver::Range::parse(range_str).ok();
+            let parsed = aube_semver::parse_range(range_str).ok();
             map.insert(range_str.to_string(), parsed);
         }
         f(map.get(range_str).and_then(Option::as_ref))

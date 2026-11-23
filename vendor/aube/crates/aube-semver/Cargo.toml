@@ -14,3 +14,10 @@ description = "Version ranges read and matched exactly as npm's semver package r
 
 [dependencies]
 regex = "1"
+node-semver = { version = "2", optional = true }
+
+[features]
+# `Range::satisfies_node`: match a version the engine parsed with
+# `node-semver`, which still reads published versions. Ranges are read and
+# matched only here.
+node-semver = ["dep:node-semver"]

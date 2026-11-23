@@ -942,6 +942,42 @@ fn test_pick_version_highest_match() {
     assert_eq!(result.version, "1.2.0");
 }
 
+/// Ranges are read as npm reads them, so the pick is npm's and pnpm's. The
+/// `node_semver` crate alone reads `<=6` as `<=6.0.0-0`, leaving out every
+/// stable 6.x, and reads two comparators that cannot both hold as either.
+#[test]
+fn test_pick_version_reads_ranges_as_npm_does() {
+    let packument = make_packument(
+        "semver",
+        &["5.7.3", "6.0.0", "6.1.3", "6.2.0", "6.3.2", "7.8.0"],
+        "7.8.0",
+    );
+    let pick = |range: &str| match pick_version(
+        &packument,
+        range,
+        None,
+        false,
+        None,
+        None,
+        false,
+        |_, _| false,
+    ) {
+        PickResult::Found(meta) => meta.version.clone(),
+        other => format!("{other:?}"),
+    };
+    // Every verdict is npm `semver` 7.8.6's `maxSatisfying`.
+    assert_eq!(pick("<=6"), "6.3.2");
+    assert_eq!(pick("<=6.2"), "6.2.0");
+    assert_eq!(pick("<=6.x"), "6.3.2");
+    assert_eq!(pick(">=6.3 <=6.2 || 5.7.3"), "5.7.3");
+    assert_eq!(pick(">=7 <6"), "NoMatch");
+    assert!(crate::semver_util::version_satisfies("6.3.2", "<=6"));
+    assert!(!crate::semver_util::version_satisfies(
+        "6.1.3",
+        ">=6.3 <=6.2 || 5.7.3"
+    ));
+}
+
 #[test]
 fn test_pick_version_prefers_dist_tag_latest_when_in_range() {
     // npm/pnpm parity: when `dist-tags.latest` falls inside the
@@ -9112,6 +9148,15 @@ fn sparse_pick_refetches_only_when_a_dropped_version_could_outrank_it() {
     assert!(!refetch("=7.21.4-esm.4", "7.21.4-esm.4"));
     assert!(refetch(">=8.0.0-beta.1 <8.0.0-beta.3", "8.0.0-beta.1"));
     assert!(refetch("^7.21.0 || 8.0.0-beta.2", "7.21.8"));
+
+    // The check is an overlap of bounds, wider than npm's `intersects`: a
+    // prerelease named in another patch of the line could still have been
+    // dropped, so it refetches.
+    let seed = make_packument("qux", &["1.0.0", "1.1.2-beta.3"], "1.0.0");
+    let refetch = |range: &str, picked: &str| {
+        crate::semver_util::sparse_pick_needs_refetch(&seed, picked, range, false, None)
+    };
+    assert!(refetch("1.0.0 || 1.1.1-beta.2", "1.0.0"));
 }
 
 /// A range whose best match the age prune dropped must not settle on the

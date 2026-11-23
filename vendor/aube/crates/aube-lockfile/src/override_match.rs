@@ -223,11 +223,11 @@ fn parse_segment(seg: &str) -> Option<(String, Option<String>)> {
 /// for two ranges with empty intersection. The caller signals the
 /// exclusive form via a separate try with `bumped_lower_bound` first.
 fn range_could_satisfy(task_range: &str, req: &str) -> bool {
-    let Ok(r) = node_semver::Range::parse(req) else {
+    let Ok(r) = aube_semver::parse_range(req) else {
         return true;
     };
     if let Ok(v) = node_semver::Version::parse(task_range)
-        && v.satisfies(&r)
+        && r.satisfies_node(&v)
     {
         return true;
     }
@@ -242,7 +242,7 @@ fn range_could_satisfy(task_range: &str, req: &str) -> bool {
             // bump as the representative point.
             v.patch += 1;
         }
-        return v.satisfies(&r);
+        return r.satisfies_node(&v);
     }
     true
 }

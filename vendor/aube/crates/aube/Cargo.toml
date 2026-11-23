@@ -44,7 +44,7 @@ aube-lockfile = { workspace = true }
 aube-runtime = { workspace = true }
 aube-manifest = { workspace = true }
 aube-registry = { workspace = true }
-aube-semver = { workspace = true }
+aube-semver = { workspace = true, features = ["node-semver"] }
 aube-util = { workspace = true }
 aube-resolver = { workspace = true }
 aube-settings = { workspace = true }

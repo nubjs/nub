@@ -251,9 +251,9 @@ fn project_section(anchor: &Path, report: &mut Report) -> Section {
             {
                 match (
                     node_semver::Version::parse(&node),
-                    node_semver::Range::parse(range),
+                    aube_semver::parse_range(range),
                 ) {
-                    (Ok(v), Ok(r)) if !v.satisfies(&r) => {
+                    (Ok(v), Ok(r)) if !r.satisfies_node(&v) => {
                         report.errors.push(format!(
                             "root package requires node {range}, but this is v{node}"
                         ));

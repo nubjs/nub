@@ -197,7 +197,7 @@ pub(crate) fn select<'a>(
         .filter(|e| available(e))
         .filter(|e| match spec {
             NodeSpec::Exact(v) => &e.version == v,
-            NodeSpec::Range(r) => e.version.satisfies(r),
+            NodeSpec::Range(r) => r.satisfies_node(&e.version),
             NodeSpec::Lts => e.lts.is_lts(),
             NodeSpec::Latest => true,
             NodeSpec::LtsCodename(name) => e

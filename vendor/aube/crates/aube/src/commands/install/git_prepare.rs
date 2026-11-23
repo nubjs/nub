@@ -394,8 +394,8 @@ fn yarn_spec_is_berry(spec: &str) -> Option<bool> {
     let spec = spec
         .split_once('+')
         .map_or(spec, |(version, _build)| version);
-    let range = node_semver::Range::parse(spec).ok()?;
-    Some(!range.allows_any(&node_semver::Range::parse("<2.0.0").ok()?))
+    let range = aube_semver::parse_range(spec).ok()?;
+    Some(!range.overlaps(&aube_semver::parse_range("<2.0.0-0").ok()?))
 }
 
 /// Run the `prepublish`/`prepack`/`publish` scripts the checkout declares,
@@ -429,6 +429,18 @@ async fn run_prepublish_scripts(dir: &std::path::Path) -> miette::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A range keeps Classic while its bounds still reach below 2.0.0, a
+    /// named 1.x prerelease included.
+    #[test]
+    fn a_yarn_range_is_berry_only_with_no_1_x_left() {
+        assert_eq!(yarn_spec_is_berry("^4.5.0"), Some(true));
+        assert_eq!(yarn_spec_is_berry("^1 || ^4"), Some(false));
+        assert_eq!(yarn_spec_is_berry("1.0.0-rc.1 || ^4"), Some(false));
+        // A 2.0.0 prerelease is Berry, though it sorts below 2.0.0.
+        assert_eq!(yarn_spec_is_berry("2.0.0-rc.27"), Some(true));
+        assert_eq!(yarn_spec_is_berry("latest"), None);
+    }
 
     #[test]
     fn scratch_copy_keeps_the_checkout_but_not_its_history() {

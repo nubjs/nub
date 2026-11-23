@@ -2703,10 +2703,10 @@ fn pin_unlocked_direct_deps(
             // A range edited since the last install to exclude the locked
             // version resolves normally; pinning it would record the new
             // range beside the old version.
-            let still_in_range = node_semver::Range::parse(spec.as_str())
+            let still_in_range = aube_semver::parse_range(spec.as_str())
                 .ok()
                 .zip(node_semver::Version::parse(&locked.version).ok())
-                .is_some_and(|(range, version)| range.satisfies(&version));
+                .is_some_and(|(range, version)| range.satisfies_node(&version));
             if still_in_range && locked.alias_of.is_none() {
                 pins.push((
                     dep.name.clone(),
@@ -2799,7 +2799,7 @@ fn reject_unsupported_pkg_specs(packages: &[String]) -> miette::Result<()> {
         let Some(s) = spec else { continue };
         let supported = s.is_empty()
             || s == "latest"
-            || node_semver::Range::parse(s).is_ok()
+            || aube_semver::parse_range(s).is_ok()
             || is_dist_tag_spec(s);
         if !supported {
             return Err(miette!(
@@ -2827,7 +2827,7 @@ fn is_dist_tag_spec(s: &str) -> bool {
 /// against pnpm 10.15.1); `@latest` and concrete version/range args keep
 /// the operator-gluing path (`chalk@latest` from `^4.1.0` → `^5.6.2`).
 fn spec_pins_exact(s: &str) -> bool {
-    s != "latest" && node_semver::Range::parse(s).is_err()
+    s != "latest" && aube_semver::parse_range(s).is_err()
 }
 
 /// Rewrite a direct-dep specifier to pin `resolved_version`, preserving:

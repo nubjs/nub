@@ -116,11 +116,11 @@ pub(crate) fn wanted_version(
     packument: &aube_registry::Packument,
     range_str: &str,
 ) -> Option<String> {
-    let range = node_semver::Range::parse(range_str).ok()?;
+    let range = aube_semver::parse_range(range_str).ok()?;
     if let Some(latest) = packument.dist_tags.get("latest")
         && packument.versions.contains_key(latest)
         && let Ok(v) = node_semver::Version::parse(latest)
-        && v.satisfies(&range)
+        && range.satisfies_node(&v)
     {
         return Some(latest.clone());
     }
@@ -129,7 +129,7 @@ pub(crate) fn wanted_version(
         let Ok(v) = node_semver::Version::parse(ver_str) else {
             continue;
         };
-        if !v.satisfies(&range) {
+        if !range.satisfies_node(&v) {
             continue;
         }
         let live = meta.deprecated.is_none();
@@ -177,13 +177,13 @@ pub(crate) fn resolve_version(packument: &serde_json::Value, spec: Option<&str>)
         return Some(spec.to_string());
     }
 
-    let range: node_semver::Range = spec.parse().ok()?;
+    let range = aube_semver::parse_range(spec).ok()?;
     versions
         .keys()
         .filter_map(|v| {
             v.parse::<node_semver::Version>()
                 .ok()
-                .filter(|parsed| parsed.satisfies(&range))
+                .filter(|parsed| range.satisfies_node(parsed))
                 .map(|parsed| (v.clone(), parsed))
         })
         .max_by(|a, b| a.1.cmp(&b.1))
