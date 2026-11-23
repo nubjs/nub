@@ -1,13 +1,16 @@
+# Self-contained on purpose: no `.workspace = true` keys. nub-core depends on
+# this crate, and the cross-built release jobs mount the standalone
+# nub-launcher's tree and its path dependencies, never vendor/aube/Cargo.toml,
+# so an inherited key fails with "failed to find a workspace root".
 [package]
 name = "aube-semver"
-version.workspace = true
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-readme.workspace = true
+version = "2.2.9"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT AND ISC"
+repository = "https://github.com/aubepkg/aube"
+homepage = "https://github.com/aubepkg/aube"
 description = "Version ranges read and matched exactly as npm's semver package reads and matches them."
 
 [dependencies]
-regex = { workspace = true }
+regex = "1"

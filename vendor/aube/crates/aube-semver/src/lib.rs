@@ -1,3 +1,22 @@
+// Ported from npm's `semver` 7.8.6 (https://github.com/npm/node-semver),
+// whose notice follows. A copy is in vendor/aube/licenses/npm-semver-LICENSE.
+//
+// The ISC License
+//
+// Copyright (c) Isaac Z. Schlueter and Contributors
+//
+// Permission to use, copy, modify, and/or distribute this software for any
+// purpose with or without fee is hereby granted, provided that the above
+// copyright notice and this permission notice appear in all copies.
+//
+// THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+// WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+// MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+// ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+// WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+// ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
+// IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
 //! Version ranges read and matched exactly as npm's `semver` package (7.x,
 //! `loose: false`, `includePrerelease: false`) reads and matches them.
 //!
@@ -86,7 +105,35 @@ fn xrange_plain() -> String {
 
 const GTLT: &str = "((?:<|>)?=?)";
 
+/// ECMAScript's `\s`, which is also the set `String.prototype.trim` strips:
+/// Rust's `\s` and `char::is_whitespace` add U+0085 and leave out U+FEFF.
+const JS_SPACE: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
+
+fn is_js_space(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | '\n' | '\x0B' | '\x0C' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+    )
+}
+
+/// JavaScript's `s.trim()`.
+fn js_trim(s: &str) -> &str {
+    s.trim_matches(is_js_space)
+}
+
+/// Compiles one of npm's patterns, written here with `\s` as npm writes it,
+/// with `\s` read as ECMAScript reads it.
 fn re(pattern: String) -> Regex {
+    let pattern = pattern
+        .replace(r"[v=\s]", &format!("[v={JS_SPACE}]"))
+        .replace(r"\s", &format!("[{JS_SPACE}]"));
     Regex::new(&pattern).expect("npm semver pattern compiles")
 }
 
@@ -172,10 +219,10 @@ impl Version {
     /// `None` wherever npm's `semver.valid` returns `null`: leading zeros,
     /// a part past `Number.MAX_SAFE_INTEGER`, more than 256 characters.
     pub fn parse(version: &str) -> Option<Self> {
-        if version.len() > MAX_LENGTH {
+        if version.encode_utf16().count() > MAX_LENGTH {
             return None;
         }
-        let caps = FULL.captures(version.trim())?;
+        let caps = FULL.captures(js_trim(version))?;
         let part =
             |i: usize| -> Option<u64> { caps[i].parse().ok().filter(|n| *n <= MAX_SAFE_INTEGER) };
         Some(Version {
@@ -257,7 +304,10 @@ struct Comparator(Option<(Op, Version)>);
 
 impl Comparator {
     fn parse(comp: &str) -> Option<Self> {
-        let comp = WHITESPACE.split(comp.trim()).collect::<Vec<_>>().join(" ");
+        let comp = WHITESPACE
+            .split(js_trim(comp))
+            .collect::<Vec<_>>()
+            .join(" ");
         let caps = COMPARATOR.captures(&comp)?;
         let Some(version) = caps.get(2) else {
             return Some(Comparator(None));
@@ -310,10 +360,10 @@ pub struct Range {
 impl Range {
     /// `None` wherever npm's `semver.validRange` returns `null`.
     pub fn parse(range: &str) -> Option<Self> {
-        let raw = WHITESPACE.replace_all(range.trim(), " ");
+        let raw = WHITESPACE.replace_all(js_trim(range), " ");
         let mut sets = raw
             .split("||")
-            .map(|set| parse_set(set.trim()))
+            .map(|set| parse_set(js_trim(set)))
             .collect::<Option<Vec<_>>>()?;
         if sets.len() > 1 {
             let first = sets[0].clone();
@@ -443,7 +493,7 @@ fn parse_set(set: &str) -> Option<Vec<Comparator>> {
         .join(" ");
     let comparators = WHITESPACE
         .split(&rewritten)
-        .map(|comp| GTE0.replace(comp.trim(), "").into_owned())
+        .map(|comp| GTE0.replace(js_trim(comp), "").into_owned())
         .map(|comp| Comparator::parse(&comp))
         .collect::<Option<Vec<_>>>()?;
     if let Some(null) = comparators.iter().find(|c| c.is_null_set()) {
@@ -466,14 +516,14 @@ fn parse_set(set: &str) -> Option<Vec<Comparator>> {
 /// `Number.MAX_SAFE_INTEGER`, which npm then rejects.
 fn parse_comparator(comp: &str) -> Option<String> {
     let comp = BUILD_SAFE.replace(comp, "");
-    let comp = each_token(comp.trim(), replace_caret)?;
-    let comp = each_token(comp.trim(), replace_tilde)?;
+    let comp = each_token(js_trim(&comp), replace_caret)?;
+    let comp = each_token(js_trim(&comp), replace_tilde)?;
     let comp = WHITESPACE
         .split(&comp)
         .map(replace_xrange)
         .collect::<Option<Vec<_>>>()?
         .join(" ");
-    Some(STAR.replace(comp.trim(), "").into_owned())
+    Some(STAR.replace(js_trim(&comp), "").into_owned())
 }
 
 fn each_token(comp: &str, f: fn(&str) -> Option<String>) -> Option<String> {
@@ -569,7 +619,7 @@ fn replace_caret(comp: &str) -> Option<String> {
 }
 
 fn replace_xrange(comp: &str) -> Option<String> {
-    let comp = comp.trim();
+    let comp = js_trim(comp);
     let Some(caps) = XRANGE.captures(comp) else {
         return Some(comp.to_string());
     };
@@ -647,7 +697,7 @@ fn hyphen_replace(caps: &Captures) -> Option<String> {
     } else {
         format!("<={to}")
     };
-    Some(format!("{from} {to}").trim().to_string())
+    Some(js_trim(&format!("{from} {to}")).to_string())
 }
 
 #[cfg(test)]
