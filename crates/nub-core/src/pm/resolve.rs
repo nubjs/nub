@@ -215,7 +215,7 @@ pub fn resolve_target_with_source(cwd: &Path) -> Option<PmTargetResolution> {
         // here (resolve_pin_with_source is the channel that returns them).
         return None;
     };
-    let (pin, source) = apply_pnpm_lockfile_pin(pin, source, cwd);
+    let (pin, source) = apply_pnpm_lockfile_pin(pin, source, &manifest, cwd);
     Some(PmTargetResolution {
         target: PmTarget::Provision(apply_yarnrc_signal(pin, cwd)),
         source,
@@ -249,7 +249,7 @@ pub fn resolve_pin_with_source(cwd: &Path) -> Option<PmPinResolution> {
     let manifest = root_manifest(cwd)?;
     let resolved = pin_from_manifest(&manifest);
     let (pin, source) = resolved.pin?;
-    let (pin, source) = apply_pnpm_lockfile_pin(pin, source, cwd);
+    let (pin, source) = apply_pnpm_lockfile_pin(pin, source, &manifest, cwd);
     Some(PmPinResolution {
         pin: apply_yarnrc_signal(pin, cwd),
         source,
@@ -285,9 +285,16 @@ pub fn unusable_pin(cwd: &Path) -> Option<PinWarning> {
 /// this, every run would re-resolve the newest release in range, drifting from
 /// the lockfile as new releases ship, and a cold download would find no
 /// project-pinned digest for the version it fetched. A record the range does
-/// not allow, or one below 11.1.3, leaves the range to resolve as before.
-fn apply_pnpm_lockfile_pin(pin: PmPin, source: PinSource, cwd: &Path) -> (PmPin, PinSource) {
-    if source != PinSource::DevEngines || pin.pm != Pm::Pnpm {
+/// not allow, or one below 11.1.3, leaves the range to resolve as before. So
+/// does `onFail: "ignore"`, under which pnpm neither records nor follows the
+/// pin and stays on the pnpm that launched it.
+fn apply_pnpm_lockfile_pin(
+    pin: PmPin,
+    source: PinSource,
+    manifest: &serde_json::Value,
+    cwd: &Path,
+) -> (PmPin, PinSource) {
+    if source != PinSource::DevEngines || pin.pm != Pm::Pnpm || dev_engines_ignored(manifest) {
         return (pin, source);
     }
     let Some(range) = pin.version.as_deref() else {
@@ -310,14 +317,31 @@ fn apply_pnpm_lockfile_pin(pin: PmPin, source: PinSource, cwd: &Path) -> (PmPin,
     }
 }
 
-/// Whether `range` admits `version`, read the way provisioning resolves the
-/// range against the registry.
+/// Whether the manifest's `devEngines.packageManager` sets `onFail: "ignore"`.
+fn dev_engines_ignored(manifest: &serde_json::Value) -> bool {
+    manifest
+        .get("devEngines")
+        .and_then(|d| d.get("packageManager"))
+        .and_then(|p| p.get("onFail"))
+        .and_then(|f| f.as_str())
+        == Some("ignore")
+}
+
+/// Whether the workspace-root `devEngines.packageManager` sets
+/// `onFail: "ignore"`: pnpm then keeps no record of the pin in
+/// `pnpm-lock.yaml`, so `nub pm update` keeps the hashed `packageManager`.
+pub fn pnpm_pin_ignored(cwd: &Path) -> bool {
+    root_manifest(cwd).is_some_and(|m| dev_engines_ignored(&m))
+}
+
+/// Whether `range` admits `version`, read with npm's grammar as pnpm reads it
+/// and as provisioning resolves the range against the registry.
 fn pnpm_range_allows(range: &str, version: &str) -> bool {
     match (
-        semver::VersionReq::parse(&super::registry::normalize_range(range)),
+        super::registry::PmRange::parse(range),
         semver::Version::parse(version),
     ) {
-        (Ok(range), Ok(version)) => range.matches(&version),
+        (Some(range), Ok(version)) => range.matches(&version),
         _ => false,
     }
 }
@@ -477,8 +501,7 @@ fn disagreement_warning(
     let parsed = semver::Version::parse(pm_bare).ok()?;
     let accepts = |(_, version): &(&str, Option<&str>)| {
         version.is_none_or(|range| {
-            semver::VersionReq::parse(&crate::pm::registry::normalize_range(range))
-                .map_or(true, |req| req.matches(&parsed))
+            crate::pm::registry::PmRange::parse(range).is_none_or(|req| req.matches(&parsed))
         })
     };
     if same_pm.iter().any(accepts) {
@@ -969,6 +992,28 @@ pub fn nub_shaped_range(range: &str) -> bool {
     range
         .strip_prefix('^')
         .is_some_and(|v| semver::Version::parse(v).is_ok())
+}
+
+/// Whether `nub pm update` rewrites `devEngines.packageManager` along with the
+/// pin, given its `range` and the `packageManager` version beside it (`None`
+/// when that field is absent). Only the pairs Nub itself writes move with the
+/// pin: a pnpm 11+ exact pair, or `^x.y.z` beside `packageManager` x.y.z. Any
+/// other range, including a bare `^x.y.z` with no `packageManager` (what
+/// `pnpm init` writes), is the user's and is kept. No range at all gets one.
+pub fn update_rewrites_dev_engines(
+    name: &str,
+    range: Option<&str>,
+    package_manager_version: Option<&str>,
+) -> bool {
+    let Some(range) = range else {
+        return true;
+    };
+    let Some(pin) = package_manager_version else {
+        return false;
+    };
+    let bare = pin.split_once('+').map_or(pin, |(b, _)| b).trim();
+    is_pnpm_11_pair(name, range, pin)
+        || (nub_shaped_range(range) && range.strip_prefix('^') == Some(bare))
 }
 
 /// Detected surface formatting of a manifest: the per-level indent unit (taken
@@ -1646,6 +1691,35 @@ mod tests {
                 "{hand_written:?} must read as hand-written"
             );
         }
+    }
+
+    #[test]
+    fn update_moves_only_the_dev_engines_ranges_nub_writes() {
+        // Nub's own pairs move with the pin.
+        assert!(update_rewrites_dev_engines(
+            "pnpm",
+            Some("^9.1.0"),
+            Some("9.1.0+sha512.ab")
+        ));
+        assert!(update_rewrites_dev_engines(
+            "pnpm",
+            Some("11.29.0"),
+            Some("11.29.0")
+        ));
+        assert!(update_rewrites_dev_engines("pnpm", None, Some("9.1.0")));
+        // `pnpm init` writes a caret range with no packageManager: the user's.
+        assert!(!update_rewrites_dev_engines("pnpm", Some("^11.8.0"), None));
+        // A caret over another version, or a hand-written range, stays too.
+        assert!(!update_rewrites_dev_engines(
+            "pnpm",
+            Some("^11.8.0"),
+            Some("11.29.0")
+        ));
+        assert!(!update_rewrites_dev_engines(
+            "pnpm",
+            Some(">=11.20.0 <12"),
+            Some("11.29.0")
+        ));
     }
 
     #[test]

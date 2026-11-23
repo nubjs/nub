@@ -293,10 +293,8 @@ pub async fn record_pnpm_env_lockfile(
     let lockfile_path = lockfile_dir.join(LOCKFILE);
     // With a target and no lockfile, write what pnpm's own first command
     // writes there: the env document alone.
-    let content = match std::fs::read_to_string(&lockfile_path) {
-        Ok(content) => content,
-        Err(_) if target.is_some() => String::new(),
-        Err(_) => return Ok(None),
+    let Some(content) = read_lockfile(&lockfile_path, target.is_some())? else {
+        return Ok(None);
     };
     let Some(manifest) = read_manifest(lockfile_dir) else {
         return Ok(None);
@@ -362,6 +360,20 @@ pub async fn record_pnpm_env_lockfile(
         .into_diagnostic()
         .wrap_err_with(|| format!("write {}", lockfile_path.display()))?;
     Ok(Some(version))
+}
+
+/// The lockfile's text; with `create`, an empty one when the file is missing.
+/// Only a missing file counts as no lockfile: any other read failure is an
+/// error, because writing over a file that could not be read would erase its
+/// project document.
+fn read_lockfile(path: &Path, create: bool) -> miette::Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(create.then(String::new)),
+        Err(e) => Err(e)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("read {}", path.display())),
+    }
 }
 
 /// The version a pin with nothing recorded resolves to offline: the
@@ -511,6 +523,49 @@ mod tests {
             recorded(Some("12.0.0")),
             None,
             "a target outside the range is ignored"
+        );
+    }
+
+    /// A lockfile that exists but can't be read is an error, never an absent
+    /// lockfile to create: replacing it would erase its project document.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_a_missing_lockfile_is_created() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{ "devEngines": { "packageManager": { "name": "pnpm", "version": "^11.20.0", "onFail": "warn" } } }"#,
+        )
+        .unwrap();
+        let lockfile = dir.path().join(LOCKFILE);
+        let bytes = b"lockfileVersion: '9.0'\n\nimporters:\n\n  .: {}\n";
+        std::fs::write(&lockfile, bytes).unwrap();
+        std::fs::set_permissions(&lockfile, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&lockfile).is_ok() {
+            return; // running as root: the file stays readable
+        }
+        let read = read_lockfile(&lockfile, true);
+        let result = record_pnpm_env_lockfile(
+            dir.path(),
+            Some("11.29.0"),
+            aube_registry::NetworkMode::Offline,
+        )
+        .await;
+        std::fs::set_permissions(&lockfile, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read.is_err(), "an unreadable lockfile is not a missing one");
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&lockfile).unwrap(), bytes);
+        // Only a missing file reads as no lockfile, and only then is one created.
+        let missing = dir.path().join("missing.yaml");
+        assert_eq!(read_lockfile(&missing, true).unwrap().as_deref(), Some(""));
+        assert_eq!(read_lockfile(&missing, false).unwrap(), None);
+        assert_eq!(
+            read_lockfile(&lockfile, true)
+                .unwrap()
+                .as_deref()
+                .map(str::as_bytes),
+            Some(&bytes[..])
         );
     }
 

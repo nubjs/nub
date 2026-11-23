@@ -664,7 +664,7 @@ fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
     }
 
     // 3. Otherwise treat the spec as a semver range and pick the highest match.
-    let req = semver::VersionReq::parse(&normalize_range(spec)).with_context(|| {
+    let req = PmRange::parse(spec).with_context(|| {
         format!("\"{spec}\" is not an exact version, dist-tag, or semver range")
     })?;
     let best = versions
@@ -675,6 +675,36 @@ fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
         .map(|(_, key)| key)
         .with_context(|| format!("no published version satisfies \"{spec}\""))?;
     dist_from_meta(best, &versions[best])
+}
+
+/// A package-manager version range, read with npm's grammar as pnpm and the
+/// vendored engine read it (`11.20.0 - 11.29.0`, `^11.20.0 || ^12.0.0`). A
+/// comma-separated spec only Cargo's grammar reads is still accepted.
+pub(crate) enum PmRange {
+    Npm(node_semver::Range),
+    Cargo(semver::VersionReq),
+}
+
+impl PmRange {
+    pub(crate) fn parse(spec: &str) -> Option<Self> {
+        node_semver::Range::parse(spec.trim())
+            .ok()
+            .map(PmRange::Npm)
+            .or_else(|| {
+                semver::VersionReq::parse(&normalize_range(spec))
+                    .ok()
+                    .map(PmRange::Cargo)
+            })
+    }
+
+    pub(crate) fn matches(&self, version: &semver::Version) -> bool {
+        match self {
+            PmRange::Npm(range) => {
+                node_semver::Version::parse(version.to_string()).is_ok_and(|v| range.satisfies(&v))
+            }
+            PmRange::Cargo(req) => req.matches(version),
+        }
+    }
 }
 
 /// Translate a node-semver range into the form Cargo's `semver` crate parses:
@@ -942,7 +972,7 @@ fn resolve_version_unchecked(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Res
     let spec = spec.trim();
     let base = cfg.base.trim_end_matches('/');
     let is_exact = semver::Version::parse(spec).is_ok();
-    let is_range = !is_exact && semver::VersionReq::parse(&normalize_range(spec)).is_ok();
+    let is_range = !is_exact && PmRange::parse(spec).is_some();
     if !is_range {
         let url = format!("{base}/{pkg}/{spec}");
         match download::fetch_text_accept_auth(&url, None, cfg.auth.as_ref()) {
@@ -1254,6 +1284,54 @@ mod tests {
             format!("{err:#}").contains("resolving pnpm@../npm/10.9.0"),
             "a traversing spec must fail to resolve: {err:#}"
         );
+    }
+
+    #[test]
+    fn registry_resolution_reads_npm_range_grammar() {
+        let meta = |v: &str| {
+            serde_json::json!({
+                "name": "pnpm",
+                "bin": { "pnpm": "bin/pnpm.cjs" },
+                "dist": { "tarball": format!("https://r/pnpm-{v}.tgz"), "shasum": "00" }
+            })
+        };
+        let packument = serde_json::json!({
+            "dist-tags": { "latest": "13.0.0" },
+            "versions": {
+                "11.19.0": meta("11.19.0"),
+                "11.29.0": meta("11.29.0"),
+                "12.23.0": meta("12.23.0"),
+                "13.0.0": meta("13.0.0")
+            }
+        });
+        let pick = |spec: &str| resolve_dist(&packument, spec).map(|d| d.version);
+        assert_eq!(pick("^11.20.0 || ^12.0.0").unwrap(), "12.23.0");
+        assert_eq!(pick("11.20.0 - 11.29.0").unwrap(), "11.29.0");
+    }
+
+    #[test]
+    fn pm_ranges_read_npm_grammar() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        let allows = |spec: &str, version: &str| {
+            PmRange::parse(spec)
+                .unwrap_or_else(|| panic!("{spec} parses"))
+                .matches(&v(version))
+        };
+        // Ranges Cargo's grammar can't read, which pnpm writes and accepts.
+        assert!(allows("11.20.0 - 11.29.0", "11.29.0"));
+        assert!(!allows("11.20.0 - 11.29.0", "11.29.1"));
+        assert!(allows("^11.20.0 || ^12.0.0", "12.23.0"));
+        assert!(!allows("^11.20.0 || ^12.0.0", "11.19.0"));
+        // The forms read before keep their meaning.
+        assert!(allows(">= 9 < 10", "9.5.0") && !allows(">= 9 < 10", "10.0.0"));
+        assert!(allows("9.1.0", "9.1.0") && !allows("9.1.0", "9.1.1"));
+        assert!(allows("9.1", "9.1.7") && !allows("9.1", "9.2.0"));
+        assert!(allows("10", "10.4.0") && allows(">=9, <11", "10.0.0"));
+        assert!(!allows("^11.0.0", "11.1.0-rc.1"));
+        // Dist-tags are not ranges.
+        for tag in ["latest", "next", "berry", "stable"] {
+            assert!(PmRange::parse(tag).is_none(), "{tag}");
+        }
     }
 
     #[test]

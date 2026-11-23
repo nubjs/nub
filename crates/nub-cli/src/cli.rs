@@ -10627,14 +10627,15 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 _ => range.clone().unwrap_or_else(|| "latest".to_string()),
             };
             // The pair semantics: devEngines = intent, packageManager = resolved
-            // record. A nub-shaped range (^x.y.z — what pin/update themselves
-            // write) is re-derived from the new exact; a hand-written one
-            // (">=9 <10", "~9.2") survives untouched. The update just resolved
+            // record. A pair Nub wrote (^x.y.z beside packageManager x.y.z) is
+            // re-derived from the new exact; any other range (">=9 <10", or a
+            // bare ^x.y.z as `pnpm init` writes) survives untouched. The update just resolved
             // WITHIN that range, so the new exact satisfies it by construction.
-            let keep_dev_engines = !repeats_pin
-                && range
-                    .as_deref()
-                    .is_some_and(|r| !resolve::nub_shaped_range(r));
+            let keep_dev_engines = !resolve::update_rewrites_dev_engines(
+                &name,
+                range.as_deref(),
+                pin.version.as_deref().filter(|_| from_package_manager),
+            );
             // A nub-shaped devEngines range moves with the pin (same writer as
             // `use`, onFail:"warn"); a hand-written one is the user's stated
             // constraint update floats WITHIN — never rewritten.
@@ -10647,13 +10648,13 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 |_| Ok(()),
             )?;
             warn_if_yarn_path_shadows_pin(&cwd, &name);
-            if pin.pm == Pm::Pnpm && keep_dev_engines && resolve::pnpm_records_own_pin(&version) {
+            if pin.pm == Pm::Pnpm && range_update_uses_lockfile(&cwd, &version, keep_dev_engines) {
                 // A hand-written range pins pnpm 11.1.3+ through the lockfile:
                 // record the new version there, then drop `packageManager`,
                 // whose different version pnpm warns about on every command.
                 let root = resolve::pin_target_dir(&cwd);
-                if record_pnpm_range_pin(&root, &version, &write)? {
-                    match current {
+                if record_pnpm_range_pin(&root, &version, &write, from_package_manager)? {
+                    match current.filter(|c| semver::Version::parse(c).is_ok()) {
                         Some(cur) if cur == version => {
                             eprintln!(
                                 "{name} is already on the newest version in range ({version})."
@@ -10986,6 +10987,14 @@ fn keep_pnpm_pin_digest(
     Ok(true)
 }
 
+/// Whether `nub pm update` to pnpm `version` keeps the pin in `pnpm-lock.yaml`
+/// alone: the range is the user's (`keep_dev_engines`), the pnpm records its
+/// own pin, and `onFail` is not `ignore`, under which pnpm records nothing.
+fn range_update_uses_lockfile(cwd: &Path, version: &str, keep_dev_engines: bool) -> bool {
+    use nub_core::pm::resolve;
+    keep_dev_engines && resolve::pnpm_records_own_pin(version) && !resolve::pnpm_pin_ignored(cwd)
+}
+
 /// `nub pm update` under a hand-written `devEngines.packageManager` range,
 /// for pnpm 11.1.3 and later: record `version` and its digest in
 /// `pnpm-lock.yaml`'s `packageManagerDependencies` (creating the env document
@@ -10993,11 +11002,14 @@ fn keep_pnpm_pin_digest(
 /// drop `packageManager`. The resolver runs the recorded version while the
 /// range allows it. When the lockfile cannot record this tarball, the hashed
 /// `packageManager` the update just wrote stays, so the digest is not lost.
-/// Returns whether `packageManager` was dropped.
+/// Returns whether `packageManager` was dropped. `had_pin` says whether the
+/// project carried one before the update wrote it, which decides whether the
+/// removal is news to print.
 fn record_pnpm_range_pin(
     root: &Path,
     version: &str,
     write: &nub_core::pm::resolve::DeclaredPmWrite,
+    had_pin: bool,
 ) -> Result<bool> {
     use base64::Engine as _;
     if let Err(e) = crate::pm_engine::record_pnpm_package_manager_pin(root, Some(version)) {
@@ -11017,7 +11029,9 @@ fn record_pnpm_range_pin(
     }
     nub_core::pm::resolve::remove_package_manager_pin(root)?;
     eprintln!("nub: pnpm-lock.yaml: packageManagerDependencies = pnpm@{version} (+integrity)");
-    eprintln!("nub: package.json: packageManager removed; devEngines.packageManager pins pnpm");
+    if had_pin {
+        eprintln!("nub: package.json: packageManager removed; devEngines.packageManager pins pnpm");
+    }
     Ok(true)
 }
 
@@ -15471,6 +15485,32 @@ mod tests {
         );
     }
 
+    /// `nub pm update` moves a user's range pin into the lockfile only where
+    /// pnpm keeps one there: 11.1.3 and later, and never under `onFail: "ignore"`,
+    /// whose hashed `packageManager` stays.
+    #[test]
+    fn a_range_update_keeps_the_hashed_pin_under_on_fail_ignore() {
+        let project = |on_fail: &str| {
+            let dir = pm_tmpdir("range-update");
+            std::fs::write(
+                dir.join("package.json"),
+                format!(
+                    r#"{{"devEngines":{{"packageManager":{{"name":"pnpm","version":"^11.20.0","onFail":"{on_fail}"}}}}}}"#
+                ),
+            )
+            .unwrap();
+            dir
+        };
+        let warn = project("warn");
+        assert!(range_update_uses_lockfile(&warn, "11.29.0", true));
+        assert!(!range_update_uses_lockfile(&warn, "11.1.2", true));
+        assert!(!range_update_uses_lockfile(&warn, "11.29.0", false));
+        let ignore = project("ignore");
+        assert!(!range_update_uses_lockfile(&ignore, "11.29.0", true));
+        let _ = std::fs::remove_dir_all(&warn);
+        let _ = std::fs::remove_dir_all(&ignore);
+    }
+
     /// A pnpm 11.1.3+ `devEngines.packageManager` range with no `packageManager`
     /// runs the pnpm `pnpm-lock.yaml` records, while the range allows it, rather
     /// than re-resolving the newest release in range on every run.
@@ -15524,6 +15564,21 @@ mod tests {
             ),
             ("11.29.0".to_string(), PinSource::PackageManager),
             "packageManager still wins"
+        );
+        for npm_only in ["11.20.0 - 11.29.0", "^11.20.0 || ^12.0.0"] {
+            assert_eq!(
+                resolve(&range(npm_only), "11.20.0"),
+                ("11.20.0".to_string(), PinSource::PnpmLockfile),
+                "{npm_only} is read with npm's grammar"
+            );
+        }
+        assert_eq!(
+            resolve(
+                r#"{"devEngines":{"packageManager":{"name":"pnpm","version":"^11.20.0","onFail":"ignore"}}}"#,
+                "11.20.0"
+            ),
+            ("^11.20.0".to_string(), PinSource::DevEngines),
+            "onFail ignore: pnpm does not follow the record, so nub does not either"
         );
     }
 
