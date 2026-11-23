@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::pm::shim::{
-    self, InstalledShim, ProfileOutcome, ShimBlock, ShimReachability, add_path_block_for,
+    self, InstalledShim, ProfileOutcome, ShimBlock, ShimReachability,
     remove_path_block_from_profiles,
 };
 
@@ -169,17 +169,7 @@ pub fn install_node_shim(nub_binary: &Path) -> Result<InstalledShim> {
 
 /// Add the node-shim PATH block to the current shell's profiles.
 pub fn add_node_path_block() -> Result<ProfileOutcome> {
-    let home = dirs_next::home_dir().context("cannot locate the home directory")?;
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let shell = Path::new(&shell)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "bash".to_string());
-    let xdg = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from);
-    add_path_block_for(&shell, &home, xdg.as_deref(), &NODE_SHIM_BLOCK)
+    shim::add_path_block_current_shell(&NODE_SHIM_BLOCK)
 }
 
 /// `nub node unshim`: delete the node shim dir and strip the node-shim PATH

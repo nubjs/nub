@@ -19,6 +19,17 @@ The shims live in the first of these directories:
 
 The shims do not choose the manager; the `packageManager` pin in `package.json` does. Set it with [`nub pm use`](/docs/pm#nub-pm-use), which never touches your PATH.
 
+Installing the shims also adds their directory to PATH in your shell profile. Set `NUB_NO_MODIFY_PATH`, the variable the install script reads, to keep your own PATH setup:
+
+```console
+$ NUB_NO_MODIFY_PATH=1 nub pm shim
+6 entries in /Users/you/.local/share/nub/shims (6 created)
+  PATH: not edited (NUB_NO_MODIFY_PATH is set). Add this line yourself:
+    export PATH="${XDG_DATA_HOME:-$HOME/.local/share}/nub/shims:$PATH"
+```
+
+Export it in your shell config and a re-run after `nub upgrade` leaves the profile alone too.
+
 ## Strict by default
 
 In a pinned project, a shim refuses to run a different package manager, which would write a competing lockfile and `node_modules`. The error names the command to run instead:

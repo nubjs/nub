@@ -734,6 +734,54 @@ fn pm_shim_and_unshim_round_trip_against_a_temp_home() {
     assert_eq!(code4, 0, "a second unshim is a clean no-op");
 }
 
+#[test]
+fn no_modify_path_installs_the_shims_and_leaves_every_profile_alone() {
+    let home = tmp("home-no-modify");
+    let zshrc = home.join(".zshrc");
+    let original = "# mine\nexport PATH=\"$HOME/my/shims:$PATH\"\n";
+    std::fs::write(&zshrc, original).unwrap();
+    let home_s = home.to_str().unwrap();
+
+    // An unrecognized value refuses before anything is linked, as install.sh does.
+    let env = [
+        ("HOME", home_s),
+        ("SHELL", "/bin/zsh"),
+        ("NUB_NO_MODIFY_PATH", "maybe"),
+    ];
+    let (_, stderr, code) = run(&nub_binary(), &["pm", "shim"], &home, &env);
+    assert_ne!(code, 0, "an invalid NUB_NO_MODIFY_PATH must refuse");
+    assert!(stderr.contains("NUB_NO_MODIFY_PATH"), "stderr:\n{stderr}");
+    let shims = home.join(".local/share/nub/shims");
+    assert!(!shims.exists(), "a refused run must not link the shims");
+
+    let env = [
+        ("HOME", home_s),
+        ("SHELL", "/bin/zsh"),
+        ("NUB_NO_MODIFY_PATH", "1"),
+    ];
+    let (stdout, stderr, code) = run(&nub_binary(), &["pm", "shim"], &home, &env);
+    assert_eq!(code, 0, "nub pm shim must succeed; stderr:\n{stderr}");
+    assert!(
+        shims.join("pnpm").is_file(),
+        "the shims still land; stdout:\n{stdout}"
+    );
+    assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), original);
+    assert!(
+        !home.join(".zshenv").exists(),
+        ".zshenv must not be created"
+    );
+    assert!(
+        stdout.contains("NUB_NO_MODIFY_PATH") && stdout.contains("/nub/shims:$PATH"),
+        "the report prints the line to add by hand, got:\n{stdout}"
+    );
+
+    let (_, stderr, code) = run(&nub_binary(), &["node", "shim"], &home, &env);
+    assert_eq!(code, 0, "nub node shim must succeed; stderr:\n{stderr}");
+    assert!(home.join(".local/share/nub/node-shim/node").is_file());
+    assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), original);
+    assert!(!home.join(".zshenv").exists());
+}
+
 /// A project whose lockfile is npm's, with one `file:` dependency and no
 /// registry package, so the engine installs it with the registry dead.
 fn npm_link_only_project(work: &Path) -> PathBuf {

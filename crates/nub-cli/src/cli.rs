@@ -11401,6 +11401,9 @@ fn run_pm_shim_install(args: &[String]) -> Result<i32> {
 
     // Canonicalized, so a symlinked `nub` on PATH links the real bytes (the
     // same posture as every other `current_nub_binary` call site).
+    // Read before any work, so an invalid value refuses up front instead of
+    // after the shims are already linked.
+    let edit_profiles = !shim::path_edits_disabled()?;
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::shim_dir()?;
 
@@ -11412,7 +11415,7 @@ fn run_pm_shim_install(args: &[String]) -> Result<i32> {
         .map(|home| shim::migrate_legacy_shim_dir(&home, shim::SHIMS_LEAF_PUBLIC))
         .transpose()?
         .flatten();
-    if migrated.is_some() {
+    if migrated.is_some() && edit_profiles {
         shim::remove_path_block()?;
     }
 
@@ -11517,6 +11520,9 @@ fn run_pm_shim_install(args: &[String]) -> Result<i32> {
         ProfileOutcome::Manual { line } => println!(
             "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
         ),
+        ProfileOutcome::Skipped { line } => println!(
+            "  PATH: not edited (NUB_NO_MODIFY_PATH is set). Add this line yourself:\n    {line}"
+        ),
     }
 
     // Reachability (Volta's check_shim_reachable idea): meaningful only once
@@ -11595,6 +11601,7 @@ fn run_node_shim_install() -> Result<i32> {
     use nub_core::node::shim;
     use nub_core::pm::shim::{ProfileOutcome, ShimAction};
 
+    let edit_profiles = !nub_core::pm::shim::path_edits_disabled()?;
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::node_shim_dir()?;
 
@@ -11604,7 +11611,7 @@ fn run_node_shim_install() -> Result<i32> {
         .map(|home| nub_core::pm::shim::migrate_legacy_shim_dir(&home, shim::NODE_SHIM_LEAF_PUBLIC))
         .transpose()?
         .flatten();
-    if migrated.is_some() {
+    if migrated.is_some() && edit_profiles {
         shim::remove_node_path_block()?;
     }
 
@@ -11676,6 +11683,9 @@ fn run_node_shim_install() -> Result<i32> {
         ),
         ProfileOutcome::Manual { line } => println!(
             "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
+        ),
+        ProfileOutcome::Skipped { line } => println!(
+            "  PATH: not edited (NUB_NO_MODIFY_PATH is set). Add this line yourself:\n    {line}"
         ),
     }
 

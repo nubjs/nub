@@ -161,7 +161,7 @@ node shim in /Users/you/.local/share/nub/node-shim (created)
 
 The shimmed `node` resolves and provisions the version by the [precedence above](#version-precedence) and adds nothing else. So `node app.ts` type-strips as stock Node does, while `nub app.ts` transpiles it.
 
-The link lives in `$XDG_DATA_HOME/nub/node-shim`, or `~/.local/share/nub/node-shim` when that variable is unset. That directory goes first on your PATH, so a Node you install later is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade`.
+The link lives in `$XDG_DATA_HOME/nub/node-shim`, or `~/.local/share/nub/node-shim` when that variable is unset. That directory goes first on your PATH, so a Node you install later is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade`. With `NUB_NO_MODIFY_PATH=1` set, it edits no shell profile and prints the line to add instead.
 
 ```console
 $ nub node unshim
