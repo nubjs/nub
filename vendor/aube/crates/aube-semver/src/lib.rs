@@ -484,24 +484,6 @@ impl Range {
     pub fn satisfies_str(&self, version: &str) -> bool {
         Version::parse_in(version, self.mode).is_some_and(|v| self.satisfies(&v))
     }
-
-    /// The range with every set that no version can satisfy left out, in
-    /// npm's canonical comparator form — a spelling any semver reader that
-    /// intersects satisfiable comparators reads the same way. A range with
-    /// no satisfiable set is `<0.0.0-0`, npm's empty range.
-    pub fn satisfiable_form(&self) -> String {
-        let sets: Vec<String> = self
-            .sets
-            .iter()
-            .filter(|set| set_is_satisfiable(set))
-            .map(|set| format_set(set))
-            .collect();
-        match sets.join("||") {
-            _ if sets.is_empty() => "<0.0.0-0".to_string(),
-            any if any.is_empty() => "*".to_string(),
-            range => range,
-        }
-    }
 }
 
 impl fmt::Display for Range {
@@ -541,31 +523,6 @@ fn test_set(set: &[Comparator], version: &Version) -> bool {
         c.0.as_ref()
             .is_some_and(|(_, bound)| bound.is_prerelease() && bound.same_release(version))
     })
-}
-
-/// Whether the comparators' lower and upper bounds leave any version.
-fn set_is_satisfiable(set: &[Comparator]) -> bool {
-    let mut lower: Option<(&Version, bool)> = None;
-    let mut upper: Option<(&Version, bool)> = None;
-    for (op, v) in set.iter().filter_map(|c| c.0.as_ref()) {
-        let (is_lower, is_upper, inclusive) = match op {
-            Op::Eq => (true, true, true),
-            Op::Gt => (true, false, false),
-            Op::Gte => (true, false, true),
-            Op::Lt => (false, true, false),
-            Op::Lte => (false, true, true),
-        };
-        if is_lower && lower.is_none_or(|(l, inc)| v > l || (v == l && inc && !inclusive)) {
-            lower = Some((v, inclusive));
-        }
-        if is_upper && upper.is_none_or(|(u, inc)| v < u || (v == u && inc && !inclusive)) {
-            upper = Some((v, inclusive));
-        }
-    }
-    match (lower, upper) {
-        (Some((l, l_inc)), Some((u, u_inc))) => l < u || (l == u && l_inc && u_inc),
-        _ => true,
-    }
 }
 
 /// npm's `parseRange`: the rewrite passes, in npm's order, over one set.
@@ -811,34 +768,164 @@ impl fmt::Display for InvalidRange {
 
 impl std::error::Error for InvalidRange {}
 
-/// npm's loose reading of `spec` (how npm and pnpm pick dependency versions),
-/// as the `node_semver::Range` the engine matches and intersects with.
+/// npm's loose reading of `spec`: how npm and pnpm pick dependency versions,
+/// and the one way the engine reads a dependency range.
 ///
-/// An empty spec is refused, though npm reads it as `*`: `node_semver`
-/// refused it, and the engine's callers that mean `*` by it say so first
-/// (`normalize_range`), while the rest rely on the refusal.
-#[cfg(feature = "node-semver")]
-pub fn node_range(spec: &str) -> Result<node_semver::Range, InvalidRange> {
+/// An empty spec is refused, though npm reads it as `*`: the engine's
+/// callers that mean `*` by it say so first (`normalize_range`), while the
+/// rest rely on the refusal, which they had from `node-semver`.
+pub fn parse_range(spec: &str) -> Result<Range, InvalidRange> {
     if js_trim(spec).is_empty() {
         return Err(InvalidRange(spec.to_string()));
     }
-    Range::parse_loose(spec)
-        .and_then(|range| range.to_node_semver())
-        .ok_or_else(|| InvalidRange(spec.to_string()))
+    Range::parse_loose(spec).ok_or_else(|| InvalidRange(spec.to_string()))
+}
+
+impl Range {
+    /// npm's `range.intersects(other)`: some set of each could share a
+    /// version, judged comparator by comparator as npm judges it.
+    pub fn intersects(&self, other: &Range) -> bool {
+        self.sets.iter().any(|ours| {
+            set_is_satisfiable(ours)
+                && other.sets.iter().any(|theirs| {
+                    set_is_satisfiable(theirs)
+                        && ours.iter().all(|a| theirs.iter().all(|b| a.intersects(b)))
+                })
+        })
+    }
+
+    /// The range both admit: every set of one joined with every set of the
+    /// other, each joined set needing all comparators of both.
+    pub fn intersect(&self, other: &Range) -> Range {
+        let mut sets = Vec::new();
+        for ours in &self.sets {
+            for theirs in &other.sets {
+                let mut joined: Vec<Comparator> = ours
+                    .iter()
+                    .chain(theirs)
+                    .filter(|c| c.0.is_some())
+                    .cloned()
+                    .collect();
+                if joined.is_empty() {
+                    joined.push(Comparator(None));
+                }
+                sets.push(joined);
+            }
+        }
+        Range {
+            sets,
+            mode: self.mode,
+        }
+    }
+
+    /// npm's `semver.minVersion(range)`: the lowest version the range admits,
+    /// or `None` when it admits none.
+    pub fn min_version(&self) -> Option<Version> {
+        let zero = |pre: bool| Version {
+            major: 0,
+            minor: 0,
+            patch: 0,
+            prerelease: if pre {
+                vec![Identifier::Numeric("0".into())]
+            } else {
+                vec![]
+            },
+        };
+        for candidate in [zero(false), zero(true)] {
+            if self.satisfies(&candidate) {
+                return Some(candidate);
+            }
+        }
+        let mut min: Option<Version> = None;
+        for set in &self.sets {
+            let mut set_min: Option<Version> = None;
+            for (op, bound) in set.iter().filter_map(|c| c.0.as_ref()) {
+                let mut v = bound.clone();
+                match op {
+                    Op::Gt if v.prerelease.is_empty() => v.patch += 1,
+                    Op::Gt => v.prerelease.push(Identifier::Numeric("0".into())),
+                    Op::Eq | Op::Gte => {}
+                    Op::Lt | Op::Lte => continue,
+                }
+                if set_min.as_ref().is_none_or(|m| v > *m) {
+                    set_min = Some(v);
+                }
+            }
+            if let Some(v) = set_min
+                && min.as_ref().is_none_or(|m| *m > v)
+            {
+                min = Some(v);
+            }
+        }
+        min.filter(|v| self.satisfies(v))
+    }
+}
+
+impl Comparator {
+    /// npm's `Comparator#intersects` with `includePrerelease: false`.
+    fn intersects(&self, other: &Comparator) -> bool {
+        let (Some((a_op, a)), Some((b_op, b))) = (&self.0, &other.0) else {
+            return true;
+        };
+        if *a_op == Op::Eq {
+            return Comparator(Some((*b_op, b.clone()))).test_alone(a);
+        }
+        if *b_op == Op::Eq {
+            return Comparator(Some((*a_op, a.clone()))).test_alone(b);
+        }
+        // `value.startsWith('<0.0.0')`: below every release.
+        let below_zero =
+            |op: Op, v: &Version| op == Op::Lt && (v.major, v.minor, v.patch) == (0, 0, 0);
+        if below_zero(*a_op, a) || below_zero(*b_op, b) {
+            return false;
+        }
+        let gt = |op: Op| matches!(op, Op::Gt | Op::Gte);
+        let inclusive = |op: Op| matches!(op, Op::Gte | Op::Lte);
+        (gt(*a_op) && gt(*b_op))
+            || (!gt(*a_op) && !gt(*b_op))
+            || (a == b && inclusive(*a_op) && inclusive(*b_op))
+            || (a < b && gt(*a_op) && !gt(*b_op))
+            || (a > b && !gt(*a_op) && gt(*b_op))
+    }
+
+    /// `new Range(this.value).test(version)`: the comparator as a one-set
+    /// range, prerelease rule included.
+    fn test_alone(&self, version: &Version) -> bool {
+        test_set(std::slice::from_ref(self), version)
+    }
+}
+
+/// npm's `isSatisfiable`: every comparator intersects every other.
+fn set_is_satisfiable(set: &[Comparator]) -> bool {
+    set.iter()
+        .enumerate()
+        .all(|(i, a)| set[i + 1..].iter().all(|b| a.intersects(b)))
+}
+
+#[cfg(feature = "node-semver")]
+impl From<&node_semver::Version> for Version {
+    fn from(v: &node_semver::Version) -> Self {
+        Version {
+            major: v.major,
+            minor: v.minor,
+            patch: v.patch,
+            prerelease: v
+                .pre_release
+                .iter()
+                .map(|id| match id {
+                    node_semver::Identifier::Numeric(n) => Identifier::Numeric(n.to_string()),
+                    node_semver::Identifier::AlphaNumeric(s) => Identifier::parse(s),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[cfg(feature = "node-semver")]
 impl Range {
-    /// This range as a `node_semver::Range` that matches what it matches.
-    ///
-    /// `node_semver` gets npm's canonical comparators with the empty sets
-    /// left out ([`Range::satisfiable_form`]), never the spec as written: it
-    /// reads `<=11` as `<=11.0.0-0` where npm reads `<12.0.0-0`, and it
-    /// reads a set whose comparators cannot all hold as their union.
-    /// Canonical comparators over satisfiable sets it reads as npm does,
-    /// which the tests check against npm's own verdicts. `None` only for a
-    /// part too close to `MAX_SAFE_INTEGER` for `node_semver`.
-    pub fn to_node_semver(&self) -> Option<node_semver::Range> {
-        node_semver::Range::parse(self.satisfiable_form()).ok()
+    /// [`Range::satisfies`] for a version the engine parsed with `node-semver`,
+    /// which still reads published versions; ranges are read only here.
+    pub fn satisfies_node(&self, version: &node_semver::Version) -> bool {
+        self.satisfies(&Version::from(version))
     }
 }

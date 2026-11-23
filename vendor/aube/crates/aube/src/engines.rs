@@ -173,10 +173,10 @@ fn version_satisfies(version: &str, range: &str) -> bool {
     let Ok(v) = node_semver::Version::parse(version) else {
         return true;
     };
-    let Ok(r) = aube_semver::node_range(range) else {
+    let Ok(r) = aube_semver::parse_range(range) else {
         return true;
     };
-    v.satisfies(&r)
+    r.satisfies_node(&v)
 }
 
 /// Check a single field in an `engines` map. Returns the declared range

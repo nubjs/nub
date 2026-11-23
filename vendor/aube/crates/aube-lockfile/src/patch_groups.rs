@@ -169,7 +169,7 @@ pub fn classify_pnpm_patch_key(key: &str) -> Result<PatchKeyForm<'_>, InvalidPat
             version: selector,
         });
     }
-    if aube_semver::node_range(selector).is_err() {
+    if aube_semver::parse_range(selector).is_err() {
         return Err(InvalidPatchRange {
             range: selector.to_string(),
         });
@@ -194,7 +194,7 @@ struct Group<'a> {
     /// `(display range, parsed range, source key)`, in insertion order.
     /// The range is parsed once here so `resolve` doesn't reparse per
     /// package.
-    range: Vec<(&'a str, node_semver::Range, &'a str)>,
+    range: Vec<(&'a str, aube_semver::Range, &'a str)>,
     /// The wildcard / bare-name catch-all, if declared.
     all: Option<&'a str>,
 }
@@ -234,7 +234,7 @@ impl<'a> PatchGroups<'a> {
                     // `classify_patch_key` already validated the range,
                     // so the reparse cannot fail — but avoid `unwrap` at
                     // the boundary and treat a parse miss as "no range".
-                    if let Ok(parsed) = aube_semver::node_range(range) {
+                    if let Ok(parsed) = aube_semver::parse_range(range) {
                         groups
                             .entry(name)
                             .or_insert_with(Group::new)
@@ -270,10 +270,10 @@ impl<'a> PatchGroups<'a> {
         // no range can satisfy it, matching `semver.satisfies` returning
         // false, so it falls through to `all`.
         if let Ok(parsed) = node_semver::Version::parse(version) {
-            let satisfied: Vec<&(&'a str, node_semver::Range, &'a str)> = group
+            let satisfied: Vec<&(&'a str, aube_semver::Range, &'a str)> = group
                 .range
                 .iter()
-                .filter(|(_, r, _)| r.satisfies(&parsed))
+                .filter(|(_, r, _)| r.satisfies_node(&parsed))
                 .collect();
             if satisfied.len() > 1 {
                 return Err(PatchKeyConflict {

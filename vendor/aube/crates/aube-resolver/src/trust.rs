@@ -349,7 +349,7 @@ pub(crate) fn repick_past_downgrade<'a>(
     // version, which has no lower alternative by definition, and a channel
     // pointer like `next` must not leak a stable release into a prerelease
     // line.
-    let range = match aube_semver::node_range(crate::semver_util::normalize_range(range_str)) {
+    let range = match aube_semver::parse_range(crate::semver_util::normalize_range(range_str)) {
         Ok(range) => range,
         Err(_) if range_str == "latest" => {
             let latest = packument.dist_tags.get("latest")?;
@@ -360,7 +360,7 @@ pub(crate) fn repick_past_downgrade<'a>(
             {
                 return None;
             }
-            aube_semver::node_range(&format!("<={latest}")).ok()?
+            aube_semver::parse_range(&format!("<={latest}")).ok()?
         }
         Err(_) => return None,
     };
@@ -380,7 +380,7 @@ pub(crate) fn repick_past_downgrade<'a>(
         } else if version >= rejected {
             continue;
         }
-        if !version.satisfies(&range) {
+        if !range.satisfies_node(&version) {
             continue;
         }
         let effective = if is_age_exempt(ver_str, Some(&version)) {
@@ -626,7 +626,7 @@ struct TrustExcludeRule {
     name_matcher: NameMatcher,
     /// `None` → rule matches every version of any name match.
     /// `Some(ranges)` → rule matches any version satisfying one range.
-    version_ranges: Option<Vec<node_semver::Range>>,
+    version_ranges: Option<Vec<aube_semver::Range>>,
 }
 
 #[derive(Debug, Clone)]
@@ -739,7 +739,7 @@ impl TrustExcludeRules {
             match &rule.version_ranges {
                 None => return true,
                 Some(ranges) => {
-                    if ranges.iter().any(|r| version.satisfies(r)) {
+                    if ranges.iter().any(|r| r.satisfies_node(version)) {
                         return true;
                     }
                 }
@@ -805,7 +805,7 @@ fn parse_one(pattern: &str) -> Result<TrustExcludeRule, TrustExcludeParseError> 
                         pattern: pattern.to_string(),
                     });
                 }
-                let r = aube_semver::node_range(trimmed).map_err(|_| {
+                let r = aube_semver::parse_range(trimmed).map_err(|_| {
                     TrustExcludeParseError::InvalidVersionUnion {
                         pattern: pattern.to_string(),
                     }

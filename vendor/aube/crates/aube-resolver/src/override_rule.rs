@@ -309,10 +309,10 @@ fn version_in_req(version: &str, req: &str) -> bool {
     let Ok(v) = node_semver::Version::parse(version) else {
         return false;
     };
-    let Ok(r) = aube_semver::node_range(req) else {
+    let Ok(r) = aube_semver::parse_range(req) else {
         return false;
     };
-    v.satisfies(&r)
+    r.satisfies_node(&v)
 }
 
 /// Does the task's declared range overlap the selector req? This is a
@@ -330,19 +330,19 @@ fn version_in_req(version: &str, req: &str) -> bool {
 /// (overriding too aggressively beats silently ignoring); for a task
 /// range we can't parse we also don't block the override.
 fn range_could_satisfy(task_range: &str, req: &str) -> bool {
-    let Ok(selector) = aube_semver::node_range(req) else {
+    let Ok(selector) = aube_semver::parse_range(req) else {
         return true;
     };
     // A concrete pinned version as the task range: membership in the
     // selector is the intersection question.
     if let Ok(v) = node_semver::Version::parse(task_range) {
-        return v.satisfies(&selector);
+        return selector.satisfies_node(&v);
     }
-    let Ok(declared) = aube_semver::node_range(task_range) else {
+    let Ok(declared) = aube_semver::parse_range(task_range) else {
         // Couldn't make sense of task_range. Don't block the override.
         return true;
     };
-    declared.allows_any(&selector)
+    declared.intersects(&selector)
 }
 
 #[cfg(test)]

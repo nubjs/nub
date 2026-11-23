@@ -974,8 +974,8 @@ fn retained_peer_spec_is_compatible(peer_range: &str, locked_spec: &str) -> bool
     };
     node_semver::Version::parse(locked_spec)
         .ok()
-        .zip(aube_semver::node_range(normalized_range).ok())
-        .is_some_and(|(version, range)| version.satisfies(&range))
+        .zip(aube_semver::parse_range(normalized_range).ok())
+        .is_some_and(|(version, range)| range.satisfies_node(&version))
 }
 
 /// Merge `pnpm-workspace.yaml` overrides on top of the manifest's

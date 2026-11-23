@@ -943,9 +943,9 @@ fn spec_satisfies_version(spec: &str, version: &str) -> bool {
     let Ok(version) = node_semver::Version::parse(version) else {
         return false;
     };
-    aube_semver::node_range(spec_range(spec))
+    aube_semver::parse_range(spec_range(spec))
         .ok()
-        .is_some_and(|range| version.satisfies(&range))
+        .is_some_and(|range| range.satisfies_node(&version))
 }
 
 fn range_prefix(spec: &str) -> &'static str {
@@ -1005,15 +1005,15 @@ fn version_is_vulnerable(version: &str, vulnerable_versions: &[String]) -> bool 
     };
     vulnerable_versions
         .iter()
-        .filter_map(|range| aube_semver::node_range(range).ok())
-        .any(|range| version.satisfies(&range))
+        .filter_map(|range| aube_semver::parse_range(range).ok())
+        .any(|range| range.satisfies_node(&version))
 }
 
 /// Atomic package.json write via tempfile + rename. Crash or Ctrl+C
 fn best_non_vulnerable(packument: &Packument, vulnerable_versions: &[String]) -> Option<String> {
-    let vulnerable: Vec<node_semver::Range> = vulnerable_versions
+    let vulnerable: Vec<aube_semver::Range> = vulnerable_versions
         .iter()
-        .filter_map(|range| aube_semver::node_range(range).ok())
+        .filter_map(|range| aube_semver::parse_range(range).ok())
         .collect();
     let mut best: Option<(&str, node_semver::Version)> = None;
     for ver_str in packument.versions.keys() {
@@ -1023,7 +1023,10 @@ fn best_non_vulnerable(packument: &Packument, vulnerable_versions: &[String]) ->
         if !version.pre_release.is_empty() {
             continue;
         }
-        if vulnerable.iter().any(|range| version.satisfies(range)) {
+        if vulnerable
+            .iter()
+            .any(|range| range.satisfies_node(&version))
+        {
             continue;
         }
         if best.as_ref().is_none_or(|(_, current)| version > *current) {

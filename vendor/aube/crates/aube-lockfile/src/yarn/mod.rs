@@ -171,11 +171,11 @@ pub(super) fn version_satisfies(version: &str, range: &str) -> bool {
     let range = if range.trim().is_empty() { "*" } else { range };
     let (Ok(v), Ok(r)) = (
         node_semver::Version::parse(version),
-        aube_semver::node_range(range),
+        aube_semver::parse_range(range),
     ) else {
         return false;
     };
-    v.satisfies(&r)
+    r.satisfies_node(&v)
 }
 
 #[cfg(test)]

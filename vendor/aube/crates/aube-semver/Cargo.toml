@@ -17,6 +17,7 @@ regex = "1"
 node-semver = { version = "2", optional = true }
 
 [features]
-# `node_range`: npm's reading of a range, handed to the `node_semver::Range`
-# the engine's resolver and commands match with.
+# `Range::satisfies_node`: match a version the engine parsed with
+# `node-semver`, which still reads published versions. Ranges are read and
+# matched only here.
 node-semver = ["dep:node-semver"]

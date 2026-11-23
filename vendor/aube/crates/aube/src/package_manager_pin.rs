@@ -202,11 +202,10 @@ fn plan(manifest: &Value, existing: Option<&EnvLockfile>, target: Option<&str>) 
     });
     let Some(version) = locked.or_else(|| offline_version(&wanted)) else {
         // A range below pnpm 11 records nothing whichever release it picks.
-        let records = aube_semver::node_range(">=11.0.0-0").ok();
+        let records = aube_semver::parse_range(">=11.0.0-0").ok();
         let below_11 = npm_range(&wanted.specifier)
-            .and_then(|range| range.to_node_semver())
             .zip(records)
-            .is_some_and(|(range, records)| !range.allows_any(&records));
+            .is_some_and(|(range, records)| !range.intersects(&records));
         return if below_11 {
             Plan::Current
         } else {
@@ -392,13 +391,6 @@ fn offline_version(wanted: &WantedPnpm) -> Option<String> {
         .then(|| wanted.specifier.clone())
 }
 
-/// `range` spelled so the resolver, which reads ranges with `node_semver`,
-/// admits what npm admits: npm's canonical comparators (`<=11` is
-/// `<12.0.0-0`), with every set no version satisfies left out.
-fn resolver_range(range: &str) -> String {
-    npm_range(range).map_or_else(|| range.to_string(), |r| r.satisfiable_form())
-}
-
 /// The newest release in `range` the project's `minimumReleaseAge` admits —
 /// the version pnpm itself switches to for a range pin.
 async fn newest_in_range(
@@ -407,7 +399,7 @@ async fn newest_in_range(
     network_mode: aube_registry::NetworkMode,
 ) -> miette::Result<Option<String>> {
     let manifest = aube_manifest::PackageJson {
-        dependencies: BTreeMap::from([("pnpm".to_string(), resolver_range(range))]),
+        dependencies: BTreeMap::from([("pnpm".to_string(), range.to_string())]),
         ..Default::default()
     };
     let graph = resolve(lockfile_dir, &manifest, true, network_mode)
@@ -612,16 +604,6 @@ mod tests {
             wanted(json!({ "devEngines": { "packageManager":
                 { "name": "pnpm", "version": ">=11.25.0, <12.0.0" } } })),
             None
-        );
-    }
-
-    #[test]
-    fn the_resolver_gets_npm_s_reading_of_a_range() {
-        assert_eq!(resolver_range("<=11"), "<12.0.0-0");
-        assert_eq!(resolver_range(">=11.29.0 <=11.20.* || 11.15.0"), "11.15.0");
-        assert_eq!(
-            resolver_range("^11.20.0 || ^12.0.0"),
-            ">=11.20.0 <12.0.0-0||>=12.0.0 <13.0.0-0"
         );
     }
 

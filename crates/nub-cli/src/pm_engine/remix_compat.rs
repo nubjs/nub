@@ -52,20 +52,20 @@ pub(crate) fn remix_needs_project_local_store(root: &Path, workspace_members: &[
 }
 
 fn range_may_select_unaware_prerelease(range: &str) -> bool {
-    if aube_semver::node_range(range).is_err() {
+    if aube_semver::parse_range(range).is_err() {
         return true;
     }
-    let unaware = aube_semver::node_range(REMIX_STORE_UNAWARE).expect("valid range");
+    let unaware = aube_semver::parse_range(REMIX_STORE_UNAWARE).expect("valid range");
     // An interval overlap is not enough: `>=2` overlaps the window yet admits no
     // prerelease. Prerelease admission is decided per comparator set, so each
     // `||` alternative is tested on its own, with the smallest version the overlap
     // contains — every `3.0.0-*` in an overlap is admitted alike, or none is.
-    // `node_range` is the resolver's own reading, npm's, so a range is judged
+    // `parse_range` is the resolver's own reading, npm's, so a range is judged
     // as installed.
     range.split("||").any(|alternative| {
-        aube_semver::node_range(alternative).is_ok_and(|set| {
+        aube_semver::parse_range(alternative).is_ok_and(|set| {
             set.intersect(&unaware)
-                .and_then(|overlap| overlap.min_version())
+                .min_version()
                 .is_some_and(|version| set.satisfies(&version))
         })
     })

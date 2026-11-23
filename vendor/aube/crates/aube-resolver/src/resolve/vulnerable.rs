@@ -14,8 +14,8 @@ pub(crate) fn is_vulnerable(
     };
     ranges
         .iter()
-        .filter_map(|range| aube_semver::node_range(range).ok())
-        .any(|range| version.satisfies(&range))
+        .filter_map(|range| aube_semver::parse_range(range).ok())
+        .any(|range| range.satisfies_node(&version))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -33,7 +33,7 @@ pub(super) fn prefer_non_vulnerable_pick<'a>(
     if !is_vulnerable(package_name, &fallback.version, vulnerable_ranges) {
         return fallback;
     }
-    let Ok(range) = aube_semver::node_range(crate::semver_util::normalize_range(range_str)) else {
+    let Ok(range) = aube_semver::parse_range(crate::semver_util::normalize_range(range_str)) else {
         return fallback;
     };
     // Mirror `pick_version`'s cutoff: a `minimumReleaseAgeExclude` match
@@ -72,7 +72,9 @@ pub(super) fn prefer_non_vulnerable_pick<'a>(
         let Ok(version) = node_semver::Version::parse(ver_str) else {
             continue;
         };
-        if !version.satisfies(&range) || is_vulnerable(package_name, ver_str, vulnerable_ranges) {
+        if !range.satisfies_node(&version)
+            || is_vulnerable(package_name, ver_str, vulnerable_ranges)
+        {
             continue;
         }
         let tier = if passes_cutoff(ver_str, Some(&version)) {
