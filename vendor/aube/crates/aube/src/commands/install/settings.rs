@@ -1513,7 +1513,7 @@ impl PeerDependencyRules {
 }
 
 fn matches_range(range: &str, found: &node_semver::Version) -> bool {
-    match node_semver::Range::parse(range) {
+    match aube_semver::node_range(range) {
         Ok(r) => r.satisfies(found),
         Err(_) => false,
     }

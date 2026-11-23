@@ -349,7 +349,7 @@ pub(crate) fn repick_past_downgrade<'a>(
     // version, which has no lower alternative by definition, and a channel
     // pointer like `next` must not leak a stable release into a prerelease
     // line.
-    let range = match node_semver::Range::parse(crate::semver_util::normalize_range(range_str)) {
+    let range = match aube_semver::node_range(crate::semver_util::normalize_range(range_str)) {
         Ok(range) => range,
         Err(_) if range_str == "latest" => {
             let latest = packument.dist_tags.get("latest")?;
@@ -360,7 +360,7 @@ pub(crate) fn repick_past_downgrade<'a>(
             {
                 return None;
             }
-            node_semver::Range::parse(format!("<={latest}")).ok()?
+            aube_semver::node_range(&format!("<={latest}")).ok()?
         }
         Err(_) => return None,
     };
@@ -805,7 +805,7 @@ fn parse_one(pattern: &str) -> Result<TrustExcludeRule, TrustExcludeParseError> 
                         pattern: pattern.to_string(),
                     });
                 }
-                let r = node_semver::Range::parse(trimmed).map_err(|_| {
+                let r = aube_semver::node_range(trimmed).map_err(|_| {
                     TrustExcludeParseError::InvalidVersionUnion {
                         pattern: pattern.to_string(),
                     }

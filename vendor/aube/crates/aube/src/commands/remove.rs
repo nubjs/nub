@@ -397,7 +397,7 @@ fn prune_removed_dependencies(
             let locked_version = pruned.packages.get(&dep.dep_path).map(|pkg| &pkg.version);
             let compatible = locked_version
                 .and_then(|version| node_semver::Version::parse(version).ok())
-                .zip(node_semver::Range::parse(range).ok())
+                .zip(aube_semver::node_range(range).ok())
                 .is_some_and(|(version, range)| version.satisfies(&range));
             if !compatible {
                 return None;

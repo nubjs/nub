@@ -974,7 +974,7 @@ fn retained_peer_spec_is_compatible(peer_range: &str, locked_spec: &str) -> bool
     };
     node_semver::Version::parse(locked_spec)
         .ok()
-        .zip(node_semver::Range::parse(normalized_range).ok())
+        .zip(aube_semver::node_range(normalized_range).ok())
         .is_some_and(|(version, range)| version.satisfies(&range))
 }
 

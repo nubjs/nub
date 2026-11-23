@@ -819,15 +819,16 @@ mod tests {
     }
 
     #[test]
-    fn comma_ranges_are_rewritten_to_what_node_semver_reads_the_same_way() {
-        // npm checks devEngines with node-semver. Each rewrite must keep the exact
-        // set of versions Nub matched before, and node-semver must agree with it.
+    fn comma_ranges_are_rewritten_to_what_npm_reads_the_same_way() {
+        // npm checks devEngines with its `semver` package. Each rewrite must keep
+        // the exact set of versions Nub matched before, and npm must agree with it.
         let cases = [
             (">=22, <25", ">=22 <25"),
             ("24.0.0, <25", "^24.0.0 <25"),
             ("22.14, <23 || >=24, <25", "^22.14 <23 || >=24 <25"),
             ("~22.1, >22.1.3 || 26", "~22.1 >22.1.3 || 26"),
             ("24.22.x, <25", "24.22.x <25"),
+            (">=22, <=24", ">=22 <=24"),
         ];
         let versions = [
             "20.19.0", "22.0.0", "22.1.2", "22.1.4", "22.14.0", "22.23.5", "24.0.0", "24.22.1",
@@ -838,7 +839,7 @@ mod tests {
             assert_eq!(rewritten, expected);
             let before = VersionPin::parse_allowing_ranges(comma).unwrap();
             let after = VersionPin::parse_allowing_ranges(&rewritten).unwrap();
-            let npm = node_semver::Range::parse(&rewritten).expect("node-semver reads it");
+            let npm = aube_semver::Range::parse(&rewritten).expect("npm reads it");
             for v in versions {
                 let nub = v.parse::<NodeVersion>().unwrap();
                 let matched = nub.satisfies(&before);
@@ -847,8 +848,7 @@ mod tests {
                     matched,
                     "{comma} → {rewritten} at {v}"
                 );
-                let npm_matched = node_semver::Version::parse(v).unwrap().satisfies(&npm);
-                assert_eq!(npm_matched, matched, "node-semver on {rewritten} at {v}");
+                assert_eq!(npm.satisfies_str(v), matched, "npm on {rewritten} at {v}");
             }
         }
 

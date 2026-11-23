@@ -18,6 +18,7 @@ base64 = { workspace = true }
 flate2 = { workspace = true }
 hex = { workspace = true }
 node-semver = { workspace = true }
+aube-semver = { workspace = true, features = ["node-semver"] }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

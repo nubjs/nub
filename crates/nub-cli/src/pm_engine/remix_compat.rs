@@ -52,18 +52,18 @@ pub(crate) fn remix_needs_project_local_store(root: &Path, workspace_members: &[
 }
 
 fn range_may_select_unaware_prerelease(range: &str) -> bool {
-    if node_semver::Range::parse(range).is_err() {
+    if aube_semver::node_range(range).is_err() {
         return true;
     }
-    let unaware = node_semver::Range::parse(REMIX_STORE_UNAWARE).expect("valid range");
+    let unaware = aube_semver::node_range(REMIX_STORE_UNAWARE).expect("valid range");
     // An interval overlap is not enough: `>=2` overlaps the window yet admits no
     // prerelease. Prerelease admission is decided per comparator set, so each
     // `||` alternative is tested on its own, with the smallest version the overlap
-    // contains — every `3.0.0-*` in an overlap is admitted alike, or none is. The
-    // crate is the resolver's own, so a spelling npm's `semver` reads differently
-    // (`>=3.0.x-rc.1` keeps its tag here, loses it there) is judged as installed.
+    // contains — every `3.0.0-*` in an overlap is admitted alike, or none is.
+    // `node_range` is the resolver's own reading, npm's, so a range is judged
+    // as installed.
     range.split("||").any(|alternative| {
-        node_semver::Range::parse(alternative).is_ok_and(|set| {
+        aube_semver::node_range(alternative).is_ok_and(|set| {
             set.intersect(&unaware)
                 .and_then(|overlap| overlap.min_version())
                 .is_some_and(|version| set.satisfies(&version))
@@ -96,7 +96,8 @@ mod tests {
             (r#"{"remix":"^3.0.0-beta.1"}"#, true),
             (r#"{"remix":">=3.0.0-alpha.0"}"#, true),
             (r#"{"remix":"3.0.0-rc.1 || ^3.1.0"}"#, true),
-            (r#"{"remix":">=3.0.x-rc.1 <3.0.0"}"#, true),
+            // npm drops the tag of an x-range: `>=3.0.0 <3.0.0`, empty.
+            (r#"{"remix":">=3.0.x-rc.1 <3.0.0"}"#, false),
             (r#"{"remix":"<3.0.0-rc.3"}"#, true),
             (r#"{"remix":">=2 || 3.0.0-rc.5"}"#, true),
             (r#"{"remix":">=3.0.0-rc.1 >=3.1.0"}"#, false),

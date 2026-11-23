@@ -116,7 +116,7 @@ pub(crate) fn wanted_version(
     packument: &aube_registry::Packument,
     range_str: &str,
 ) -> Option<String> {
-    let range = node_semver::Range::parse(range_str).ok()?;
+    let range = aube_semver::node_range(range_str).ok()?;
     if let Some(latest) = packument.dist_tags.get("latest")
         && packument.versions.contains_key(latest)
         && let Ok(v) = node_semver::Version::parse(latest)
@@ -177,7 +177,7 @@ pub(crate) fn resolve_version(packument: &serde_json::Value, spec: Option<&str>)
         return Some(spec.to_string());
     }
 
-    let range: node_semver::Range = spec.parse().ok()?;
+    let range = aube_semver::node_range(spec).ok()?;
     versions
         .keys()
         .filter_map(|v| {

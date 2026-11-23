@@ -96,7 +96,7 @@ pub async fn apply(
         .and_then(Value::as_object_mut)
         .ok_or_else(|| miette!("registry response for {name} has no `versions` field"))?;
 
-    let range_parsed = node_semver::Range::parse(range)
+    let range_parsed = aube_semver::node_range(range)
         .into_diagnostic()
         .wrap_err_with(|| format!("invalid version range {range:?}"))?;
 

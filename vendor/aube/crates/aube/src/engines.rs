@@ -173,7 +173,7 @@ fn version_satisfies(version: &str, range: &str) -> bool {
     let Ok(v) = node_semver::Version::parse(version) else {
         return true;
     };
-    let Ok(r) = node_semver::Range::parse(range) else {
+    let Ok(r) = aube_semver::node_range(range) else {
         return true;
     };
     v.satisfies(&r)

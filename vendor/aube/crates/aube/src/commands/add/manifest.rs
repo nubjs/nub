@@ -392,7 +392,7 @@ pub(super) async fn update_manifest_for_add(
             if spec.has_explicit_range
                 && let (Ok(parsed_version), Ok(parsed_range)) = (
                     node_semver::Version::parse(version),
-                    node_semver::Range::parse(&spec.range),
+                    aube_semver::node_range(&spec.range),
                 )
                 && !parsed_version.satisfies(&parsed_range)
             {

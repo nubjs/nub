@@ -394,8 +394,8 @@ fn yarn_spec_is_berry(spec: &str) -> Option<bool> {
     let spec = spec
         .split_once('+')
         .map_or(spec, |(version, _build)| version);
-    let range = node_semver::Range::parse(spec).ok()?;
-    Some(!range.allows_any(&node_semver::Range::parse("<2.0.0").ok()?))
+    let range = aube_semver::node_range(spec).ok()?;
+    Some(!range.allows_any(&aube_semver::node_range("<2.0.0").ok()?))
 }
 
 /// Run the `prepublish`/`prepack`/`publish` scripts the checkout declares,

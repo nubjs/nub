@@ -169,7 +169,7 @@ pub fn classify_pnpm_patch_key(key: &str) -> Result<PatchKeyForm<'_>, InvalidPat
             version: selector,
         });
     }
-    if node_semver::Range::parse(selector).is_err() {
+    if aube_semver::node_range(selector).is_err() {
         return Err(InvalidPatchRange {
             range: selector.to_string(),
         });
@@ -234,7 +234,7 @@ impl<'a> PatchGroups<'a> {
                     // `classify_patch_key` already validated the range,
                     // so the reparse cannot fail — but avoid `unwrap` at
                     // the boundary and treat a parse miss as "no range".
-                    if let Ok(parsed) = node_semver::Range::parse(range) {
+                    if let Ok(parsed) = aube_semver::node_range(range) {
                         groups
                             .entry(name)
                             .or_insert_with(Group::new)

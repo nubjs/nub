@@ -14,7 +14,7 @@ pub(crate) fn is_vulnerable(
     };
     ranges
         .iter()
-        .filter_map(|range| node_semver::Range::parse(range).ok())
+        .filter_map(|range| aube_semver::node_range(range).ok())
         .any(|range| version.satisfies(&range))
 }
 
@@ -33,8 +33,7 @@ pub(super) fn prefer_non_vulnerable_pick<'a>(
     if !is_vulnerable(package_name, &fallback.version, vulnerable_ranges) {
         return fallback;
     }
-    let Ok(range) = node_semver::Range::parse(crate::semver_util::normalize_range(range_str))
-    else {
+    let Ok(range) = aube_semver::node_range(crate::semver_util::normalize_range(range_str)) else {
         return fallback;
     };
     // Mirror `pick_version`'s cutoff: a `minimumReleaseAgeExclude` match

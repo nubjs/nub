@@ -616,7 +616,7 @@ fn resolve_installed_manifest(start: &Path, name: &str) -> Option<InstalledPkg> 
 ///   spuriously reject it;
 /// - an unreadable installed version.
 fn version_mismatch(name: &str, spec: &str, installed: &InstalledPkg) -> Option<String> {
-    let range = node_semver::Range::parse(spec).ok()?;
+    let range = aube_semver::node_range(spec).ok()?;
     let installed_ver = installed.version.as_deref()?;
     let version = node_semver::Version::parse(installed_ver).ok()?;
     if version.is_prerelease() {

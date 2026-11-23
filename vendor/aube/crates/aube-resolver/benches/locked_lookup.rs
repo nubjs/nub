@@ -127,7 +127,7 @@ fn indexed(
 fn version_satisfies(version: &str, range_str: &str) -> bool {
     let (Ok(v), Ok(r)) = (
         node_semver::Version::parse(version),
-        node_semver::Range::parse(range_str),
+        aube_semver::node_range(range_str),
     ) else {
         return false;
     };
@@ -143,7 +143,7 @@ fn is_vulnerable(name: &str, version: &str, vuln: &BTreeMap<String, Vec<String>>
     };
     ranges
         .iter()
-        .filter_map(|r| node_semver::Range::parse(r).ok())
+        .filter_map(|r| aube_semver::node_range(r).ok())
         .any(|r| v.satisfies(&r))
 }
 

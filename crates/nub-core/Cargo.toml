@@ -163,9 +163,6 @@ signal-hook = "0.3"
 
 [dev-dependencies]
 criterion = "0.5"
-# npm's range grammar, to check that `nub node pin` writes devEngines ranges npm
-# reads the same way Nub does. Already in the workspace through the vendored PM.
-node-semver = "2"
 blake3 = "1"
 # Encoder for the runtime_cache unit tests (they build a tiny tar.zst to exercise
 # the decode/unpack/rename/GC path). The PRODUCT decodes with pure-Rust `ruzstd`;

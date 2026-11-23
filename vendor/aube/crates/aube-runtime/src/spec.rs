@@ -42,7 +42,7 @@ impl NodeSpec {
         if let Ok(v) = node_semver::Version::parse(unprefixed) {
             return Ok(NodeSpec::Exact(v));
         }
-        if let Ok(r) = node_semver::Range::parse(unprefixed) {
+        if let Ok(r) = aube_semver::node_range(unprefixed) {
             return Ok(NodeSpec::Range(r));
         }
         // Bare alphabetic word → treat as an LTS codename (`jod`,

@@ -98,7 +98,7 @@ fn parse_named_registry_spec(
     let body = &range[colon + 1..];
 
     let (pkg_name, version_selector): (String, String) =
-        if node_semver::Range::parse(crate::semver_util::normalize_range(body)).is_ok() {
+        if aube_semver::node_range(crate::semver_util::normalize_range(body)).is_ok() {
             // `<alias>:<range>` — the dependency alias IS the package name.
             (dep_alias.to_string(), body.to_string())
         } else if body.starts_with('@') {

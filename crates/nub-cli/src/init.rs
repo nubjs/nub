@@ -483,7 +483,7 @@ mod tests {
             format!(">={NUB_TYPES_FLOOR} <={ver}")
         );
         let types_range =
-            node_semver::Range::parse(v["devDependencies"]["@nubjs/types"].as_str().unwrap())
+            aube_semver::node_range(v["devDependencies"]["@nubjs/types"].as_str().unwrap())
                 .unwrap();
         assert!(
             node_semver::Version::parse(NUB_TYPES_FLOOR)

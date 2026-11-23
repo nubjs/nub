@@ -943,7 +943,7 @@ fn spec_satisfies_version(spec: &str, version: &str) -> bool {
     let Ok(version) = node_semver::Version::parse(version) else {
         return false;
     };
-    node_semver::Range::parse(spec_range(spec))
+    aube_semver::node_range(spec_range(spec))
         .ok()
         .is_some_and(|range| version.satisfies(&range))
 }
@@ -1005,7 +1005,7 @@ fn version_is_vulnerable(version: &str, vulnerable_versions: &[String]) -> bool 
     };
     vulnerable_versions
         .iter()
-        .filter_map(|range| node_semver::Range::parse(range).ok())
+        .filter_map(|range| aube_semver::node_range(range).ok())
         .any(|range| version.satisfies(&range))
 }
 
@@ -1013,7 +1013,7 @@ fn version_is_vulnerable(version: &str, vulnerable_versions: &[String]) -> bool 
 fn best_non_vulnerable(packument: &Packument, vulnerable_versions: &[String]) -> Option<String> {
     let vulnerable: Vec<node_semver::Range> = vulnerable_versions
         .iter()
-        .filter_map(|range| node_semver::Range::parse(range).ok())
+        .filter_map(|range| aube_semver::node_range(range).ok())
         .collect();
     let mut best: Option<(&str, node_semver::Version)> = None;
     for ver_str in packument.versions.keys() {

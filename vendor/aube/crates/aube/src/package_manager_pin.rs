@@ -202,12 +202,9 @@ fn plan(manifest: &Value, existing: Option<&EnvLockfile>, target: Option<&str>) 
     });
     let Some(version) = locked.or_else(|| offline_version(&wanted)) else {
         // A range below pnpm 11 records nothing whichever release it picks.
-        // `node_semver` intersects the comparators of a satisfiable set
-        // correctly; only an empty set, which the satisfiable form leaves
-        // out, does it misread.
-        let records = node_semver::Range::parse(">=11.0.0-0").ok();
+        let records = aube_semver::node_range(">=11.0.0-0").ok();
         let below_11 = npm_range(&wanted.specifier)
-            .and_then(|range| node_semver::Range::parse(range.satisfiable_form()).ok())
+            .and_then(|range| range.to_node_semver())
             .zip(records)
             .is_some_and(|(range, records)| !range.allows_any(&records));
         return if below_11 {

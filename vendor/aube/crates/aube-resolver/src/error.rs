@@ -386,7 +386,7 @@ fn resolve_dist_tag_range(packument: &Packument, range_str: &str) -> String {
 /// drops its version list entirely.
 fn satisfying_versions(task: &ResolveTask, packument: &Packument) -> (Vec<String>, Vec<String>) {
     let effective = resolve_dist_tag_range(packument, &task.range);
-    let Ok(range) = node_semver::Range::parse(&effective) else {
+    let Ok(range) = aube_semver::node_range(&effective) else {
         return (Vec::new(), Vec::new());
     };
     let mut matching: Vec<(node_semver::Version, String)> = Vec::new();

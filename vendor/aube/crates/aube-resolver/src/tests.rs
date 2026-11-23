@@ -942,6 +942,42 @@ fn test_pick_version_highest_match() {
     assert_eq!(result.version, "1.2.0");
 }
 
+/// Ranges are read as npm reads them, so the pick is npm's and pnpm's. The
+/// `node_semver` crate alone reads `<=6` as `<=6.0.0-0`, leaving out every
+/// stable 6.x, and reads two comparators that cannot both hold as either.
+#[test]
+fn test_pick_version_reads_ranges_as_npm_does() {
+    let packument = make_packument(
+        "semver",
+        &["5.7.3", "6.0.0", "6.1.3", "6.2.0", "6.3.2", "7.8.0"],
+        "7.8.0",
+    );
+    let pick = |range: &str| match pick_version(
+        &packument,
+        range,
+        None,
+        false,
+        None,
+        None,
+        false,
+        |_, _| false,
+    ) {
+        PickResult::Found(meta) => meta.version.clone(),
+        other => format!("{other:?}"),
+    };
+    // Every verdict is npm `semver` 7.8.6's `maxSatisfying`.
+    assert_eq!(pick("<=6"), "6.3.2");
+    assert_eq!(pick("<=6.2"), "6.2.0");
+    assert_eq!(pick("<=6.x"), "6.3.2");
+    assert_eq!(pick(">=6.3 <=6.2 || 5.7.3"), "5.7.3");
+    assert_eq!(pick(">=7 <6"), "NoMatch");
+    assert!(crate::semver_util::version_satisfies("6.3.2", "<=6"));
+    assert!(!crate::semver_util::version_satisfies(
+        "6.1.3",
+        ">=6.3 <=6.2 || 5.7.3"
+    ));
+}
+
 #[test]
 fn test_pick_version_prefers_dist_tag_latest_when_in_range() {
     // npm/pnpm parity: when `dist-tags.latest` falls inside the

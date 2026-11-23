@@ -176,7 +176,7 @@ fn collect_issues(graph: &LockfileGraph, project_root: &std::path::Path) -> Vec<
                         .unwrap_or_else(|| tail.split_once('(').map(|(v, _)| v).unwrap_or(tail));
                     match (
                         node_semver::Version::parse(version_str),
-                        node_semver::Range::parse(peer_range),
+                        aube_semver::node_range(peer_range),
                     ) {
                         (Ok(v), Ok(r)) if v.satisfies(&r) => {}
                         (Ok(_), Ok(_)) => out.push(Issue {
