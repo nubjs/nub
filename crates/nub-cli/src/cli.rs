@@ -10659,8 +10659,8 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 }
                 if keep_pnpm_pin_digest(&root, &version, &write)? {
                     eprintln!(
-                        "nub: packageManager keeps its +sha512 hash, since pnpm-lock.yaml \
-                         does not record pnpm@{version}"
+                        "nub: the +sha512 hash stays on {} until pnpm-lock.yaml records pnpm@{version}",
+                        hashed_pin_fields(&version)
                     );
                 }
             }
@@ -10940,9 +10940,12 @@ fn resolve_provision_declare(
 
 /// An unhashed pnpm 11+ pin's project-pinned digest is the integrity
 /// `pnpm-lock.yaml` records; a cold download checks the tarball against it.
-/// When the lockfile does not record this exact tarball (there is no lockfile
-/// yet, the pin's `onFail: "ignore"` keeps pnpm from recording it, or the
-/// sync failed), the hash goes back on the pin. Returns whether it did.
+/// Until the lockfile records this exact tarball (there is no lockfile yet, the
+/// sync failed, or the pinned pnpm never records it), the hash goes back on the
+/// manifest, in the shape that pnpm accepts quietly
+/// ([`nub_core::pm::resolve::hash_package_manager_pin`]), so the first cold
+/// download on a fresh checkout is still checked against the digest verified
+/// here. Returns whether it did.
 fn keep_pnpm_pin_digest(
     root: &Path,
     version: &str,
@@ -10964,6 +10967,15 @@ fn keep_pnpm_pin_digest(
     }
     nub_core::pm::resolve::hash_package_manager_pin(root, "pnpm", version, &write.sha512_hex)?;
     Ok(true)
+}
+
+/// The manifest fields [`keep_pnpm_pin_digest`] hashes for pnpm `version`.
+fn hashed_pin_fields(version: &str) -> &'static str {
+    if nub_core::pm::resolve::pnpm_compares_pin_hashes(version) {
+        "packageManager and devEngines.packageManager"
+    } else {
+        "packageManager"
+    }
 }
 
 fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
@@ -11150,8 +11162,8 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
         }
         if keep_pnpm_pin_digest(&root, &version, &write)? {
             println!(
-                "  package.json: packageManager = pnpm@{version} (+sha512), \
-                 since pnpm-lock.yaml does not record it"
+                "  package.json: {} = pnpm@{version} (+sha512), until pnpm-lock.yaml records it",
+                hashed_pin_fields(&version)
             );
         }
     }
@@ -15326,6 +15338,85 @@ mod tests {
             m["packageManager"].as_str().unwrap_or_default().to_string(),
             m["devEngines"]["packageManager"].clone(),
         )
+    }
+
+    /// `nub pm use pnpm@11.x` keeps the verified digest in the manifest until
+    /// `pnpm-lock.yaml` records the same one, so a fresh checkout's first cold
+    /// download is checked against it. Below pnpm 11.8 it rides on
+    /// `packageManager` alone; from 11.8, which warns on a hash on one field
+    /// only, on both fields.
+    #[test]
+    fn pnpm_11_pin_keeps_its_digest_until_the_lockfile_records_it() {
+        let hex = "ab".repeat(64);
+        let use_pnpm = |version: &str, lockfile: Option<String>| {
+            let dir = pm_tmpdir("pnpm11-digest");
+            std::fs::write(dir.join("package.json"), "{\"name\":\"app\"}\n").unwrap();
+            if let Some(lockfile) = lockfile {
+                std::fs::write(dir.join("pnpm-lock.yaml"), lockfile).unwrap();
+            }
+            let write = nub_core::pm::resolve::write_declared_pm("pnpm", version, &hex, &dir, true)
+                .unwrap();
+            let hashed = keep_pnpm_pin_digest(&dir, version, &write).unwrap();
+            let (pin, dev) = read_declaration(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+            (
+                hashed,
+                pin,
+                dev["version"].as_str().unwrap_or_default().to_string(),
+            )
+        };
+        let with_hash = |v: &str| format!("{v}+sha512.{hex}");
+
+        for version in ["11.1.3", "11.7.0"] {
+            assert_eq!(
+                use_pnpm(version, None),
+                (
+                    true,
+                    format!("pnpm@{}", with_hash(version)),
+                    version.to_string()
+                ),
+                "pnpm {version}: the hash on packageManager alone"
+            );
+        }
+        for version in ["11.8.0", "11.29.0", "12.23.0"] {
+            assert_eq!(
+                use_pnpm(version, None),
+                (
+                    true,
+                    format!("pnpm@{}", with_hash(version)),
+                    with_hash(version)
+                ),
+                "pnpm {version}: the same hash on both fields"
+            );
+        }
+
+        let env_doc = |integrity: &str| {
+            format!(
+                "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    configDependencies: {{}}\n    \
+                 packageManagerDependencies:\n      pnpm:\n        specifier: 11.29.0\n        \
+                 version: 11.29.0\n\npackages:\n\n  pnpm@11.29.0:\n    resolution: \
+                 {{integrity: {integrity}}}\n\nsnapshots:\n\n  pnpm@11.29.0: {{}}\n\n---\n\
+                 lockfileVersion: '9.0'\n\nimporters:\n\n  .: {{}}\n"
+            )
+        };
+        let recorded = format!(
+            "sha512-{}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0xab; 64])
+        );
+        assert_eq!(
+            use_pnpm("11.29.0", Some(env_doc(&recorded))),
+            (false, "pnpm@11.29.0".to_string(), "11.29.0".to_string()),
+            "the lockfile carries the digest, so the pair stays hashless"
+        );
+        assert_eq!(
+            use_pnpm("11.29.0", Some(env_doc("sha512-AAAA"))),
+            (
+                true,
+                format!("pnpm@{}", with_hash("11.29.0")),
+                with_hash("11.29.0")
+            ),
+            "a lockfile recording another tarball keeps the hash"
+        );
     }
 
     /// Real-network e2e for `nub pm use`: declare an exact pnpm, and confirm the
