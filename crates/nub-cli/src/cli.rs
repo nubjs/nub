@@ -11636,7 +11636,7 @@ fn run_node_shim_install() -> Result<i32> {
     // The shim runs the resolved Node VANILLA — state it so nobody expects
     // TypeScript / `.env` loading from a bare `node`; that's what `nub` is for.
     println!(
-        "  `node` now resolves through nub (version management only — no augmentation; run `nub` for that)"
+        "  the shimmed `node` runs through nub (version management only — no augmentation; run `nub` for that)"
     );
 
     if shim::check_node_shim_noexec(&dir) {

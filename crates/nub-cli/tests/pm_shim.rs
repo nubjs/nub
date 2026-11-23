@@ -144,6 +144,9 @@ fn run(program: &Path, args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> (Stri
         // environment is not hermetic. One that WANTS the XDG path sets it back
         // explicitly through `env` below.
         cmd.env_remove("XDG_DATA_HOME");
+        // Same for the PATH opt-out: a contributor who exports it would see the
+        // default round trip skip its profile write. The opt-out test sets it.
+        cmd.env_remove("NUB_NO_MODIFY_PATH");
         strip_node_redirects(&mut cmd);
         for (k, v) in env {
             cmd.env(k, v);
