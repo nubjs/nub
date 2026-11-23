@@ -1462,6 +1462,22 @@ fn intersects_and_min_version_match_npm() {
 }
 
 #[test]
+fn overlaps_compares_bounds_and_ignores_the_prerelease_rule() {
+    let overlaps = |a: &str, b: &str| Range::parse(a).unwrap().overlaps(&Range::parse(b).unwrap());
+    assert!(overlaps("^1.2.3", "^1.5.0"));
+    assert!(!overlaps("^1.2.3", "^2.0.0"));
+    assert!(overlaps("<=1.2.3", ">=1.2.3"));
+    assert!(!overlaps("<1.2.3", ">=1.2.3"));
+    assert!(!overlaps(">=2 <1", "*"));
+    assert!(!overlaps(">=11.0.0-0", "<=10"));
+    // npm's `intersects` says no to each of these: the prerelease rule
+    // would refuse the version, but the bounds alone leave room.
+    assert!(overlaps("1.1.1-beta.2", ">=1.1.0-0 <1.1.2-beta.3"));
+    assert!(overlaps("^10 || 11.1.0-rc.1", ">=11.0.0-0"));
+    assert!(overlaps("1.0.0-rc.1", ">=1.0.0-0 <1.0.0"));
+}
+
+#[test]
 fn intersect_joins_every_set_of_both() {
     let window = Range::parse(">=3.0.0-0 <3.0.0").unwrap();
     let joined = Range::parse("^3.0.0-beta.1 || >=2")

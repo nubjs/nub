@@ -532,8 +532,10 @@ pub(crate) fn range_resolves_via_dist_tag(packument: &Packument, range_str: &str
 /// (the floor of a range is exactly what was dropped), a locked version
 /// the seed does not hold, and a deprecated pick (`outranks` prefers any
 /// live version, so a dropped live one anywhere in the range beats it)
-/// refetch outright, so does anything unparseable, and
-/// `Range::allows_any` overlaps bounds without npm's prerelease rule.
+/// refetch outright, so does anything unparseable, and the gap check is
+/// `Range::overlaps`, which compares bounds without npm's prerelease rule
+/// (npm's `intersects` would let a named prerelease of another patch of
+/// the line skip the refetch).
 pub(crate) fn sparse_pick_needs_refetch(
     packument: &Packument,
     picked_version: &str,
@@ -584,7 +586,7 @@ pub(crate) fn sparse_pick_needs_refetch(
             continue;
         }
         // Where a dropped version of this line could sit above the pick.
-        // `allows_any` compares bounds only, so a prerelease line is
+        // `overlaps` compares bounds only, so a prerelease line is
         // consulted just when the range names a prerelease of that
         // `major.minor` — npm's rule for admitting one at all.
         let gap = if (major, minor, pre) == picked_line {
@@ -600,7 +602,7 @@ pub(crate) fn sparse_pick_needs_refetch(
             format!(">={major}.{minor}.0 <{highest}")
         };
         match aube_semver::parse_range(&gap) {
-            Ok(gap) if range.intersects(&gap) => return true,
+            Ok(gap) if range.overlaps(&gap) => return true,
             Ok(_) => {}
             Err(_) => return true,
         }

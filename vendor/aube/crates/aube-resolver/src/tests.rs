@@ -9148,6 +9148,15 @@ fn sparse_pick_refetches_only_when_a_dropped_version_could_outrank_it() {
     assert!(!refetch("=7.21.4-esm.4", "7.21.4-esm.4"));
     assert!(refetch(">=8.0.0-beta.1 <8.0.0-beta.3", "8.0.0-beta.1"));
     assert!(refetch("^7.21.0 || 8.0.0-beta.2", "7.21.8"));
+
+    // The check is an overlap of bounds, wider than npm's `intersects`: a
+    // prerelease named in another patch of the line could still have been
+    // dropped, so it refetches.
+    let seed = make_packument("qux", &["1.0.0", "1.1.2-beta.3"], "1.0.0");
+    let refetch = |range: &str, picked: &str| {
+        crate::semver_util::sparse_pick_needs_refetch(&seed, picked, range, false, None)
+    };
+    assert!(refetch("1.0.0 || 1.1.1-beta.2", "1.0.0"));
 }
 
 /// A range whose best match the age prune dropped must not settle on the

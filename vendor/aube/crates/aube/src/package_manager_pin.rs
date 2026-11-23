@@ -205,7 +205,7 @@ fn plan(manifest: &Value, existing: Option<&EnvLockfile>, target: Option<&str>) 
         let records = aube_semver::parse_range(">=11.0.0-0").ok();
         let below_11 = npm_range(&wanted.specifier)
             .zip(records)
-            .is_some_and(|(range, records)| !range.intersects(&records));
+            .is_some_and(|(range, records)| !range.overlaps(&records));
         return if below_11 {
             Plan::Current
         } else {
@@ -460,6 +460,21 @@ mod tests {
 
     fn wanted(manifest: Value) -> Option<(String, bool, Option<String>)> {
         wanted_pnpm(&manifest).map(|w| (w.specifier, w.on_fail_download, w.legacy_exact))
+    }
+
+    /// Only a range no pnpm 11 can satisfy records nothing. The check is on
+    /// bounds: npm's `intersects` would call `11.1.0-rc.1` disjoint from
+    /// `>=11.0.0-0`, though pnpm 11.1.0-rc.1 records its pin.
+    #[test]
+    fn a_range_reaching_pnpm_11_plans_a_record() {
+        let plans_record = |range: &str| {
+            let manifest = json!({ "devEngines": { "packageManager":
+                { "name": "pnpm", "version": range, "onFail": "download" } } });
+            matches!(plan(&manifest, None, None), Plan::Record { .. })
+        };
+        assert!(plans_record("^10.0.0 || 11.1.0-rc.1"));
+        assert!(plans_record("^11.0.0"));
+        assert!(!plans_record("^10.0.0"));
     }
 
     #[test]

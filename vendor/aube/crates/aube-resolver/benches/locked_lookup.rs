@@ -122,7 +122,7 @@ fn indexed(
 
 // Local copies of the resolver's predicates so the bench links without
 // reaching into the crate's private modules. `version_satisfies` mirrors
-// `semver_util::version_satisfies` (node-semver Range::satisfies);
+// `semver_util::version_satisfies` (aube-semver Range::satisfies_node);
 // `is_vulnerable` mirrors `resolve::vulnerable::is_vulnerable`.
 fn version_satisfies(version: &str, range_str: &str) -> bool {
     let (Ok(v), Ok(r)) = (
@@ -131,7 +131,7 @@ fn version_satisfies(version: &str, range_str: &str) -> bool {
     ) else {
         return false;
     };
-    v.satisfies(&r)
+    r.satisfies_node(&v)
 }
 
 fn is_vulnerable(name: &str, version: &str, vuln: &BTreeMap<String, Vec<String>>) -> bool {
@@ -144,7 +144,7 @@ fn is_vulnerable(name: &str, version: &str, vuln: &BTreeMap<String, Vec<String>>
     ranges
         .iter()
         .filter_map(|r| aube_semver::parse_range(r).ok())
-        .any(|r| v.satisfies(&r))
+        .any(|r| r.satisfies_node(&v))
 }
 
 fn bench_locked_lookup(c: &mut Criterion) {

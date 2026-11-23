@@ -782,6 +782,21 @@ pub fn parse_range(spec: &str) -> Result<Range, InvalidRange> {
 }
 
 impl Range {
+    /// Whether some set of each leaves a version between the bounds both
+    /// sets' comparators put on it, ignoring npm's prerelease rule.
+    ///
+    /// A conservative overlap, wider than npm's `intersects`: it answers
+    /// "could a version here also be there", never "does one exist", which
+    /// is what a caller that refetches or keeps a fallback when unsure asks.
+    pub fn overlaps(&self, other: &Range) -> bool {
+        self.sets.iter().any(|ours| {
+            other
+                .sets
+                .iter()
+                .any(|theirs| bounds_leave_room(ours.iter().chain(theirs)))
+        })
+    }
+
     /// npm's `range.intersects(other)`: some set of each could share a
     /// version, judged comparator by comparator as npm judges it.
     pub fn intersects(&self, other: &Range) -> bool {
@@ -900,6 +915,32 @@ fn set_is_satisfiable(set: &[Comparator]) -> bool {
     set.iter()
         .enumerate()
         .all(|(i, a)| set[i + 1..].iter().all(|b| a.intersects(b)))
+}
+
+/// Whether the lower bounds (`>`, `>=`, `=`) and upper bounds (`<`, `<=`,
+/// `=`) of `comparators` leave any room between them.
+fn bounds_leave_room<'a>(comparators: impl Iterator<Item = &'a Comparator>) -> bool {
+    let mut lower: Option<(&Version, bool)> = None;
+    let mut upper: Option<(&Version, bool)> = None;
+    for (op, v) in comparators.filter_map(|c| c.0.as_ref()) {
+        let (is_lower, is_upper, inclusive) = match op {
+            Op::Eq => (true, true, true),
+            Op::Gt => (true, false, false),
+            Op::Gte => (true, false, true),
+            Op::Lt => (false, true, false),
+            Op::Lte => (false, true, true),
+        };
+        if is_lower && lower.is_none_or(|(l, inc)| v > l || (v == l && inc && !inclusive)) {
+            lower = Some((v, inclusive));
+        }
+        if is_upper && upper.is_none_or(|(u, inc)| v < u || (v == u && inc && !inclusive)) {
+            upper = Some((v, inclusive));
+        }
+    }
+    match (lower, upper) {
+        (Some((l, l_inc)), Some((u, u_inc))) => l < u || (l == u && l_inc && u_inc),
+        _ => true,
+    }
 }
 
 #[cfg(feature = "node-semver")]
