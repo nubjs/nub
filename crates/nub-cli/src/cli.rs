@@ -10940,9 +10940,12 @@ fn resolve_provision_declare(
 
 /// An unhashed pnpm 11+ pin's project-pinned digest is the integrity
 /// `pnpm-lock.yaml` records; a cold download checks the tarball against it.
-/// When the lockfile does not record this exact tarball (there is no lockfile
-/// yet, the pin's `onFail: "ignore"` keeps pnpm from recording it, or the
-/// sync failed), the hash goes back on the pin. Returns whether it did.
+/// When the lockfile records nothing for this version (there is no lockfile
+/// yet, or the sync failed), a pnpm that records its own pin writes it on its
+/// first command, and the pin stays hashless: from pnpm 11.8 a hash on
+/// `packageManager` alone warns on every command, and no install clears it.
+/// Otherwise (pnpm 11.0.0 to 11.1.2, or a lockfile recording a different
+/// tarball) the hash goes back on the pin. Returns whether it did.
 fn keep_pnpm_pin_digest(
     root: &Path,
     version: &str,
@@ -10960,6 +10963,9 @@ fn keep_pnpm_pin_digest(
     });
     let recorded = crate::pm_engine::pnpm_lockfile_integrity(root, version);
     if want.is_some() && recorded == want {
+        return Ok(false);
+    }
+    if recorded.is_none() && nub_core::pm::resolve::pnpm_records_own_pin(version) {
         return Ok(false);
     }
     nub_core::pm::resolve::hash_package_manager_pin(root, "pnpm", version, &write.sha512_hex)?;
@@ -11056,8 +11062,14 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     }
     match plan {
         AlignPlan::Fresh => {
+            let records =
+                if name == "pnpm" && !write.pin_hashed && resolve::pnpm_records_own_pin(&version) {
+                    format!(", recording pnpm@{version}'s integrity")
+                } else {
+                    String::new()
+                };
             println!(
-                "  no lockfile — the next install writes {}",
+                "  no lockfile — the next install writes {}{records}",
                 use_align::lockfile_name(name)
             );
         }
@@ -15326,6 +15338,66 @@ mod tests {
             m["packageManager"].as_str().unwrap_or_default().to_string(),
             m["devEngines"]["packageManager"].clone(),
         )
+    }
+
+    /// `nub pm use pnpm@11.x` in a project with no lockfile: a pnpm that records
+    /// its own pin keeps the pair hashless, since from 11.8 a hash on
+    /// `packageManager` alone warns on every command. Only 11.0.0 to 11.1.2,
+    /// which never record it, keep the hash; so does a lockfile recording a
+    /// different tarball for the version.
+    #[test]
+    fn pnpm_11_pin_keeps_its_hash_only_where_pnpm_will_not_record_it() {
+        let hex = "ab".repeat(64);
+        let use_pnpm = |version: &str, lockfile: Option<String>| {
+            let dir = pm_tmpdir("pnpm11-digest");
+            std::fs::write(dir.join("package.json"), "{\"name\":\"app\"}\n").unwrap();
+            if let Some(lockfile) = lockfile {
+                std::fs::write(dir.join("pnpm-lock.yaml"), lockfile).unwrap();
+            }
+            let write = nub_core::pm::resolve::write_declared_pm("pnpm", version, &hex, &dir, true)
+                .unwrap();
+            let hashed = keep_pnpm_pin_digest(&dir, version, &write).unwrap();
+            let (pin, _) = read_declaration(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+            (hashed, pin)
+        };
+
+        for version in ["11.1.3", "11.20.0", "11.29.0", "12.23.0"] {
+            assert_eq!(
+                use_pnpm(version, None),
+                (false, format!("pnpm@{version}")),
+                "pnpm {version} records its own pin, so packageManager stays hashless"
+            );
+        }
+        assert_eq!(
+            use_pnpm("11.1.2", None),
+            (true, format!("pnpm@11.1.2+sha512.{hex}")),
+            "pnpm 11.1.2 records nothing, so the hash stays on the pin"
+        );
+
+        let env_doc = |integrity: &str| {
+            format!(
+                "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    configDependencies: {{}}\n    \
+                 packageManagerDependencies:\n      pnpm:\n        specifier: 11.29.0\n        \
+                 version: 11.29.0\n\npackages:\n\n  pnpm@11.29.0:\n    resolution: \
+                 {{integrity: {integrity}}}\n\nsnapshots:\n\n  pnpm@11.29.0: {{}}\n\n---\n\
+                 lockfileVersion: '9.0'\n\nimporters:\n\n  .: {{}}\n"
+            )
+        };
+        let recorded = format!(
+            "sha512-{}",
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [0xab; 64])
+        );
+        assert_eq!(
+            use_pnpm("11.29.0", Some(env_doc(&recorded))),
+            (false, "pnpm@11.29.0".to_string()),
+            "the lockfile carries the digest"
+        );
+        assert_eq!(
+            use_pnpm("11.29.0", Some(env_doc("sha512-AAAA"))),
+            (true, format!("pnpm@11.29.0+sha512.{hex}")),
+            "a lockfile recording another tarball keeps the hash on the pin"
+        );
     }
 
     /// Real-network e2e for `nub pm use`: declare an exact pnpm, and confirm the

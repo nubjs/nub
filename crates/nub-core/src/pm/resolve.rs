@@ -699,9 +699,10 @@ pub struct DeclaredPmWrite {
 }
 
 /// Put the `+sha512.<hex>` hash back on an unhashed pnpm 11+ `packageManager`
-/// pin, for when `pnpm-lock.yaml` cannot carry its digest (no lockfile yet, or
-/// a pin pnpm does not record). pnpm 11 then warns that the two fields differ,
-/// but a cold download keeps a project-pinned digest to check against.
+/// pin, for a pnpm that will not record its digest in `pnpm-lock.yaml` itself
+/// (see [`pnpm_records_own_pin`]). Those releases do not compare hashes, so a
+/// hash on one field warns on none of them, and a cold download keeps a
+/// project-pinned digest to check against.
 pub fn hash_package_manager_pin(
     cwd: &Path,
     name: &str,
@@ -834,7 +835,7 @@ pub fn write_declared_pm(
 
 /// pnpm 11 prints a warning on every command when `packageManager` and
 /// `devEngines.packageManager` disagree. Up to 11.5 it compares the pin's version
-/// (hash stripped) with the devEngines version as written; from 11.20 it also
+/// (hash stripped) with the devEngines version as written; from 11.8 it also
 /// compares hashes, and a hash on one side only warns. The one pair both accept is
 /// the one pnpm's own `pnpm init` and `self-update` write: the same exact version
 /// in both fields and no hash, which pnpm records in `pnpm-lock.yaml` instead. So
@@ -842,6 +843,17 @@ pub fn write_declared_pm(
 /// `+sha512` pin and the `^<exact>` range.
 fn dev_engines_mirrors_pin(name: &str, version: &str) -> bool {
     name == "pnpm" && semver::Version::parse(version).is_ok_and(|v| v.major >= 11)
+}
+
+/// Whether pnpm `version`, pinned by the exact pair [`write_declared_pm`]
+/// writes, records its own integrity in `pnpm-lock.yaml`'s
+/// `packageManagerDependencies` on its first command, creating the lockfile when
+/// there is none. 11.1.3 is the first release that does; 11.0.0 to 11.1.2 leave
+/// the pin out of the lockfile (measured against every minor from 11.0 to 11.29).
+/// A pin such a pnpm records needs no hash of its own, which from 11.8 would
+/// warn on every command.
+pub fn pnpm_records_own_pin(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v >= semver::Version::new(11, 1, 3))
 }
 
 /// Whether `packageManager: pnpm@<v>` and a `devEngines.packageManager.version`
