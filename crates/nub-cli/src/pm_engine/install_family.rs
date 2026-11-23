@@ -597,8 +597,8 @@ fn wire_global_bin_path(code: i32) {
         Ok(nub_core::pm::shim::ProfileOutcome::Skipped { line }) => {
             eprintln!(
                 "warning: {} is not on PATH, so the commands just installed will \
-                 not run.\n  NUB_NO_MODIFY_PATH is set, so no shell profile was \
-                 edited — add this line yourself:\n    {line}",
+                 not run.\n  NUB_NO_MODIFY_PATH is set, so no shell config file \
+                 was edited. Add this line to yours to put it on PATH:\n    {line}",
                 layout.bin_dir.display()
             );
         }

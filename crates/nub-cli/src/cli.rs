@@ -11521,7 +11521,8 @@ fn run_pm_shim_install(args: &[String]) -> Result<i32> {
             "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
         ),
         ProfileOutcome::Skipped { line } => println!(
-            "  PATH: not edited (NUB_NO_MODIFY_PATH is set). Add this line yourself:\n    {line}"
+            "  NUB_NO_MODIFY_PATH is set, so no shell config file was edited.\n  \
+             Add this line to yours to put it on PATH:\n    {line}"
         ),
     }
 
@@ -11685,7 +11686,8 @@ fn run_node_shim_install() -> Result<i32> {
             "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
         ),
         ProfileOutcome::Skipped { line } => println!(
-            "  PATH: not edited (NUB_NO_MODIFY_PATH is set). Add this line yourself:\n    {line}"
+            "  NUB_NO_MODIFY_PATH is set, so no shell config file was edited.\n  \
+             Add this line to yours to put it on PATH:\n    {line}"
         ),
     }
 
