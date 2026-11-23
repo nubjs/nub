@@ -395,7 +395,7 @@ fn yarn_spec_is_berry(spec: &str) -> Option<bool> {
         .split_once('+')
         .map_or(spec, |(version, _build)| version);
     let range = aube_semver::parse_range(spec).ok()?;
-    Some(!range.overlaps(&aube_semver::parse_range("<2.0.0").ok()?))
+    Some(!range.overlaps(&aube_semver::parse_range("<2.0.0-0").ok()?))
 }
 
 /// Run the `prepublish`/`prepack`/`publish` scripts the checkout declares,
@@ -437,6 +437,8 @@ mod tests {
         assert_eq!(yarn_spec_is_berry("^4.5.0"), Some(true));
         assert_eq!(yarn_spec_is_berry("^1 || ^4"), Some(false));
         assert_eq!(yarn_spec_is_berry("1.0.0-rc.1 || ^4"), Some(false));
+        // A 2.0.0 prerelease is Berry, though it sorts below 2.0.0.
+        assert_eq!(yarn_spec_is_berry("2.0.0-rc.27"), Some(true));
         assert_eq!(yarn_spec_is_berry("latest"), None);
     }
 
