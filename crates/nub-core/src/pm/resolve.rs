@@ -997,13 +997,16 @@ pub fn nub_shaped_range(range: &str) -> bool {
 /// Whether `nub pm update` rewrites `devEngines.packageManager` along with the
 /// pin, given its `range` and the `packageManager` version beside it (`None`
 /// when that field is absent). Only the pairs Nub itself writes move with the
-/// pin: a pnpm 11+ exact pair, or `^x.y.z` beside `packageManager` x.y.z. Any
-/// other range, including a bare `^x.y.z` with no `packageManager` (what
-/// `pnpm init` writes), is the user's and is kept. No range at all gets one.
+/// pin: a pnpm 11+ exact pair, or `^x.y.z` beside `packageManager` x.y.z with
+/// the `onFail: "warn"` Nub writes. Any other range is the user's and is kept:
+/// a bare `^x.y.z` with no `packageManager` (what `pnpm init` writes), or a
+/// caret under another `onFail` beside the hashed pin an earlier update left
+/// as its fallback. No range at all gets one.
 pub fn update_rewrites_dev_engines(
     name: &str,
     range: Option<&str>,
     package_manager_version: Option<&str>,
+    on_fail: Option<&str>,
 ) -> bool {
     let Some(range) = range else {
         return true;
@@ -1013,7 +1016,19 @@ pub fn update_rewrites_dev_engines(
     };
     let bare = pin.split_once('+').map_or(pin, |(b, _)| b).trim();
     is_pnpm_11_pair(name, range, pin)
-        || (nub_shaped_range(range) && range.strip_prefix('^') == Some(bare))
+        || (nub_shaped_range(range)
+            && range.strip_prefix('^') == Some(bare)
+            && on_fail == Some("warn"))
+}
+
+/// The workspace-root `devEngines.packageManager.onFail`, when set.
+pub fn dev_engines_on_fail(cwd: &Path) -> Option<String> {
+    root_manifest(cwd)?
+        .get("devEngines")?
+        .get("packageManager")?
+        .get("onFail")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Detected surface formatting of a manifest: the per-level indent unit (taken
@@ -1699,27 +1714,52 @@ mod tests {
         assert!(update_rewrites_dev_engines(
             "pnpm",
             Some("^9.1.0"),
-            Some("9.1.0+sha512.ab")
+            Some("9.1.0+sha512.ab"),
+            Some("warn")
         ));
         assert!(update_rewrites_dev_engines(
             "pnpm",
             Some("11.29.0"),
-            Some("11.29.0")
+            Some("11.29.0"),
+            Some("warn")
         ));
-        assert!(update_rewrites_dev_engines("pnpm", None, Some("9.1.0")));
+        assert!(update_rewrites_dev_engines(
+            "pnpm",
+            None,
+            Some("9.1.0"),
+            None
+        ));
         // `pnpm init` writes a caret range with no packageManager: the user's.
-        assert!(!update_rewrites_dev_engines("pnpm", Some("^11.8.0"), None));
+        assert!(!update_rewrites_dev_engines(
+            "pnpm",
+            Some("^11.8.0"),
+            None,
+            Some("download")
+        ));
         // A caret over another version, or a hand-written range, stays too.
         assert!(!update_rewrites_dev_engines(
             "pnpm",
             Some("^11.8.0"),
-            Some("11.29.0")
+            Some("11.29.0"),
+            Some("warn")
         ));
         assert!(!update_rewrites_dev_engines(
             "pnpm",
             Some(">=11.20.0 <12"),
-            Some("11.29.0")
+            Some("11.29.0"),
+            Some("warn")
         ));
+        // A second update of an authored `^11.29.0` under `onFail: "ignore"`
+        // finds the hashed pin the first one left; that is not Nub's pair, which
+        // always carries `onFail: "warn"`.
+        for on_fail in [Some("ignore"), Some("download"), None] {
+            assert!(!update_rewrites_dev_engines(
+                "pnpm",
+                Some("^11.29.0"),
+                Some("11.29.0+sha512.ab"),
+                on_fail
+            ));
+        }
     }
 
     #[test]

@@ -10627,7 +10627,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 _ => range.clone().unwrap_or_else(|| "latest".to_string()),
             };
             // The pair semantics: devEngines = intent, packageManager = resolved
-            // record. A pair Nub wrote (^x.y.z beside packageManager x.y.z) is
+            // record. A pair Nub wrote (^x.y.z, onFail warn, beside packageManager x.y.z) is
             // re-derived from the new exact; any other range (">=9 <10", or a
             // bare ^x.y.z as `pnpm init` writes) survives untouched. The update just resolved
             // WITHIN that range, so the new exact satisfies it by construction.
@@ -10635,6 +10635,7 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 &name,
                 range.as_deref(),
                 pin.version.as_deref().filter(|_| from_package_manager),
+                resolve::dev_engines_on_fail(&cwd).as_deref(),
             );
             // A nub-shaped devEngines range moves with the pin (same writer as
             // `use`, onFail:"warn"); a hand-written one is the user's stated
