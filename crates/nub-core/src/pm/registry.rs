@@ -640,7 +640,7 @@ fn origin_of(url: &str) -> Option<&str> {
 /// `>=9 <11` pin resolves rather than erroring. The `||` OR operator is NOT
 /// supported (Cargo's `semver` has no OR) — vanishingly rare in a PM pin.
 fn resolve_dist(packument: &Value, spec: &str) -> Result<VersionDist> {
-    let spec = spec.trim();
+    let spec = aube_semver::js_trim(spec);
     let versions = packument
         .get("versions")
         .and_then(Value::as_object)
@@ -956,7 +956,7 @@ pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Re
     // or a packument missing the key, whose fallback reads the spec as a caret
     // range) would otherwise be installed, and checked, as a release nobody
     // pinned.
-    let spec = spec.trim();
+    let spec = aube_semver::js_trim(spec);
     if semver::Version::parse(spec).is_ok() && dist.version != spec {
         bail!(
             "the registry answered {pkg}@{spec} with version {} — refusing a release other than the one pinned",
@@ -967,7 +967,7 @@ pub fn resolve_version_authed(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Re
 }
 
 fn resolve_version_unchecked(cfg: &RegistryConfig, pkg: &str, spec: &str) -> Result<VersionDist> {
-    let spec = spec.trim();
+    let spec = aube_semver::js_trim(spec);
     let base = cfg.base.trim_end_matches('/');
     let is_exact = semver::Version::parse(spec).is_ok();
     let is_range = !is_exact && PmRange::parse(spec).is_some();
@@ -1308,6 +1308,14 @@ mod tests {
         // npm reads the first set as empty, so only the second can match.
         assert_eq!(pick(">=11.29.0 <=11.20.* || 11.19.0").unwrap(), "11.19.0");
         assert!(pick(">=12 <11").is_err());
+        // Trimmed as JavaScript trims, as the lockfile check reads the range:
+        // U+FEFF is whitespace there, U+0085 is not.
+        assert_eq!(
+            pick("\u{FEFF}^11.20.0 || ^12.0.0\u{FEFF}").unwrap(),
+            "12.23.0"
+        );
+        assert!(pick("\u{85}^11.20.0").is_err());
+        assert!(pick("^11.20.0\u{85}").is_err());
     }
 
     /// A range npm rejects is rejected, never rewritten into one it accepts,

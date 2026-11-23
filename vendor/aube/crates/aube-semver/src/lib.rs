@@ -123,8 +123,9 @@ fn is_js_space(c: char) -> bool {
     )
 }
 
-/// JavaScript's `s.trim()`.
-fn js_trim(s: &str) -> &str {
+/// JavaScript's `s.trim()`, which is how npm trims a range before reading
+/// it. Trim a spec with this, never `str::trim`, before handing it here.
+pub fn js_trim(s: &str) -> &str {
     s.trim_matches(is_js_space)
 }
 

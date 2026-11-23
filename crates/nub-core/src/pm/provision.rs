@@ -822,7 +822,7 @@ pub fn resolve_pm_dist(
     // releases live in `@yarnpkg/cli-dist`: the newest match across both
     // packages wins, and a Berry pick provisions as Berry.
     if pm == super::Pm::Yarn
-        && semver::Version::parse(spec.trim()).is_err()
+        && semver::Version::parse(aube_semver::js_trim(spec)).is_err()
         && registry::PmRange::parse(spec).is_some()
     {
         let classic = registry::resolve_version_authed(cfg, pm.registry_package(), spec);
