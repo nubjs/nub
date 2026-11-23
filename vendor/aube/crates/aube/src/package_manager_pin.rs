@@ -174,22 +174,29 @@ fn read_manifest(dir: &Path) -> Option<Value> {
     serde_json::from_str(&raw).ok()
 }
 
-fn plan(manifest: &Value, existing: Option<&EnvLockfile>) -> Plan {
+fn plan(manifest: &Value, existing: Option<&EnvLockfile>, target: Option<&str>) -> Plan {
     let Some(wanted) = wanted_pnpm(manifest) else {
         return Plan::Current;
     };
+    // `nub pm update` names the version to record, which replaces a recorded
+    // one the range still allows; it is the only caller that moves a range pin.
+    let target = target
+        .filter(|v| satisfies(v, &wanted.specifier))
+        .map(str::to_string);
     // A recorded version the pin still allows is kept, so a range pin does
     // not move whenever a newer pnpm is published.
-    let locked = existing.and_then(|env| {
-        let version = env
-            .package_manager_dependencies()?
-            .get("pnpm")?
-            .version
-            .clone();
-        let parsed = node_semver::Version::parse(&version).ok()?;
-        (satisfies(&version, &wanted.specifier)
-            && env.pins(&version, engine_packages(&parsed), None))
-        .then_some(version)
+    let locked = target.or_else(|| {
+        existing.and_then(|env| {
+            let version = env
+                .package_manager_dependencies()?
+                .get("pnpm")?
+                .version
+                .clone();
+            let parsed = node_semver::Version::parse(&version).ok()?;
+            (satisfies(&version, &wanted.specifier)
+                && env.pins(&version, engine_packages(&parsed), None))
+            .then_some(version)
+        })
     });
     let Some(version) = locked.or_else(|| offline_version(&wanted)) else {
         // A range below pnpm 11 records nothing whichever release it picks.
@@ -256,7 +263,7 @@ pub fn env_document_is_current(lockfile_dir: &Path) -> bool {
         .ok()
         .flatten()
         .and_then(|text| EnvLockfile::parse(&text));
-    matches!(plan(&manifest, env.as_ref()), Plan::Current)
+    matches!(plan(&manifest, env.as_ref(), None), Plan::Current)
 }
 
 /// Bring the env document of `<lockfile_dir>/pnpm-lock.yaml` in line with
@@ -272,15 +279,30 @@ pub async fn sync_pnpm_env_lockfile(
     lockfile_dir: &Path,
     network_mode: aube_registry::NetworkMode,
 ) -> miette::Result<Option<String>> {
+    record_pnpm_env_lockfile(lockfile_dir, None, network_mode).await
+}
+
+/// [`sync_pnpm_env_lockfile`], recording `target` when the pin allows it
+/// rather than keeping a recorded version, and creating the lockfile when
+/// there is none. A `target` the pin does not allow is ignored.
+pub async fn record_pnpm_env_lockfile(
+    lockfile_dir: &Path,
+    target: Option<&str>,
+    network_mode: aube_registry::NetworkMode,
+) -> miette::Result<Option<String>> {
     let lockfile_path = lockfile_dir.join(LOCKFILE);
-    let Ok(content) = std::fs::read_to_string(&lockfile_path) else {
-        return Ok(None);
+    // With a target and no lockfile, write what pnpm's own first command
+    // writes there: the env document alone.
+    let content = match std::fs::read_to_string(&lockfile_path) {
+        Ok(content) => content,
+        Err(_) if target.is_some() => String::new(),
+        Err(_) => return Ok(None),
     };
     let Some(manifest) = read_manifest(lockfile_dir) else {
         return Ok(None);
     };
     let existing = EnvLockfile::from_lockfile_content(&content);
-    let (wanted, version) = match plan(&manifest, existing.as_ref()) {
+    let (wanted, version) = match plan(&manifest, existing.as_ref(), target) {
         Plan::Current => return Ok(None),
         Plan::Record {
             wanted,
@@ -454,6 +476,41 @@ mod tests {
         assert_eq!(
             array(json!([{ "name": "pnpm", "version": "11.28.9" }, { "name": "npm" }])),
             None
+        );
+    }
+
+    #[test]
+    fn a_target_moves_a_range_pin_that_the_lockfile_already_satisfies() {
+        let manifest = json!({ "devEngines": { "packageManager":
+            { "name": "pnpm", "version": "^11.20.0", "onFail": "warn" } } });
+        let entry = |name: &str| {
+            format!("      '{name}':\n        specifier: 11.20.0\n        version: 11.20.0\n")
+        };
+        let record = |name: &str| {
+            format!("  '{name}@11.20.0':\n    resolution: {{integrity: sha512-AAAA}}\n\n")
+        };
+        let snapshot = |name: &str| format!("  '{name}@11.20.0': {{}}\n\n");
+        let env = format!(
+            "---\nlockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    packageManagerDependencies:\n{}{}\npackages:\n\n{}{}snapshots:\n\n{}{}---\n",
+            entry("@pnpm/exe"),
+            entry("pnpm"),
+            record("@pnpm/exe"),
+            record("pnpm"),
+            snapshot("@pnpm/exe"),
+            snapshot("pnpm"),
+        );
+        let existing = EnvLockfile::from_lockfile_content(&env).expect("env document");
+        let recorded = |target| match plan(&manifest, Some(&existing), target) {
+            Plan::Current => None,
+            Plan::Record { version, .. } => Some(version),
+        };
+        assert_eq!(recorded(None), None, "a satisfying record is kept");
+        assert_eq!(recorded(Some("11.29.0")), Some(Some("11.29.0".to_string())));
+        assert_eq!(recorded(Some("11.20.0")), None, "already recorded");
+        assert_eq!(
+            recorded(Some("12.0.0")),
+            None,
+            "a target outside the range is ignored"
         );
     }
 

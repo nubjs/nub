@@ -53,6 +53,9 @@ pub enum PinSource {
     PackageManager,
     /// The `package.json#devEngines.packageManager` fallback.
     DevEngines,
+    /// The pnpm `pnpm-lock.yaml` records in `packageManagerDependencies`, inside
+    /// a `devEngines.packageManager` range (see [`apply_pnpm_lockfile_pin`]).
+    PnpmLockfile,
 }
 
 impl std::fmt::Display for PinSource {
@@ -62,6 +65,7 @@ impl std::fmt::Display for PinSource {
             PinSource::YarnPath => ".yarnrc.yml yarnPath",
             PinSource::PackageManager => "packageManager",
             PinSource::DevEngines => "devEngines.packageManager",
+            PinSource::PnpmLockfile => "pnpm-lock.yaml within devEngines.packageManager",
         })
     }
 }
@@ -211,6 +215,7 @@ pub fn resolve_target_with_source(cwd: &Path) -> Option<PmTargetResolution> {
         // here (resolve_pin_with_source is the channel that returns them).
         return None;
     };
+    let (pin, source) = apply_pnpm_lockfile_pin(pin, source, cwd);
     Some(PmTargetResolution {
         target: PmTarget::Provision(apply_yarnrc_signal(pin, cwd)),
         source,
@@ -244,6 +249,7 @@ pub fn resolve_pin_with_source(cwd: &Path) -> Option<PmPinResolution> {
     let manifest = root_manifest(cwd)?;
     let resolved = pin_from_manifest(&manifest);
     let (pin, source) = resolved.pin?;
+    let (pin, source) = apply_pnpm_lockfile_pin(pin, source, cwd);
     Some(PmPinResolution {
         pin: apply_yarnrc_signal(pin, cwd),
         source,
@@ -270,6 +276,50 @@ pub fn unusable_pin(cwd: &Path) -> Option<PinWarning> {
         matches!(w, PinWarning::Ignored { spec, .. }
             if matches!(spec.split('@').next(), Some("npm" | "pnpm" | "yarn")))
     })
+}
+
+/// A pnpm `devEngines.packageManager` range with no `packageManager` field runs
+/// the pnpm `pnpm-lock.yaml` records in `packageManagerDependencies`, when the
+/// range allows it, as pnpm itself does: pnpm 11.1.3 and later record the pnpm
+/// they run there and keep that record while the range allows it. Without
+/// this, every run would re-resolve the newest release in range, drifting from
+/// the lockfile as new releases ship, and a cold download would find no
+/// project-pinned digest for the version it fetched. A record the range does
+/// not allow, or one below 11.1.3, leaves the range to resolve as before.
+fn apply_pnpm_lockfile_pin(pin: PmPin, source: PinSource, cwd: &Path) -> (PmPin, PinSource) {
+    if source != PinSource::DevEngines || pin.pm != Pm::Pnpm {
+        return (pin, source);
+    }
+    let Some(range) = pin.version.as_deref() else {
+        return (pin, source);
+    };
+    if semver::Version::parse(range).is_ok() {
+        return (pin, source);
+    }
+    let recorded = crate::incumbent::pnpm_lockfile_version(&pin_target_dir(cwd))
+        .filter(|v| pnpm_records_own_pin(v) && pnpm_range_allows(range, v));
+    match recorded {
+        Some(version) => (
+            PmPin {
+                pm: Pm::Pnpm,
+                version: Some(version),
+            },
+            PinSource::PnpmLockfile,
+        ),
+        None => (pin, source),
+    }
+}
+
+/// Whether `range` admits `version`, read the way provisioning resolves the
+/// range against the registry.
+fn pnpm_range_allows(range: &str, version: &str) -> bool {
+    match (
+        semver::VersionReq::parse(&super::registry::normalize_range(range)),
+        semver::Version::parse(version),
+    ) {
+        (Ok(range), Ok(version)) => range.matches(&version),
+        _ => false,
+    }
 }
 
 /// A version-less yarn pin (a name-only `devEngines` entry, a URL
@@ -875,6 +925,26 @@ fn dev_engines_mirrors_pin(name: &str, version: &str) -> bool {
 /// accepts either. Measured with real pnpm 11.0.0 to 11.29.0 and 12.23.0.
 pub fn pnpm_compares_pin_hashes(version: &str) -> bool {
     semver::Version::parse(version).is_ok_and(|v| v >= semver::Version::new(11, 8, 0))
+}
+
+/// Whether pnpm `version`, pinned by `devEngines.packageManager`, records its
+/// own integrity in `pnpm-lock.yaml`'s `packageManagerDependencies` on its
+/// first command, creating the lockfile when there is none. 11.1.3 is the
+/// first release that does; 11.0.0 to 11.1.2 leave the pin out of the
+/// lockfile (measured against every minor from 11.0 to 11.29, and 12.23).
+pub fn pnpm_records_own_pin(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v >= semver::Version::new(11, 1, 3))
+}
+
+/// Drop `packageManager` from the workspace-root manifest, for a pnpm 11.1.3+
+/// project pinned by a `devEngines.packageManager` range: pnpm warns on every
+/// command when the two fields hold different versions, and the version a
+/// range resolves to lives in `pnpm-lock.yaml` instead.
+pub fn remove_package_manager_pin(cwd: &Path) -> Result<()> {
+    edit_manifest(cwd, |obj| {
+        obj.shift_remove("packageManager");
+    })?;
+    Ok(())
 }
 
 /// Whether `packageManager: pnpm@<v>` and a `devEngines.packageManager.version`

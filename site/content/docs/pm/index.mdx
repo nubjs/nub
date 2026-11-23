@@ -23,7 +23,7 @@ Nub reads the pin at the workspace root, in this order:
 2. **`package.json#/packageManager`** — the corepack field, an exact version (`pnpm@9.15.4`, optionally `+sha512.<hash>`)
 3. **`package.json#/devEngines/packageManager`** — `{ name, version }`, where the version may be a range
 
-Ranges belong in `devEngines`. A range in `packageManager` still resolves to the newest matching release, with a warning for pnpm 10 and later, which ignore one there. A lockfile never implies a pin. With no pin, `nub pm which` errors and points at [`nub pm use`](#nub-pm-use).
+Ranges belong in `devEngines`. For pnpm 11.1.3 and later, a range runs the version `pnpm-lock.yaml` records in `packageManagerDependencies` while the range allows it, as pnpm does. A range in `packageManager` still resolves to the newest matching release, with a warning for pnpm 10 and later, which ignore one there. A lockfile never implies a pin. With no pin, `nub pm which` errors and points at [`nub pm use`](#nub-pm-use).
 
 ## CLI
 
@@ -107,7 +107,7 @@ It writes only the two pin fields, with no lockfile conversion or config migrati
 
 ### `nub pm update`
 
-Bump the pin to the newest version satisfying the `devEngines` range, or the registry `latest` without one. A `devEngines` version that repeats the pin, as Nub writes for pnpm 11, moves with it within its major. The command provisions the new version and rewrites the pin, and for pnpm 11 and later its record in `pnpm-lock.yaml`. Alias: `nub pm up`.
+Bump the pin to the newest version satisfying the `devEngines` range, or the registry `latest` without one. A `devEngines` version that repeats the pin, as Nub writes for pnpm 11, moves with it within its major. The command provisions the new version and rewrites the pin, and for pnpm 11 and later its record in `pnpm-lock.yaml`. Under a range you wrote yourself, pnpm 11.1.3 and later keep the new version in `pnpm-lock.yaml` alone, and the command removes `packageManager`, which pnpm warns about when it differs from the range. Alias: `nub pm up`.
 
 ```console
 $ nub pm update
@@ -126,7 +126,7 @@ yarn@1.22.22
 $ nub pm cache clear
 ```
 
-A cached exact pin runs offline. Nub contacts the registry only to resolve a range or fetch a missing version.
+A cached exact pin runs offline. Nub contacts the registry only to resolve a range the lockfile doesn't record, or to fetch a missing version.
 
 ### `nub pm shim`
 

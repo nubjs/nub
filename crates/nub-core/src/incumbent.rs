@@ -32,6 +32,9 @@ pub struct IncumbentProbe {
     /// The integrity `<dir>/pnpm-lock.yaml` records for the pinned pnpm at a
     /// version (its `packageManagerDependencies`), as an SRI string.
     pub pnpm_lockfile_integrity: fn(&Path, &str) -> Option<String>,
+    /// The pnpm version `<dir>/pnpm-lock.yaml` records in its
+    /// `packageManagerDependencies`.
+    pub pnpm_lockfile_version: fn(&Path) -> Option<String>,
 }
 
 static PROBE: OnceLock<IncumbentProbe> = OnceLock::new();
@@ -79,4 +82,9 @@ pub(crate) fn pnpm_lockfile_integrity(dir: &Path, version: &str) -> Option<Strin
     PROBE
         .get()
         .and_then(|p| (p.pnpm_lockfile_integrity)(dir, version))
+}
+
+/// See [`IncumbentProbe::pnpm_lockfile_version`]. Unregistered, `None`.
+pub(crate) fn pnpm_lockfile_version(dir: &Path) -> Option<String> {
+    PROBE.get().and_then(|p| (p.pnpm_lockfile_version)(dir))
 }
