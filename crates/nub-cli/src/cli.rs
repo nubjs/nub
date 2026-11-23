@@ -10659,8 +10659,8 @@ fn run_pm(args: &[String]) -> Result<i32> {
                 }
                 if keep_pnpm_pin_digest(&root, &version, &write)? {
                     eprintln!(
-                        "nub: packageManager keeps its +sha512 hash, since pnpm-lock.yaml \
-                         does not record pnpm@{version}"
+                        "nub: the +sha512 hash stays on {} until pnpm-lock.yaml records pnpm@{version}",
+                        hashed_pin_fields(&version)
                     );
                 }
             }
@@ -10940,12 +10940,12 @@ fn resolve_provision_declare(
 
 /// An unhashed pnpm 11+ pin's project-pinned digest is the integrity
 /// `pnpm-lock.yaml` records; a cold download checks the tarball against it.
-/// When the lockfile records nothing for this version (there is no lockfile
-/// yet, or the sync failed), a pnpm that records its own pin writes it on its
-/// first command, and the pin stays hashless: from pnpm 11.8 a hash on
-/// `packageManager` alone warns on every command, and no install clears it.
-/// Otherwise (pnpm 11.0.0 to 11.1.2, or a lockfile recording a different
-/// tarball) the hash goes back on the pin. Returns whether it did.
+/// Until the lockfile records this exact tarball (there is no lockfile yet, the
+/// sync failed, or the pinned pnpm never records it), the hash goes back on the
+/// manifest, in the shape that pnpm accepts quietly
+/// ([`nub_core::pm::resolve::hash_package_manager_pin`]), so the first cold
+/// download on a fresh checkout is still checked against the digest verified
+/// here. Returns whether it did.
 fn keep_pnpm_pin_digest(
     root: &Path,
     version: &str,
@@ -10965,11 +10965,17 @@ fn keep_pnpm_pin_digest(
     if want.is_some() && recorded == want {
         return Ok(false);
     }
-    if recorded.is_none() && nub_core::pm::resolve::pnpm_records_own_pin(version) {
-        return Ok(false);
-    }
     nub_core::pm::resolve::hash_package_manager_pin(root, "pnpm", version, &write.sha512_hex)?;
     Ok(true)
+}
+
+/// The manifest fields [`keep_pnpm_pin_digest`] hashes for pnpm `version`.
+fn hashed_pin_fields(version: &str) -> &'static str {
+    if nub_core::pm::resolve::pnpm_compares_pin_hashes(version) {
+        "packageManager and devEngines.packageManager"
+    } else {
+        "packageManager"
+    }
 }
 
 fn hex_to_bytes(hex: &str) -> Option<Vec<u8>> {
@@ -11062,14 +11068,8 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
     }
     match plan {
         AlignPlan::Fresh => {
-            let records =
-                if name == "pnpm" && !write.pin_hashed && resolve::pnpm_records_own_pin(&version) {
-                    format!(", recording pnpm@{version}'s integrity")
-                } else {
-                    String::new()
-                };
             println!(
-                "  no lockfile — the next install writes {}{records}",
+                "  no lockfile — the next install writes {}",
                 use_align::lockfile_name(name)
             );
         }
@@ -11162,8 +11162,8 @@ fn run_pm_use(name: &str, spec: &str, cwd: &Path) -> Result<i32> {
         }
         if keep_pnpm_pin_digest(&root, &version, &write)? {
             println!(
-                "  package.json: packageManager = pnpm@{version} (+sha512), \
-                 since pnpm-lock.yaml does not record it"
+                "  package.json: {} = pnpm@{version} (+sha512), until pnpm-lock.yaml records it",
+                hashed_pin_fields(&version)
             );
         }
     }
@@ -15340,13 +15340,13 @@ mod tests {
         )
     }
 
-    /// `nub pm use pnpm@11.x` in a project with no lockfile: a pnpm that records
-    /// its own pin keeps the pair hashless, since from 11.8 a hash on
-    /// `packageManager` alone warns on every command. Only 11.0.0 to 11.1.2,
-    /// which never record it, keep the hash; so does a lockfile recording a
-    /// different tarball for the version.
+    /// `nub pm use pnpm@11.x` keeps the verified digest in the manifest until
+    /// `pnpm-lock.yaml` records the same one, so a fresh checkout's first cold
+    /// download is checked against it. Below pnpm 11.8 it rides on
+    /// `packageManager` alone; from 11.8, which warns on a hash on one field
+    /// only, on both fields.
     #[test]
-    fn pnpm_11_pin_keeps_its_hash_only_where_pnpm_will_not_record_it() {
+    fn pnpm_11_pin_keeps_its_digest_until_the_lockfile_records_it() {
         let hex = "ab".repeat(64);
         let use_pnpm = |version: &str, lockfile: Option<String>| {
             let dir = pm_tmpdir("pnpm11-digest");
@@ -15357,23 +15357,38 @@ mod tests {
             let write = nub_core::pm::resolve::write_declared_pm("pnpm", version, &hex, &dir, true)
                 .unwrap();
             let hashed = keep_pnpm_pin_digest(&dir, version, &write).unwrap();
-            let (pin, _) = read_declaration(&dir);
+            let (pin, dev) = read_declaration(&dir);
             let _ = std::fs::remove_dir_all(&dir);
-            (hashed, pin)
+            (
+                hashed,
+                pin,
+                dev["version"].as_str().unwrap_or_default().to_string(),
+            )
         };
+        let with_hash = |v: &str| format!("{v}+sha512.{hex}");
 
-        for version in ["11.1.3", "11.20.0", "11.29.0", "12.23.0"] {
+        for version in ["11.1.3", "11.7.0"] {
             assert_eq!(
                 use_pnpm(version, None),
-                (false, format!("pnpm@{version}")),
-                "pnpm {version} records its own pin, so packageManager stays hashless"
+                (
+                    true,
+                    format!("pnpm@{}", with_hash(version)),
+                    version.to_string()
+                ),
+                "pnpm {version}: the hash on packageManager alone"
             );
         }
-        assert_eq!(
-            use_pnpm("11.1.2", None),
-            (true, format!("pnpm@11.1.2+sha512.{hex}")),
-            "pnpm 11.1.2 records nothing, so the hash stays on the pin"
-        );
+        for version in ["11.8.0", "11.29.0", "12.23.0"] {
+            assert_eq!(
+                use_pnpm(version, None),
+                (
+                    true,
+                    format!("pnpm@{}", with_hash(version)),
+                    with_hash(version)
+                ),
+                "pnpm {version}: the same hash on both fields"
+            );
+        }
 
         let env_doc = |integrity: &str| {
             format!(
@@ -15390,13 +15405,17 @@ mod tests {
         );
         assert_eq!(
             use_pnpm("11.29.0", Some(env_doc(&recorded))),
-            (false, "pnpm@11.29.0".to_string()),
-            "the lockfile carries the digest"
+            (false, "pnpm@11.29.0".to_string(), "11.29.0".to_string()),
+            "the lockfile carries the digest, so the pair stays hashless"
         );
         assert_eq!(
             use_pnpm("11.29.0", Some(env_doc("sha512-AAAA"))),
-            (true, format!("pnpm@11.29.0+sha512.{hex}")),
-            "a lockfile recording another tarball keeps the hash on the pin"
+            (
+                true,
+                format!("pnpm@{}", with_hash("11.29.0")),
+                with_hash("11.29.0")
+            ),
+            "a lockfile recording another tarball keeps the hash"
         );
     }
 

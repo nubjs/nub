@@ -1141,15 +1141,15 @@ mod tests {
         for (package, version, tgz) in releases {
             let tarball = format!("/{}-{version}.tgz", package.replace(['@', '/'], "_"));
             let shasum = super::super::hex_lower(&Sha1::digest(&tgz));
-            // The two packages spell the bin path differently, as published.
-            let bin = if package == "yarn" {
-                "./bin/yarn.js"
-            } else {
-                "bin/yarn.js"
+            // The two yarn packages spell the bin path differently, as published.
+            let bins = match package {
+                "pnpm" => r#"{ "pnpm": "bin/pnpm.cjs" }"#.to_string(),
+                "yarn" => r#"{ "yarn": "./bin/yarn.js", "yarnpkg": "./bin/yarn.js" }"#.to_string(),
+                _ => r#"{ "yarn": "bin/yarn.js", "yarnpkg": "bin/yarn.js" }"#.to_string(),
             };
             let manifest = format!(
                 r#"{{ "name": "{package}", "version": "{version}",
-                     "bin": {{ "yarn": "{bin}", "yarnpkg": "{bin}" }},
+                     "bin": {bins},
                      "dist": {{ "tarball": "http://127.0.0.1:{port}{tarball}",
                                 "shasum": "{shasum}" }} }}"#
             );
@@ -1209,6 +1209,62 @@ mod tests {
             tar.append_data(&mut h, path, body).unwrap();
         }
         tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    /// `nub pm use pnpm@11.29.0` with no lockfile writes the verified digest on
+    /// both pin fields. A fresh checkout's first cold download is checked
+    /// against it, and a tampered digest fails closed with nothing installed.
+    #[test]
+    fn a_hashed_pnpm_11_pair_verifies_the_first_cold_download() {
+        use flate2::{Compression, write::GzEncoder};
+        use sha2::{Digest as _, Sha512};
+        if ambient_registry_override() {
+            return; // env registry outranks the test .npmrc — see helper
+        }
+        let mut tar = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        let manifest = br#"{ "name": "pnpm", "bin": { "pnpm": "bin/pnpm.cjs" } }"#;
+        let launcher = b"#!/usr/bin/env node\n// pnpm 11.29.0\n";
+        for (path, body) in [
+            ("package/package.json", &manifest[..]),
+            ("package/bin/pnpm.cjs", &launcher[..]),
+        ] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(body.len() as u64);
+            h.set_mode(0o644);
+            tar.append_data(&mut h, path, body).unwrap();
+        }
+        let tgz = tar.into_inner().unwrap().finish().unwrap();
+        let hex = super::super::hex_lower(&Sha512::digest(&tgz));
+
+        let root = std::env::temp_dir().join(format!("nub-pm-pnpm11-cold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (project, store) = (root.join("app"), root.join("store"));
+        std::fs::create_dir_all(&project).unwrap();
+        let mock = mock_registry_serving_berry(vec![("pnpm", "11.29.0", tgz)]);
+        std::fs::write(project.join(".npmrc"), format!("registry={mock}\n")).unwrap();
+        std::fs::write(project.join("package.json"), "{\"name\":\"app\"}\n").unwrap();
+        super::super::resolve::write_declared_pm("pnpm", "11.29.0", &hex, &project, true).unwrap();
+        super::super::resolve::hash_package_manager_pin(&project, "pnpm", "11.29.0", &hex).unwrap();
+
+        let pin = super::super::resolve::resolve_pin(&project).expect("the pin just written");
+        assert_eq!(pin.version, Some(format!("11.29.0+sha512.{hex}")));
+        let prov = provision_pm(&pin, &store, &project, None)
+            .expect("a fresh store verifies the download against the manifest digest");
+        assert_eq!(std::fs::read(&prov.bin).unwrap(), launcher);
+
+        let tampered = std::fs::read_to_string(project.join("package.json"))
+            .unwrap()
+            .replace(&hex, &"0".repeat(128));
+        std::fs::write(project.join("package.json"), tampered).unwrap();
+        let fresh = root.join("fresh-store");
+        let pin = super::super::resolve::resolve_pin(&project).unwrap();
+        let err = provision_pm(&pin, &fresh, &project, None).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("pin hash mismatch"),
+            "a tampered digest must fail closed, got: {err:#}"
+        );
+        assert!(!fresh.join("pm/pnpm/11.29.0").exists());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

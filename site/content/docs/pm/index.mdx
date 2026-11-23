@@ -70,7 +70,7 @@ It writes three things, and rerunning it is a no-op:
 - **`package.json#/devEngines/packageManager`** — `{ name, version: "^<exact>", onFail: "warn" }`, the range-and-policy form npm and pnpm enforce
 - **The lockfile, in the new manager's format** — a lockfile in another format is converted with its resolution state and the old file removed; one already in the target format is left alone. For pnpm 11 and later, the pinned pnpm is also recorded in the lockfile's `packageManagerDependencies`, which pnpm's frozen install requires
 
-For pnpm 11 and later, both fields hold the same exact version with no hash, because pnpm 11 warns when they disagree. The integrity goes in `pnpm-lock.yaml` instead, and a fresh download is checked against it. With no lockfile yet, the first install records it. Releases before 11.1.3 don't record it, so `packageManager` keeps its hash for them. The converted lockfile passes the new manager's frozen install, such as `pnpm install --frozen-lockfile`.
+For pnpm 11 and later, both fields hold the same exact version with no hash, because pnpm 11 warns when they disagree. The integrity goes in `pnpm-lock.yaml` instead, and a fresh download is checked against it. Until the lockfile records it, the hash stays in `package.json`, on `packageManager` alone before pnpm 11.8 and on both fields from 11.8. The converted lockfile passes the new manager's frozen install, such as `pnpm install --frozen-lockfile`.
 
 <Callout title="Config is not migrated">
 Switching managers converts the lockfile, not your config. The `.npmrc`, any `pnpm.*` fields, `pnpm-workspace.yaml` settings, and other manager-specific config stay as they are.

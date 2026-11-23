@@ -698,22 +698,45 @@ pub struct DeclaredPmWrite {
     pub sha512_hex: String,
 }
 
-/// Put the `+sha512.<hex>` hash back on an unhashed pnpm 11+ `packageManager`
-/// pin, for a pnpm that will not record its digest in `pnpm-lock.yaml` itself
-/// (see [`pnpm_records_own_pin`]). Those releases do not compare hashes, so a
-/// hash on one field warns on none of them, and a cold download keeps a
-/// project-pinned digest to check against.
+/// Put the `+sha512.<hex>` hash back on an unhashed pnpm 11+ pin, for when
+/// `pnpm-lock.yaml` does not yet record the verified digest (no lockfile, a
+/// sync that failed, or a pnpm that never records it): a cold download on a
+/// fresh checkout then still has a project-pinned digest to check. The hash
+/// goes where the pinned pnpm accepts it without a warning: on
+/// `packageManager` alone below 11.8, on both fields from 11.8 (see
+/// [`pnpm_compares_pin_hashes`]). Once the lockfile records the same digest,
+/// `nub pm use` writes the pair hashless again.
 pub fn hash_package_manager_pin(
     cwd: &Path,
     name: &str,
     version: &str,
     sha512_hex: &str,
 ) -> Result<()> {
+    let hashed = format!("{version}+sha512.{sha512_hex}");
+    let both = pnpm_compares_pin_hashes(version);
     edit_manifest(cwd, |obj| {
         obj.insert(
             "packageManager".to_string(),
-            serde_json::Value::String(format!("{name}@{version}+sha512.{sha512_hex}")),
+            serde_json::Value::String(format!("{name}@{hashed}")),
         );
+        if !both {
+            return;
+        }
+        let entries = match obj
+            .get_mut("devEngines")
+            .and_then(|d| d.get_mut("packageManager"))
+        {
+            Some(serde_json::Value::Array(items)) => items.iter_mut().collect::<Vec<_>>(),
+            Some(entry) => vec![entry],
+            None => Vec::new(),
+        };
+        for entry in entries {
+            let ours = entry.get("name").and_then(|n| n.as_str()) == Some(name)
+                && entry.get("version").and_then(|v| v.as_str()) == Some(version);
+            if ours {
+                entry["version"] = serde_json::Value::String(hashed.clone());
+            }
+        }
     })?;
     Ok(())
 }
@@ -845,15 +868,13 @@ fn dev_engines_mirrors_pin(name: &str, version: &str) -> bool {
     name == "pnpm" && semver::Version::parse(version).is_ok_and(|v| v.major >= 11)
 }
 
-/// Whether pnpm `version`, pinned by the exact pair [`write_declared_pm`]
-/// writes, records its own integrity in `pnpm-lock.yaml`'s
-/// `packageManagerDependencies` on its first command, creating the lockfile when
-/// there is none. 11.1.3 is the first release that does; 11.0.0 to 11.1.2 leave
-/// the pin out of the lockfile (measured against every minor from 11.0 to 11.29).
-/// A pin such a pnpm records needs no hash of its own, which from 11.8 would
-/// warn on every command.
-pub fn pnpm_records_own_pin(version: &str) -> bool {
-    semver::Version::parse(version).is_ok_and(|v| v >= semver::Version::new(11, 1, 3))
+/// Whether pnpm `version` compares the hashes on `packageManager` and
+/// `devEngines.packageManager`: from 11.8 a hash on one field alone warns on
+/// every command and the same hash on both does not; 11.0 to 11.7 warn on a
+/// hash in `devEngines` and accept one on `packageManager` alone. pnpm 12
+/// accepts either. Measured with real pnpm 11.0.0 to 11.29.0 and 12.23.0.
+pub fn pnpm_compares_pin_hashes(version: &str) -> bool {
+    semver::Version::parse(version).is_ok_and(|v| v >= semver::Version::new(11, 8, 0))
 }
 
 /// Whether `packageManager: pnpm@<v>` and a `devEngines.packageManager.version`
