@@ -746,6 +746,172 @@ fn warn_lockfile_conflict_markers(lockfile_dir: &Path, err: &aube_lockfile::Erro
     );
 }
 
+/// Fill `os`/`cpu`/`libc` on the targets of optional edges in a yarn v1
+/// graph.
+///
+/// A classic `yarn.lock` records every platform variant of a native package
+/// (`@rolldown/binding-*`, `@esbuild/*`) with no platform fields at all;
+/// yarn decides installability from each package's manifest at install
+/// time. Without this pass `filter_graph` sees unconstrained packages and
+/// installs every variant. Bun does the same after migrating a yarn or pnpm
+/// lockfile (`fetch_necessary_package_metadata_after_yarn_or_pnpm_migration`).
+///
+/// The fields come from the (cached) abbreviated packument, falling back to
+/// the package's own `package.json` in the store. A package with neither
+/// stays unconstrained and installs as before — except offline, where it
+/// cannot be fetched either: the optional edge is dropped with a warning,
+/// matching npm and yarn, which skip an optional dependency they cannot get.
+pub(super) async fn backfill_yarn_classic_platforms(
+    graph: &mut LockfileGraph,
+    client: &aube_registry::client::RegistryClient,
+    packument_cache_dir: &Path,
+    store: &aube_store::Store,
+    offline: bool,
+) {
+    use futures_util::StreamExt;
+
+    let mut targets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for deps in graph.importers.values() {
+        for dep in deps {
+            if dep.dep_type == aube_lockfile::DepType::Optional {
+                targets.insert(dep.dep_path.clone());
+            }
+        }
+    }
+    for pkg in graph.packages.values() {
+        for (name, tail) in &pkg.optional_dependencies {
+            if let Some(key) =
+                aube_lockfile::resolve_dep_edge(name, tail, |k| graph.packages.contains_key(k))
+            {
+                targets.insert(key);
+            }
+        }
+    }
+    let mut by_name: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for key in targets {
+        let Some(pkg) = graph.packages.get(&key) else {
+            continue;
+        };
+        if pkg.local_source.is_some()
+            || !pkg.os.is_empty()
+            || !pkg.cpu.is_empty()
+            || !pkg.libc.is_empty()
+        {
+            continue;
+        }
+        by_name
+            .entry(pkg.registry_name().to_string())
+            .or_default()
+            .push(key);
+    }
+    if by_name.is_empty() {
+        return;
+    }
+
+    let fetched: Vec<_> = futures_util::stream::iter(by_name)
+        .map(|(name, keys)| async move {
+            let result = client
+                .fetch_packument_cached(&name, packument_cache_dir)
+                .await;
+            (name, keys, result)
+        })
+        .buffer_unordered(16)
+        .collect()
+        .await;
+    let mut unavailable: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (name, keys, result) in fetched {
+        let packument = result
+            .inspect_err(|e| tracing::debug!("no registry metadata for optional {name}: {e}"))
+            .ok();
+        for key in keys {
+            let Some(pkg) = graph.packages.get_mut(&key) else {
+                continue;
+            };
+            let platform = match packument
+                .as_ref()
+                .and_then(|p| p.versions.get(&pkg.version))
+            {
+                Some(meta) => Some((meta.os.clone(), meta.cpu.clone(), meta.libc.clone())),
+                None => stored_manifest_platform(store, pkg),
+            };
+            match platform {
+                Some((os, cpu, libc)) => {
+                    pkg.os = os.into_iter().collect();
+                    pkg.cpu = cpu.into_iter().collect();
+                    pkg.libc = libc.into_iter().collect();
+                }
+                None if offline => {
+                    unavailable.insert(key);
+                }
+                None => {}
+            }
+        }
+    }
+    if unavailable.is_empty() {
+        return;
+    }
+    // One line, not one per package: a single native package can carry two
+    // dozen foreign-platform bindings, all of which land here offline.
+    let mut names: Vec<&str> = unavailable.iter().map(String::as_str).collect();
+    let more = names.len().saturating_sub(3);
+    names.truncate(3);
+    tracing::warn!(
+        code = aube_codes::warnings::WARN_AUBE_SKIPPED_OPTIONAL_OFFLINE,
+        "skipping {} optional dependencies whose registry metadata and tarball are not cached (offline): {}{}",
+        unavailable.len(),
+        names.join(", "),
+        if more > 0 {
+            format!(", and {more} more")
+        } else {
+            String::new()
+        },
+    );
+    for deps in graph.importers.values_mut() {
+        deps.retain(|dep| {
+            dep.dep_type != aube_lockfile::DepType::Optional || !unavailable.contains(&dep.dep_path)
+        });
+    }
+    let package_keys: std::collections::BTreeSet<String> = graph.packages.keys().cloned().collect();
+    for pkg in graph.packages.values_mut() {
+        let dropped: Vec<String> = pkg
+            .optional_dependencies
+            .iter()
+            .filter(|(name, tail)| {
+                aube_lockfile::resolve_dep_edge(name, tail, |k| package_keys.contains(k))
+                    .is_some_and(|key| unavailable.contains(&key))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in dropped {
+            pkg.optional_dependencies.remove(&name);
+            pkg.dependencies.remove(&name);
+        }
+    }
+}
+
+/// `os`/`cpu`/`libc` from a package's own `package.json` in the store, for
+/// a package installed before whose registry metadata is not cached.
+fn stored_manifest_platform(
+    store: &aube_store::Store,
+    pkg: &aube_lockfile::LockedPackage,
+) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
+    let index = store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())?;
+    let bytes = std::fs::read(&index.get("package.json")?.store_path).ok()?;
+    let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let field = |key: &str| -> Vec<String> {
+        match manifest.get(key) {
+            Some(serde_json::Value::String(s)) => vec![s.clone()],
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    Some((field("os"), field("cpu"), field("libc")))
+}
+
 pub(super) fn apply_lockfile_graph_platform_rules(
     mut graph: LockfileGraph,
     kind: LockfileKind,

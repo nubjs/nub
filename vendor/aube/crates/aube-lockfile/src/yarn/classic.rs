@@ -134,6 +134,7 @@ pub(super) fn parse_classic_str(
             let declared: BTreeMap<String, String> = block
                 .dependencies
                 .iter()
+                .chain(block.optional_dependencies.iter())
                 .map(|(n, r)| (n.clone(), r.clone()))
                 .collect();
             let tarball_url = block
@@ -163,6 +164,11 @@ pub(super) fn parse_classic_str(
                         .iter()
                         .map(|(n, r)| (n.clone(), format!("{n}@{r}")))
                         .collect(),
+                    optional_dependencies: block
+                        .optional_dependencies
+                        .iter()
+                        .map(|(n, r)| (n.clone(), format!("{n}@{r}")))
+                        .collect(),
                     dep_path,
                     declared_dependencies: declared,
                     declared_dependencies_known: true,
@@ -175,28 +181,39 @@ pub(super) fn parse_classic_str(
         }
     }
 
-    // Second pass: resolve transitive dep references to dep_paths. Classic
-    // tracks only `dependencies:` sections (the tokenizer drops
-    // `optionalDependencies:`), so every transitive edge here is non-optional
-    // — an unsupported one is therefore an eager fatal, never a warn.
-    let mut resolved: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    // Second pass: resolve transitive dep references to dep_paths. An
+    // unsupported source on a `dependencies:` edge is an eager fatal; on an
+    // `optionalDependencies:` edge it is warned and skipped. Active optional
+    // edges are mirrored into `dependencies`, as the npm and pnpm readers do,
+    // so graph walks and the linker see them while `filter_graph` can still
+    // prune a platform mismatch through `optional_dependencies`.
+    let mut resolved: BTreeMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)> =
+        BTreeMap::new();
     for (dep_path, pkg) in &packages {
         let mut deps: BTreeMap<String, String> = BTreeMap::new();
-        for (name, raw_spec) in &pkg.dependencies {
+        let mut optional_deps: BTreeMap<String, String> = BTreeMap::new();
+        for (name, raw_spec, optional) in pkg
+            .dependencies
+            .iter()
+            .map(|(n, s)| (n, s, false))
+            .chain(pkg.optional_dependencies.iter().map(|(n, s)| (n, s, true)))
+        {
             if let Some(resolved_path) =
-                crate::resolve_dep_spec(raw_spec, false, &spec_to_dep_path, &unsupported, path)?
+                crate::resolve_dep_spec(raw_spec, optional, &spec_to_dep_path, &unsupported, path)?
             {
-                deps.insert(
-                    name.clone(),
-                    crate::npm::dep_path_tail(name, &resolved_path).to_string(),
-                );
+                let tail = crate::npm::dep_path_tail(name, &resolved_path).to_string();
+                if optional {
+                    optional_deps.insert(name.clone(), tail.clone());
+                }
+                deps.insert(name.clone(), tail);
             }
         }
-        resolved.insert(dep_path.clone(), deps);
+        resolved.insert(dep_path.clone(), (deps, optional_deps));
     }
-    for (dep_path, deps) in resolved {
+    for (dep_path, (deps, optional_deps)) in resolved {
         if let Some(pkg) = packages.get_mut(&dep_path) {
             pkg.dependencies = deps;
+            pkg.optional_dependencies = optional_deps;
         }
     }
 
@@ -399,6 +416,11 @@ struct Block {
     fields: BTreeMap<String, String>,
     /// Nested dependencies section: name -> range
     dependencies: BTreeMap<String, String>,
+    /// Nested `optionalDependencies:` section: name -> range. Yarn v1
+    /// records every platform variant here (`@rolldown/binding-*`,
+    /// `@esbuild/*`) with no `os`/`cpu`, deciding installability from
+    /// each package's own manifest at install time.
+    optional_dependencies: BTreeMap<String, String>,
 }
 
 /// Tokenize the yarn.lock body into blocks. This is a line-based parser that
@@ -406,11 +428,17 @@ struct Block {
 /// - Comments (`# …`) and blank lines
 /// - Header lines ending in `:` (block keys)
 /// - Fields indented with 2 spaces
-/// - A special nested `dependencies:` section indented with 4 spaces
+/// - Nested `dependencies:` / `optionalDependencies:` sections indented with 4 spaces
 fn tokenize_blocks(content: &str) -> Result<Vec<Block>, String> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Section {
+        None,
+        Deps,
+        OptionalDeps,
+    }
     let mut blocks: Vec<Block> = Vec::new();
     let mut current: Option<Block> = None;
-    let mut in_deps = false;
+    let mut section = Section::None;
 
     for (lineno, raw_line) in content.lines().enumerate() {
         let line_num = lineno + 1;
@@ -428,7 +456,7 @@ fn tokenize_blocks(content: &str) -> Result<Vec<Block>, String> {
             if let Some(b) = current.take() {
                 blocks.push(b);
             }
-            in_deps = false;
+            section = Section::None;
 
             let header = line.trim_end_matches(':').trim();
             if !line.ends_with(':') {
@@ -442,6 +470,7 @@ fn tokenize_blocks(content: &str) -> Result<Vec<Block>, String> {
                 specs,
                 fields: BTreeMap::new(),
                 dependencies: BTreeMap::new(),
+                optional_dependencies: BTreeMap::new(),
             });
             continue;
         }
@@ -451,34 +480,34 @@ fn tokenize_blocks(content: &str) -> Result<Vec<Block>, String> {
         })?;
 
         if indent == 2 {
-            in_deps = false;
+            section = Section::None;
             let body = line.trim_start();
 
-            // Check for nested section markers (e.g. `dependencies:`)
+            // Nested section markers. Any other 2-space section header
+            // (`peerDependencies:`, …) is skipped along with its entries.
             if body.ends_with(':') {
-                let section = body.trim_end_matches(':').trim();
-                if section == "dependencies"
-                    || section == "optionalDependencies"
-                    || section == "peerDependencies"
-                {
-                    // Only track `dependencies:` for our resolution graph; ignore others.
-                    in_deps = section == "dependencies";
-                    continue;
-                }
-                // Unknown 2-space section header — ignore.
+                section = match body.trim_end_matches(':').trim() {
+                    "dependencies" => Section::Deps,
+                    "optionalDependencies" => Section::OptionalDeps,
+                    _ => Section::None,
+                };
                 continue;
             }
 
             let (key, value) = split_key_value(body)
                 .ok_or_else(|| format!("line {line_num}: could not parse '{body}'"))?;
             block.fields.insert(key, value);
-        } else if indent >= 4 && in_deps {
+        } else if indent >= 4 && section != Section::None {
             let body = line.trim_start();
             let (name, range) = split_key_value(body)
                 .ok_or_else(|| format!("line {line_num}: could not parse dep '{body}'"))?;
-            block.dependencies.insert(name, range);
+            if section == Section::Deps {
+                block.dependencies.insert(name, range);
+            } else {
+                block.optional_dependencies.insert(name, range);
+            }
         }
-        // Deeper indents outside `dependencies:` are ignored.
+        // Deeper indents outside a tracked section are ignored.
     }
 
     if let Some(b) = current.take() {
@@ -1025,29 +1054,47 @@ pub fn write_classic(
             out.push('\n');
         }
 
-        // `  dependencies:` block — prefer the declared range from the
-        // package's own manifest (what yarn itself writes) over the
-        // resolved pin. Falls back to the pin when the source
-        // lockfile didn't carry declared ranges (e.g. pnpm → yarn).
-        let nonempty_deps: BTreeMap<&str, String> = pkg
+        // `  dependencies:` then `  optionalDependencies:` — yarn's own
+        // section order. Optional edges are mirrored into `dependencies`
+        // in the graph, so they are split back out here; writing one under
+        // `dependencies:` would make yarn treat a foreign-platform binding
+        // as required. Prefer the declared range from the package's own
+        // manifest (what yarn itself writes) over the resolved pin. Falls
+        // back to the pin when the source lockfile didn't carry declared
+        // ranges (e.g. pnpm → yarn).
+        let mut deps: BTreeMap<&str, String> = BTreeMap::new();
+        let mut optional_deps: BTreeMap<&str, String> = BTreeMap::new();
+        for (n, v) in pkg
             .dependencies
             .iter()
-            .filter_map(|(n, v)| {
-                let key = crate::npm::child_canonical_key(n, v);
-                if !canonical.contains_key(&key) {
-                    return None;
-                }
-                let rendered = pkg
-                    .declared_dependencies
-                    .get(n)
-                    .cloned()
-                    .unwrap_or_else(|| crate::npm::dep_value_as_version(n, v).to_string());
-                Some((n.as_str(), rendered))
-            })
-            .collect();
-        if !nonempty_deps.is_empty() {
-            out.push_str("  dependencies:\n");
-            for (dep_name, dep_version) in &nonempty_deps {
+            .chain(pkg.optional_dependencies.iter())
+        {
+            let key = crate::npm::child_canonical_key(n, v);
+            if !canonical.contains_key(&key) {
+                continue;
+            }
+            let rendered = pkg
+                .declared_dependencies
+                .get(n)
+                .cloned()
+                .unwrap_or_else(|| crate::npm::dep_value_as_version(n, v).to_string());
+            if pkg.optional_dependencies.contains_key(n) {
+                optional_deps.insert(n.as_str(), rendered);
+            } else {
+                deps.insert(n.as_str(), rendered);
+            }
+        }
+        for (section, entries) in [
+            ("dependencies", &deps),
+            ("optionalDependencies", &optional_deps),
+        ] {
+            if entries.is_empty() {
+                continue;
+            }
+            out.push_str("  ");
+            out.push_str(section);
+            out.push_str(":\n");
+            for (dep_name, dep_version) in entries {
                 out.push_str("    ");
                 push_classic_dep_key(&mut out, dep_name);
                 out.push_str(" \"");

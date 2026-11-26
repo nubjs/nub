@@ -2878,3 +2878,80 @@ fs.writeFileSync(target, JSON.stringify({ compilerOptions: { strict: true } }));
         "the install must not report the tsconfig the script generates: {err}"
     );
 }
+
+/// A yarn v1 lockfile records every platform binding under the parent's
+/// `optionalDependencies:` with no `os`/`cpu`, so the install must read those
+/// edges and then install only the host's binding (nubjs/nub#1153).
+#[test]
+fn yarn_classic_lockfile_installs_only_the_host_optional_binding() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
+        return;
+    }
+    let bindings = [
+        ("darwin-arm64", "macos", "aarch64"),
+        ("darwin-x64", "macos", "x86_64"),
+        ("linux-arm64", "linux", "aarch64"),
+        ("linux-x64", "linux", "x86_64"),
+        ("win32-x64", "windows", "x86_64"),
+    ];
+    let Some(host) = bindings
+        .iter()
+        .find(|(_, os, arch)| *os == std::env::consts::OS && *arch == std::env::consts::ARCH)
+        .map(|(name, _, _)| *name)
+    else {
+        eprintln!("skipping: no fixture binding for this host");
+        return;
+    };
+    let storage = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/registry/storage");
+    let integrity = |name: &str| -> String {
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(storage.join(name).join("package.json")).unwrap(),
+        )
+        .unwrap();
+        doc["versions"]["0.21.5"]["dist"]["integrity"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    let dir = pm_tmpdir("yarn-classic-optional-binding");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"yarn-classic-optional","private":true,"dependencies":{"esbuild":"0.21.5"}}"#,
+    )
+    .unwrap();
+    let mut lock = String::from("# yarn lockfile v1\n\n\n");
+    for (name, _, _) in bindings {
+        let pkg = format!("@esbuild/{name}");
+        lock.push_str(&format!(
+            "\"{pkg}@0.21.5\":\n  version \"0.21.5\"\n  resolved \"https://registry.yarnpkg.com/{pkg}/-/{name}-0.21.5.tgz\"\n  integrity {}\n\n",
+            integrity(&pkg)
+        ));
+    }
+    lock.push_str(&format!(
+        "esbuild@0.21.5:\n  version \"0.21.5\"\n  resolved \"https://registry.yarnpkg.com/esbuild/-/esbuild-0.21.5.tgz\"\n  integrity {}\n  optionalDependencies:\n",
+        integrity("esbuild")
+    ));
+    for (name, _, _) in bindings {
+        lock.push_str(&format!("    \"@esbuild/{name}\" \"0.21.5\"\n"));
+    }
+    std::fs::write(dir.join("yarn.lock"), &lock).unwrap();
+
+    let (_, stderr, code) = run_install(&dir, &["install", "--ignore-scripts"]);
+    assert_eq!(code, 0, "install from yarn.lock failed: {stderr}");
+    let store = dir.join("node_modules/.store");
+    for (name, _, _) in bindings {
+        let installed = store.join(format!("@esbuild+{name}@0.21.5")).exists();
+        assert_eq!(
+            installed,
+            name == host,
+            "@esbuild/{name} installed={installed} on host binding {host}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
+        lock,
+        "a matching install must leave yarn.lock byte-identical"
+    );
+}

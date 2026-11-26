@@ -1489,6 +1489,16 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             if !shared_workspace_lockfile && has_workspace {
                 let _ = merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
             }
+            if matches!(kind, aube_lockfile::LockfileKind::Yarn) {
+                resolve::backfill_yarn_classic_platforms(
+                    &mut graph,
+                    &make_client(&cwd).with_network_mode(opts.network_mode),
+                    &packument_cache_dir,
+                    &store,
+                    opts.network_mode == aube_registry::NetworkMode::Offline,
+                )
+                .await;
+            }
             let graph = resolve::apply_lockfile_graph_platform_rules(
                 graph,
                 kind,
