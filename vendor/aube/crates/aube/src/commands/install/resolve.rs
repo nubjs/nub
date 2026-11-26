@@ -757,9 +757,9 @@ fn warn_lockfile_conflict_markers(lockfile_dir: &Path, err: &aube_lockfile::Erro
 /// installs every variant. Bun does the same after migrating a yarn or pnpm
 /// lockfile (`fetch_necessary_package_metadata_after_yarn_or_pnpm_migration`).
 ///
-/// The fields come from the (cached) abbreviated packument, but only when
-/// that version's integrity matches the locked one, so metadata for some
-/// other registry's build never prunes the locked artifact; otherwise from
+/// The fields come from the (cached) abbreviated packument when it
+/// describes the locked tarball (see [`describes_locked_artifact`]), so
+/// metadata for some other registry's build never prunes it; otherwise from
 /// the package's own `package.json` in the store. A package with neither
 /// stays unconstrained and installs. Offline, an optional package this host
 /// could use but whose files are not in the store cannot be fetched: its
@@ -770,6 +770,7 @@ pub(super) async fn backfill_yarn_classic_platforms(
     client: &aube_registry::client::RegistryClient,
     packument_cache_dir: &Path,
     store: &aube_store::Store,
+    project_dir: &Path,
     supported: &aube_resolver::SupportedArchitectures,
     offline: bool,
 ) -> bool {
@@ -798,6 +799,20 @@ pub(super) async fn backfill_yarn_classic_platforms(
             .get(key)
             .is_some_and(|pkg| pkg.local_source.is_none())
     });
+
+    // The store key the fetch phase reads: the locked SRI, or for a lock
+    // entry without one, the sha512 bound to its registry tarball URL.
+    let no_integrity = crate::state::read_no_integrity_index_for(
+        project_dir,
+        targets.iter().map(|key| &graph.packages[key]),
+    );
+    let read_key = |pkg: &aube_lockfile::LockedPackage| -> Option<String> {
+        pkg.integrity.clone().or_else(|| {
+            no_integrity
+                .get(&format!("{}@{}", pkg.registry_name(), pkg.version))
+                .cloned()
+        })
+    };
 
     let mut by_name: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
@@ -833,8 +848,9 @@ pub(super) async fn backfill_yarn_classic_platforms(
                 .and_then(|p| p.versions.get(&pkg.version))
                 .filter(|meta| describes_locked_artifact(meta, pkg))
                 .map(|meta| (meta.os.clone(), meta.cpu.clone(), meta.libc.clone()));
+            let key = read_key(pkg);
             if let Some((os, cpu, libc)) =
-                from_registry.or_else(|| stored_manifest_platform(store, pkg))
+                from_registry.or_else(|| stored_manifest_platform(store, pkg, key.as_deref()?))
             {
                 pkg.os = os.into_iter().collect();
                 pkg.cpu = cpu.into_iter().collect();
@@ -851,9 +867,11 @@ pub(super) async fn backfill_yarn_classic_platforms(
         .filter(|key| {
             let pkg = &graph.packages[key];
             aube_resolver::is_supported(&pkg.os, &pkg.cpu, &pkg.libc, supported)
-                && store
-                    .load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
-                    .is_none()
+                && read_key(pkg).is_none_or(|key| {
+                    store
+                        .load_index(pkg.registry_name(), &pkg.version, Some(&key))
+                        .is_none()
+                })
         })
         .collect();
     if unavailable.is_empty() {
@@ -900,12 +918,18 @@ pub(super) async fn backfill_yarn_classic_platforms(
 }
 
 /// Whether registry metadata describes the tarball the lockfile pins: the
-/// same SRI integrity, or a legacy `shasum` matching a `sha1-` one.
+/// same SRI integrity, or a legacy `shasum` matching a `sha1-` one. A lock
+/// entry with no integrity (an old `resolved "…tgz#<sha1>"` line) and no
+/// custom tarball URL is fetched from this same registry by name and
+/// version, so its metadata is the artifact's own.
 fn describes_locked_artifact(
     meta: &aube_registry::VersionMetadata,
     pkg: &aube_lockfile::LockedPackage,
 ) -> bool {
-    let (Some(locked), Some(dist)) = (pkg.integrity.as_deref(), meta.dist.as_ref()) else {
+    let Some(locked) = pkg.integrity.as_deref() else {
+        return pkg.tarball_url.is_none();
+    };
+    let Some(dist) = meta.dist.as_ref() else {
         return false;
     };
     dist.integrity.as_deref() == Some(locked)
@@ -921,8 +945,9 @@ fn describes_locked_artifact(
 fn stored_manifest_platform(
     store: &aube_store::Store,
     pkg: &aube_lockfile::LockedPackage,
+    key: &str,
 ) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
-    let index = store.load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())?;
+    let index = store.load_index(pkg.registry_name(), &pkg.version, Some(key))?;
     let bytes = std::fs::read(&index.get("package.json")?.store_path).ok()?;
     let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let field = |key: &str| -> Vec<String> {

@@ -2882,7 +2882,9 @@ fs.writeFileSync(target, JSON.stringify({ compilerOptions: { strict: true } }));
 /// A yarn v1 lockfile records every platform binding under the parent's
 /// `optionalDependencies:` with no `os`/`cpu`, so the install must read those
 /// edges and then install only the host's binding, and none under
-/// `--no-optional` (nubjs/nub#1153).
+/// `--no-optional` (nubjs/nub#1153). An older lockfile that pins each tarball
+/// only by a `#<sha1>` URL fragment must prune the same way, and an offline
+/// reinstall must find the binding in the store it was installed into.
 #[test]
 fn yarn_classic_lockfile_installs_only_the_host_optional_binding() {
     if test_registry().is_none() {
@@ -2913,16 +2915,17 @@ fn yarn_classic_lockfile_installs_only_the_host_optional_binding() {
         return;
     };
     let storage = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/registry/storage");
-    let integrity = |name: &str| -> String {
+    let dist = |name: &str, field: &str| -> String {
         let doc: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(storage.join(name).join("package.json")).unwrap(),
         )
         .unwrap();
-        doc["versions"]["0.21.5"]["dist"]["integrity"]
+        doc["versions"]["0.21.5"]["dist"][field]
             .as_str()
             .unwrap()
             .to_string()
     };
+    let integrity = |name: &str| dist(name, "integrity");
     let mut lock = String::from("# yarn lockfile v1\n\n\n");
     for name in bindings {
         let pkg = format!("@esbuild/{name}");
@@ -2979,4 +2982,72 @@ fn yarn_classic_lockfile_installs_only_the_host_optional_binding() {
             "{args:?} must leave yarn.lock byte-identical"
         );
     }
+
+    let mut legacy = String::from("# yarn lockfile v1\n\n\n");
+    for name in bindings {
+        let pkg = format!("@esbuild/{name}");
+        legacy.push_str(&format!(
+            "\"{pkg}@0.21.5\":\n  version \"0.21.5\"\n  resolved \"https://registry.yarnpkg.com/{pkg}/-/{name}-0.21.5.tgz#{}\"\n\n",
+            dist(&pkg, "shasum")
+        ));
+    }
+    legacy.push_str(&format!(
+        "esbuild@0.21.5:\n  version \"0.21.5\"\n  resolved \"https://registry.yarnpkg.com/esbuild/-/esbuild-0.21.5.tgz#{}\"\n  optionalDependencies:\n",
+        dist("esbuild", "shasum")
+    ));
+    for name in bindings {
+        legacy.push_str(&format!("    \"@esbuild/{name}\" \"0.21.5\"\n"));
+    }
+    let dir = pm_tmpdir("yarn-classic-sha1");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"yarn-classic-sha1","private":true,"dependencies":{"esbuild":"0.21.5"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("yarn.lock"), &legacy).unwrap();
+    let (data, cache) = (pm_tmpdir("xdg-data"), pm_tmpdir("xdg-cache"));
+    let install = |args: &[&str]| {
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(args)
+            .current_dir(&dir)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CACHE_HOME", &cache);
+        apply_test_registry(&mut cmd, &dir);
+        cmd.output().expect("failed to spawn nub")
+    };
+    for args in [
+        &["install", "--ignore-scripts"][..],
+        &[
+            "install",
+            "--ignore-scripts",
+            "--offline",
+            "--frozen-lockfile",
+        ][..],
+    ] {
+        let _ = std::fs::remove_dir_all(dir.join("node_modules"));
+        let out = install(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "{args:?} from a sha1 yarn.lock failed: {stderr}"
+        );
+        assert!(
+            !stderr.contains("SKIPPED_OPTIONAL_OFFLINE"),
+            "{args:?} must find the stored binding: {stderr}"
+        );
+        let store = dir.join("node_modules/.store");
+        for name in bindings {
+            let installed = store.join(format!("@esbuild+{name}@0.21.5")).exists();
+            assert_eq!(
+                installed,
+                name == host,
+                "{args:?}: @esbuild/{name} installed={installed} on host binding {host}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
+        legacy,
+        "a sha1 yarn.lock must stay byte-identical"
+    );
 }

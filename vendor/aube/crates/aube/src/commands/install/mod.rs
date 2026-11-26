@@ -1504,6 +1504,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
                     &make_client(&cwd).with_network_mode(opts.network_mode),
                     &packument_cache_dir,
                     &store,
+                    &cwd,
                     &aube_resolver::SupportedArchitectures {
                         os,
                         cpu,
@@ -3267,7 +3268,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     {
         sync_package_manager_pin(&lockfile_dir, opts.network_mode).await;
     }
-    finalize::run_finalize_phase(finalize::FinalizePhaseInput {
+    let finalized = finalize::run_finalize_phase(finalize::FinalizePhaseInput {
         cwd: &cwd,
         settings_ctx: &settings_ctx,
         store: store.as_ref(),
@@ -3317,11 +3318,13 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         prog_ref,
         phase_timings: &mut phase_timings,
     })
-    .await?;
+    .await;
+    // Finalize writes state before it can still fail on build policy, so
+    // drop it on either outcome.
     if offline_skipped_optional {
         let _ = crate::state::remove_state(&cwd);
     }
-    Ok(())
+    finalized
 }
 
 #[cfg(test)]
