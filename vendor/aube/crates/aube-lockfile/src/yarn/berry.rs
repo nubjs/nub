@@ -246,10 +246,23 @@ pub(super) fn parse_berry_str(
         // Transitive deps: `name: "protocol:range"`. We store the raw
         // header-style spec (`name@protocol:range`) and rewrite to a
         // dep_path in pass two.
-        let raw_deps = collect_dep_map(block, "dependencies");
+        // Yarn writes a package's optional dependencies under
+        // `dependencies:`, flagged `optional: true` in `dependenciesMeta`;
+        // split them back out so platform filtering can prune them.
+        let mut raw_deps = collect_dep_map(block, "dependencies");
         let peer_deps = collect_dep_map(block, "peerDependencies");
         let peer_deps_meta = collect_peer_meta(block);
-        let optional_deps = collect_dep_map(block, "optionalDependencies");
+        let mut optional_deps = collect_dep_map(block, "optionalDependencies");
+        for name in collect_optional_meta(block) {
+            if let Some(range) = raw_deps.remove(&name) {
+                optional_deps.insert(name, range);
+            }
+        }
+        let (os, cpu, libc) = block
+            .get("conditions")
+            .and_then(|v| v.as_str())
+            .map(parse_conditions)
+            .unwrap_or_default();
 
         // Declared ranges — same source as `raw_deps` / `optional_deps`
         // but kept as the bare range string (no `name@` prefix) so
@@ -283,6 +296,9 @@ pub(super) fn parse_berry_str(
                     yarn_checksum: checksum,
                     dependencies: raw_deps_specs,
                     optional_dependencies: optional_deps_specs,
+                    os,
+                    cpu,
+                    libc,
                     peer_dependencies: peer_deps,
                     peer_dependencies_meta: peer_deps_meta,
                     dep_path: dep_path.clone(),
@@ -313,6 +329,9 @@ pub(super) fn parse_berry_str(
 
     // Second pass: resolve raw header specs on each package's
     // `dependencies` / `optional_dependencies` map to canonical dep_paths.
+    // Edge values are dep_path tails (`6.0.0`, not `is-number@6.0.0`), the
+    // convention the isolated linker builds sibling links from.
+    let tail = |name: &str, target: &str| crate::npm::dep_path_tail(name, target).to_string();
     let mut resolved_deps: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut resolved_opts: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (dep_path, pkg) in &packages {
@@ -328,7 +347,7 @@ pub(super) fn parse_berry_str(
                     &unsupported,
                     path,
                 )? {
-                    out.insert(name.clone(), target);
+                    out.insert(name.clone(), tail(name, &target));
                     continue;
                 }
                 // Miss: a root `resolutions` may have rewritten this
@@ -351,7 +370,7 @@ pub(super) fn parse_berry_str(
                             &unsupported,
                             path,
                         )? {
-                            out.insert(name.clone(), target);
+                            out.insert(name.clone(), tail(name, &target));
                             break;
                         }
                     }
@@ -362,14 +381,14 @@ pub(super) fn parse_berry_str(
         resolved_deps.insert(dep_path.clone(), resolve(&pkg.dependencies, false)?);
         resolved_opts.insert(dep_path.clone(), resolve(&pkg.optional_dependencies, true)?);
     }
-    for (dep_path, deps) in resolved_deps {
+    // Active optional edges are mirrored into `dependencies`, as the npm,
+    // pnpm and classic readers do, so the linker walks them.
+    for (dep_path, mut deps) in resolved_deps {
         if let Some(pkg) = packages.get_mut(&dep_path) {
+            let opts = resolved_opts.remove(&dep_path).unwrap_or_default();
+            deps.extend(opts.iter().map(|(n, v)| (n.clone(), v.clone())));
             pkg.dependencies = deps;
-        }
-    }
-    for (dep_path, deps) in resolved_opts {
-        if let Some(pkg) = packages.get_mut(&dep_path) {
-            pkg.optional_dependencies = deps;
+            pkg.optional_dependencies = opts;
         }
     }
 
@@ -637,6 +656,56 @@ fn collect_dep_map(block: &yaml_serde::Mapping, key: &str) -> BTreeMap<String, S
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Names flagged `optional: true` in a block's `dependenciesMeta`.
+fn collect_optional_meta(block: &yaml_serde::Mapping) -> Vec<String> {
+    block
+        .get("dependenciesMeta")
+        .and_then(|v| v.as_mapping())
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| {
+                    v.as_mapping()
+                        .and_then(|meta| meta.get("optional"))
+                        .and_then(|o| o.as_bool())
+                        .unwrap_or(false)
+                })
+                .filter_map(|(k, _)| Some(k.as_str()?.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A block's `conditions:` (`os=linux & cpu=x64 & libc=glibc`,
+/// `(os=darwin | os=linux) & cpu=arm64`) as npm-style `os`/`cpu`/`libc`
+/// lists; `key!=value` becomes npm's `!value` negation.
+pub(super) fn parse_conditions(
+    conditions: &str,
+) -> (
+    crate::PlatformList,
+    crate::PlatformList,
+    crate::PlatformList,
+) {
+    let (mut os, mut cpu, mut libc) = Default::default();
+    for term in conditions.split(['&', '|']) {
+        let term = term.trim_matches(|c: char| c.is_whitespace() || c == '(' || c == ')');
+        let (key, value) = match term.split_once("!=") {
+            Some((k, v)) => (k, format!("!{}", v.trim())),
+            None => match term.split_once('=') {
+                Some((k, v)) => (k, v.trim().to_string()),
+                None => continue,
+            },
+        };
+        let list: &mut crate::PlatformList = match key.trim() {
+            "os" => &mut os,
+            "cpu" => &mut cpu,
+            "libc" => &mut libc,
+            _ => continue,
+        };
+        list.push(value);
+    }
+    (os, cpu, libc)
 }
 
 /// Pull `peerDependenciesMeta` into our structured form. Only the
@@ -1000,31 +1069,30 @@ pub fn write_berry(
         out.push_str(&quote_yaml_scalar(&exact_spec));
         out.push('\n');
 
-        // Dependencies / peerDependencies / peerDependenciesMeta /
-        // optionalDependencies: nested YAML mappings with
+        // Dependencies / peerDependencies / dependenciesMeta /
+        // peerDependenciesMeta: nested YAML mappings with
         // `name: "npm:<range-or-version>"` values. Resolved
         // transitive deps collapse to the exact version of the target
         // block (the resolver produced the graph, so the key always
-        // exists in `canonical`).
+        // exists in `canonical`). Yarn lists optional dependencies under
+        // `dependencies:` and flags them in `dependenciesMeta`.
+        let mut all_deps = pkg.dependencies.clone();
+        for (name, value) in &pkg.optional_dependencies {
+            all_deps
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
         write_berry_dep_map(
             &mut out,
             "dependencies",
-            &pkg.dependencies,
-            &pkg.declared_dependencies,
-            &canonical,
-            &resolved_patched,
-            &patch_specs,
-        );
-        write_berry_dep_map(
-            &mut out,
-            "optionalDependencies",
-            &pkg.optional_dependencies,
+            &all_deps,
             &pkg.declared_dependencies,
             &canonical,
             &resolved_patched,
             &patch_specs,
         );
         write_berry_peer_deps(&mut out, &pkg.peer_dependencies);
+        write_berry_optional_meta(&mut out, &pkg.optional_dependencies, &canonical);
         write_berry_peer_meta(&mut out, &pkg.peer_dependencies_meta);
         // `bin:` map — binary name → relative executable path. Yarn 4 emits
         // this (from the package manifest's `bin`) ahead of `checksum`. It's
@@ -1038,6 +1106,11 @@ pub fn write_berry(
             // Yarn writes the checksum unquoted (`checksum: 10c0/…`).
             out.push_str("  checksum: ");
             out.push_str(checksum);
+            out.push('\n');
+        }
+        if let Some(conditions) = format_conditions(pkg) {
+            out.push_str("  conditions: ");
+            out.push_str(&conditions);
             out.push('\n');
         }
         out.push_str("  languageName: node\n");
@@ -1157,6 +1230,49 @@ fn write_berry_dep_map(
         out.push_str(&quote_yaml_scalar(&body));
         out.push('\n');
     }
+}
+
+/// `dependenciesMeta:` flagging each surviving optional edge, as yarn does.
+fn write_berry_optional_meta(
+    out: &mut String,
+    optional: &BTreeMap<String, String>,
+    canonical: &BTreeMap<String, &LockedPackage>,
+) {
+    let names: Vec<&str> = optional
+        .iter()
+        .filter(|(n, v)| canonical.contains_key(&crate::npm::child_canonical_key(n, v)))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    out.push_str("  dependenciesMeta:\n");
+    for name in names {
+        out.push_str("    ");
+        out.push_str(&quote_yaml_key(name));
+        out.push_str(":\n      optional: true\n");
+    }
+}
+
+/// The inverse of [`parse_conditions`]: `os=darwin & cpu=arm64`, with a
+/// multi-value field as `(os=darwin | os=linux)`.
+fn format_conditions(pkg: &LockedPackage) -> Option<String> {
+    let mut terms = Vec::new();
+    for (key, values) in [("os", &pkg.os), ("cpu", &pkg.cpu), ("libc", &pkg.libc)] {
+        let parts: Vec<String> = values
+            .iter()
+            .map(|v| match v.strip_prefix('!') {
+                Some(neg) => format!("{key}!={neg}"),
+                None => format!("{key}={v}"),
+            })
+            .collect();
+        match parts.len() {
+            0 => {}
+            1 => terms.push(parts.into_iter().next().unwrap()),
+            _ => terms.push(format!("({})", parts.join(" | "))),
+        }
+    }
+    (!terms.is_empty()).then(|| terms.join(" & "))
 }
 
 fn write_berry_peer_deps(out: &mut String, peer: &BTreeMap<String, String>) {
