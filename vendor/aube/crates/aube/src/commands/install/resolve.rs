@@ -747,7 +747,8 @@ fn warn_lockfile_conflict_markers(lockfile_dir: &Path, err: &aube_lockfile::Erro
 }
 
 /// Fill `os`/`cpu`/`libc` on the targets of optional edges in a yarn v1
-/// graph.
+/// graph, and, offline, drop the optional edges to packages that cannot be
+/// installed. Returns whether any edge was dropped for being unavailable.
 ///
 /// A classic `yarn.lock` records every platform variant of a native package
 /// (`@rolldown/binding-*`, `@esbuild/*`) with no platform fields at all;
@@ -756,18 +757,22 @@ fn warn_lockfile_conflict_markers(lockfile_dir: &Path, err: &aube_lockfile::Erro
 /// installs every variant. Bun does the same after migrating a yarn or pnpm
 /// lockfile (`fetch_necessary_package_metadata_after_yarn_or_pnpm_migration`).
 ///
-/// The fields come from the (cached) abbreviated packument, falling back to
+/// The fields come from the (cached) abbreviated packument, but only when
+/// that version's integrity matches the locked one, so metadata for some
+/// other registry's build never prunes the locked artifact; otherwise from
 /// the package's own `package.json` in the store. A package with neither
-/// stays unconstrained and installs as before — except offline, where it
-/// cannot be fetched either: the optional edge is dropped with a warning,
-/// matching npm and yarn, which skip an optional dependency they cannot get.
+/// stays unconstrained and installs. Offline, an optional package this host
+/// could use but whose files are not in the store cannot be fetched: its
+/// optional edges are dropped with one warning, as npm and yarn skip an
+/// optional dependency they cannot get. A required path to it still fails.
 pub(super) async fn backfill_yarn_classic_platforms(
     graph: &mut LockfileGraph,
     client: &aube_registry::client::RegistryClient,
     packument_cache_dir: &Path,
     store: &aube_store::Store,
+    supported: &aube_resolver::SupportedArchitectures,
     offline: bool,
-) {
+) -> bool {
     use futures_util::StreamExt;
 
     let mut targets: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -787,28 +792,24 @@ pub(super) async fn backfill_yarn_classic_platforms(
             }
         }
     }
+    targets.retain(|key| {
+        graph
+            .packages
+            .get(key)
+            .is_some_and(|pkg| pkg.local_source.is_none())
+    });
+
     let mut by_name: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
-    for key in targets {
-        let Some(pkg) = graph.packages.get(&key) else {
-            continue;
-        };
-        if pkg.local_source.is_some()
-            || !pkg.os.is_empty()
-            || !pkg.cpu.is_empty()
-            || !pkg.libc.is_empty()
-        {
-            continue;
+    for key in &targets {
+        let pkg = &graph.packages[key];
+        if pkg.os.is_empty() && pkg.cpu.is_empty() && pkg.libc.is_empty() {
+            by_name
+                .entry(pkg.registry_name().to_string())
+                .or_default()
+                .push(key.clone());
         }
-        by_name
-            .entry(pkg.registry_name().to_string())
-            .or_default()
-            .push(key);
     }
-    if by_name.is_empty() {
-        return;
-    }
-
     let fetched: Vec<_> = futures_util::stream::iter(by_name)
         .map(|(name, keys)| async move {
             let result = client
@@ -819,7 +820,6 @@ pub(super) async fn backfill_yarn_classic_platforms(
         .buffer_unordered(16)
         .collect()
         .await;
-    let mut unavailable: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for (name, keys, result) in fetched {
         let packument = result
             .inspect_err(|e| tracing::debug!("no registry metadata for optional {name}: {e}"))
@@ -828,37 +828,45 @@ pub(super) async fn backfill_yarn_classic_platforms(
             let Some(pkg) = graph.packages.get_mut(&key) else {
                 continue;
             };
-            let platform = match packument
+            let from_registry = packument
                 .as_ref()
                 .and_then(|p| p.versions.get(&pkg.version))
+                .filter(|meta| describes_locked_artifact(meta, pkg))
+                .map(|meta| (meta.os.clone(), meta.cpu.clone(), meta.libc.clone()));
+            if let Some((os, cpu, libc)) =
+                from_registry.or_else(|| stored_manifest_platform(store, pkg))
             {
-                Some(meta) => Some((meta.os.clone(), meta.cpu.clone(), meta.libc.clone())),
-                None => stored_manifest_platform(store, pkg),
-            };
-            match platform {
-                Some((os, cpu, libc)) => {
-                    pkg.os = os.into_iter().collect();
-                    pkg.cpu = cpu.into_iter().collect();
-                    pkg.libc = libc.into_iter().collect();
-                }
-                None if offline => {
-                    unavailable.insert(key);
-                }
-                None => {}
+                pkg.os = os.into_iter().collect();
+                pkg.cpu = cpu.into_iter().collect();
+                pkg.libc = libc.into_iter().collect();
             }
         }
     }
+    if !offline {
+        return false;
+    }
+
+    let unavailable: std::collections::BTreeSet<String> = targets
+        .into_iter()
+        .filter(|key| {
+            let pkg = &graph.packages[key];
+            aube_resolver::is_supported(&pkg.os, &pkg.cpu, &pkg.libc, supported)
+                && store
+                    .load_index(pkg.registry_name(), &pkg.version, pkg.integrity.as_deref())
+                    .is_none()
+        })
+        .collect();
     if unavailable.is_empty() {
-        return;
+        return false;
     }
     // One line, not one per package: a single native package can carry two
-    // dozen foreign-platform bindings, all of which land here offline.
+    // dozen bindings, all of which can land here offline.
     let mut names: Vec<&str> = unavailable.iter().map(String::as_str).collect();
     let more = names.len().saturating_sub(3);
     names.truncate(3);
     tracing::warn!(
         code = aube_codes::warnings::WARN_AUBE_SKIPPED_OPTIONAL_OFFLINE,
-        "skipping {} optional dependencies whose registry metadata and tarball are not cached (offline): {}{}",
+        "skipping {} optional dependencies that are not in the store (offline): {}{}",
         unavailable.len(),
         names.join(", "),
         if more > 0 {
@@ -888,6 +896,24 @@ pub(super) async fn backfill_yarn_classic_platforms(
             pkg.dependencies.remove(&name);
         }
     }
+    true
+}
+
+/// Whether registry metadata describes the tarball the lockfile pins: the
+/// same SRI integrity, or a legacy `shasum` matching a `sha1-` one.
+fn describes_locked_artifact(
+    meta: &aube_registry::VersionMetadata,
+    pkg: &aube_lockfile::LockedPackage,
+) -> bool {
+    let (Some(locked), Some(dist)) = (pkg.integrity.as_deref(), meta.dist.as_ref()) else {
+        return false;
+    };
+    dist.integrity.as_deref() == Some(locked)
+        || dist
+            .shasum
+            .as_deref()
+            .and_then(aube_store::shasum_to_sri)
+            .is_some_and(|sri| sri == locked)
 }
 
 /// `os`/`cpu`/`libc` from a package's own `package.json` in the store, for

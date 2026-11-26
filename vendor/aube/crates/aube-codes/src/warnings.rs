@@ -616,7 +616,7 @@ pub const ALL: &[CodeMeta] = &[
     CodeMeta {
         name: WARN_AUBE_SKIPPED_OPTIONAL_OFFLINE,
         category: category::RESOLVER,
-        description: "An offline install could not tell which platform an optional dep from a yarn v1 lockfile targets (no cached metadata, not in the store), so it was skipped instead of failing the install.",
+        description: "An offline install skipped an optional dep from a yarn v1 lockfile whose files are not in the store, instead of failing the install.",
         exit_code: None,
     },
     CodeMeta {

@@ -187,8 +187,8 @@ pub(super) fn parse_classic_str(
     // edges are mirrored into `dependencies`, as the npm and pnpm readers do,
     // so graph walks and the linker see them while `filter_graph` can still
     // prune a platform mismatch through `optional_dependencies`.
-    let mut resolved: BTreeMap<String, (BTreeMap<String, String>, BTreeMap<String, String>)> =
-        BTreeMap::new();
+    let mut resolved_deps: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut resolved_opts: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (dep_path, pkg) in &packages {
         let mut deps: BTreeMap<String, String> = BTreeMap::new();
         let mut optional_deps: BTreeMap<String, String> = BTreeMap::new();
@@ -208,12 +208,13 @@ pub(super) fn parse_classic_str(
                 deps.insert(name.clone(), tail);
             }
         }
-        resolved.insert(dep_path.clone(), (deps, optional_deps));
+        resolved_deps.insert(dep_path.clone(), deps);
+        resolved_opts.insert(dep_path.clone(), optional_deps);
     }
-    for (dep_path, (deps, optional_deps)) in resolved {
+    for (dep_path, deps) in resolved_deps {
         if let Some(pkg) = packages.get_mut(&dep_path) {
             pkg.dependencies = deps;
-            pkg.optional_dependencies = optional_deps;
+            pkg.optional_dependencies = resolved_opts.remove(&dep_path).unwrap_or_default();
         }
     }
 
