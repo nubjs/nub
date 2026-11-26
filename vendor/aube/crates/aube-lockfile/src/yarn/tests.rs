@@ -613,9 +613,17 @@ fn berry_conditions_read_and_write_yarns_negation_and_groups() {
     // Yarn writes `os: ["!linux"]` as a prefix negation.
     let (os, ..) = parse_conditions("!os=linux");
     assert_eq!(os.as_slice(), ["!linux"]);
-    // Yarn ORs a group, so this one holds on every host: no constraint.
-    let (os, ..) = parse_conditions("(!os=linux | !os=win32) & cpu=x64");
-    assert!(os.is_empty(), "{os:?}");
+    // Yarn ORs a group, so one negation excludes just that value...
+    let (os, ..) = parse_conditions("(!os=linux | os=darwin)");
+    assert_eq!(os.as_slice(), ["!linux"]);
+    // ...and a group that holds on every host is no constraint.
+    for always in [
+        "(!os=linux | !os=win32) & cpu=x64",
+        "(!os=linux | os=linux)",
+    ] {
+        let (os, ..) = parse_conditions(always);
+        assert!(os.is_empty(), "{always}: {os:?}");
+    }
 
     let tmp = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(
@@ -643,6 +651,59 @@ fn berry_conditions_read_and_write_yarns_negation_and_groups() {
         written.contains("  conditions: \"!os=linux\"\n"),
         "negated conditions must be written in yarn's quoted prefix form:\n{written}"
     );
+}
+
+#[test]
+fn berry_writer_keeps_a_direct_alias_descriptor_beside_the_real_one() {
+    // A fresh resolve of `root-choice: npm:is-odd@1.0.0` beside `is-odd:
+    // 1.0.0` gives the importer an edge to an alias-keyed package; yarn
+    // writes both descriptors on the one `is-odd` block.
+    let pkg = |name: &str, alias_of: Option<&str>| LockedPackage {
+        name: name.to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: format!("{name}@1.0.0"),
+        alias_of: alias_of.map(str::to_string),
+        ..Default::default()
+    };
+    let direct = |name: &str| crate::DirectDep {
+        name: name.to_string(),
+        dep_path: format!("{name}@1.0.0"),
+        dep_type: DepType::Production,
+        specifier: None,
+    };
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(
+            ".".to_string(),
+            vec![direct("is-odd"), direct("root-choice")],
+        )]),
+        packages: BTreeMap::from([
+            ("is-odd@1.0.0".to_string(), pkg("is-odd", None)),
+            (
+                "root-choice@1.0.0".to_string(),
+                pkg("root-choice", Some("is-odd")),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let manifest = make_manifest(
+        &[("is-odd", "1.0.0"), ("root-choice", "npm:is-odd@1.0.0")],
+        &[],
+    );
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        written.contains("\"is-odd@npm:1.0.0, root-choice@npm:is-odd@1.0.0\":\n"),
+        "both descriptors must head the is-odd block:\n{written}"
+    );
+    let reparsed = parse(out.path(), &manifest).unwrap();
+    for name in ["is-odd", "root-choice"] {
+        let dep = reparsed.importers["."]
+            .iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} must survive a readback:\n{written}"));
+        assert_eq!(reparsed.packages[&dep.dep_path].registry_name(), "is-odd");
+    }
 }
 
 #[test]

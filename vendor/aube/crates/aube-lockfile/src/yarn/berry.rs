@@ -711,10 +711,10 @@ fn collect_optional_meta(block: &yaml_serde::Mapping) -> Vec<String> {
 /// A block's `conditions:` as npm-style `os`/`cpu`/`libc` lists. Yarn writes
 /// one term per field, joined by `&` (`Manifest#getConditions`): `os=linux`,
 /// `!os=linux` for a negation, and `(os=darwin | os=linux)` for several
-/// values. Yarn evaluates a group as an OR, so a group holding a negation
-/// (`(!os=linux | !os=win32)`, true on every host) has no npm-list
-/// equivalent and is left unconstrained rather than pruning a package yarn
-/// would install.
+/// values. Yarn evaluates a group as an OR, so a group holding one
+/// negation excludes just that value (`(!os=linux | os=darwin)` reads as
+/// `!linux`), and one that can never be false (`(!os=linux | !os=win32)`)
+/// is left unconstrained rather than pruning a package yarn would install.
 pub(super) fn parse_conditions(
     conditions: &str,
 ) -> (
@@ -739,9 +739,29 @@ pub(super) fn parse_conditions(
                 Some((negated, key.trim(), value.trim()))
             })
             .collect();
-        if tokens.len() > 1 && tokens.iter().any(|(negated, ..)| *negated) {
-            continue;
-        }
+        let negations: std::collections::BTreeSet<&str> = tokens
+            .iter()
+            .filter(|(negated, ..)| *negated)
+            .map(|(_, _, value)| *value)
+            .collect();
+        let tokens = match negations.iter().next() {
+            None => tokens,
+            Some(_) if tokens.len() == 1 => tokens,
+            Some(excluded)
+                if negations.len() == 1
+                    && tokens.iter().all(|(_, key, _)| *key == tokens[0].1)
+                    && !tokens
+                        .iter()
+                        .any(|(negated, _, v)| !negated && v == excluded) =>
+            {
+                tokens
+                    .into_iter()
+                    .filter(|(negated, ..)| *negated)
+                    .take(1)
+                    .collect()
+            }
+            Some(_) => continue,
+        };
         for (negated, key, value) in tokens {
             let list: &mut crate::PlatformList = match key {
                 "os" => &mut os,
@@ -1005,8 +1025,16 @@ pub fn write_berry(
             format!("{dep_name}@npm:{range}")
         }
     };
+    // An npm-alias edge names its alias-keyed package; yarn lists the alias
+    // descriptor on the real package's block instead.
+    let block_key = |key: String| -> String {
+        match canonical.get(&key).and_then(|p| alias_target_key(p)) {
+            Some(real) if canonical.contains_key(&real) => real,
+            _ => key,
+        }
+    };
     for dep in graph.importers.get(".").into_iter().flatten() {
-        let canonical_key = crate::npm::canonical_key_from_dep_path(&dep.dep_path);
+        let canonical_key = block_key(crate::npm::canonical_key_from_dep_path(&dep.dep_path));
         if !canonical.contains_key(&canonical_key) {
             continue;
         }
@@ -1018,13 +1046,10 @@ pub fn write_berry(
         if patch_spec_matches(&manifest_spec, pkg, &resolved_patched) {
             patch_specs.insert(canonical_key.clone(), manifest_spec.clone());
         }
-        let exact_spec = berry_exact_spec(pkg, &resolved_patched, &patch_specs);
-        if manifest_spec != exact_spec {
-            extra_specs
-                .entry(canonical_key)
-                .or_default()
-                .insert(manifest_spec);
-        }
+        extra_specs
+            .entry(canonical_key)
+            .or_default()
+            .insert(manifest_spec);
     }
     // Harvest transitive declared ranges, same shape as the classic
     // writer. Berry specs always carry a protocol (`npm:`, `workspace:`,
@@ -1034,14 +1059,7 @@ pub fn write_berry(
             let Some(resolved_value) = pkg.dependencies.get(dep_name) else {
                 continue;
             };
-            let mut target = crate::npm::child_canonical_key(dep_name, resolved_value);
-            // An npm-alias edge names its alias-keyed package; yarn lists the
-            // alias descriptor on the real package's block instead.
-            if let Some(real) = canonical.get(&target).and_then(|p| alias_target_key(p))
-                && canonical.contains_key(&real)
-            {
-                target = real;
-            }
+            let target = block_key(crate::npm::child_canonical_key(dep_name, resolved_value));
             let Some(target_pkg) = canonical.get(&target) else {
                 continue;
             };
@@ -1049,10 +1067,7 @@ pub fn write_berry(
             if patch_spec_matches(&manifest_spec, target_pkg, &resolved_patched) {
                 patch_specs.insert(target.clone(), manifest_spec.clone());
             }
-            let exact_spec = berry_exact_spec(target_pkg, &resolved_patched, &patch_specs);
-            if manifest_spec != exact_spec {
-                extra_specs.entry(target).or_default().insert(manifest_spec);
-            }
+            extra_specs.entry(target).or_default().insert(manifest_spec);
         }
     }
 
