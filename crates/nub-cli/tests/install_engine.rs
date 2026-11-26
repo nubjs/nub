@@ -1057,18 +1057,26 @@ fn yarn_berry_lockfile_links_transitive_deps_and_only_the_host_binding() {
         return;
     }
     let bindings = [
-        ("darwin-arm64", "macos", "aarch64", "os=darwin & cpu=arm64"),
-        ("darwin-x64", "macos", "x86_64", "os=darwin & cpu=x64"),
-        ("linux-arm64", "linux", "aarch64", "os=linux & cpu=arm64"),
-        ("linux-x64", "linux", "x86_64", "os=linux & cpu=x64"),
-        ("win32-x64", "windows", "x86_64", "os=win32 & cpu=x64"),
+        ("darwin-arm64", "os=darwin & cpu=arm64"),
+        ("darwin-x64", "os=darwin & cpu=x64"),
+        ("linux-arm64", "os=linux & cpu=arm64"),
+        ("linux-x64", "os=linux & cpu=x64"),
+        ("win32-x64", "os=win32 & cpu=x64"),
     ];
-    let Some(host) = bindings
+    // The offline registry stores tarballs only for the suite's hosts
+    // (`tests/registry/seed.mts`); the other bindings are packument-only and
+    // must be pruned without a fetch.
+    let seeded_hosts = [
+        ("darwin-arm64", "macos", "aarch64"),
+        ("linux-arm64", "linux", "aarch64"),
+        ("linux-x64", "linux", "x86_64"),
+    ];
+    let Some(host) = seeded_hosts
         .iter()
-        .find(|(_, os, arch, _)| *os == std::env::consts::OS && *arch == std::env::consts::ARCH)
+        .find(|(_, os, arch)| *os == std::env::consts::OS && *arch == std::env::consts::ARCH)
         .map(|(name, ..)| *name)
     else {
-        eprintln!("skipping: no fixture binding for this host");
+        eprintln!("skipping: the offline registry has no esbuild binding for this host");
         return;
     };
 
@@ -1080,7 +1088,7 @@ fn yarn_berry_lockfile_links_transitive_deps_and_only_the_host_binding() {
     .unwrap();
     std::fs::write(dir.join(".yarnrc.yml"), "nodeLinker: node-modules\n").unwrap();
     let mut lock = String::from("__metadata:\n  version: 8\n  cacheKey: 10c0\n\n");
-    for (name, _, _, conditions) in bindings {
+    for (name, conditions) in bindings {
         lock.push_str(&format!(
             "\"@esbuild/{name}@npm:0.21.5\":\n  version: 0.21.5\n  resolution: \"@esbuild/{name}@npm:0.21.5\"\n  conditions: {conditions}\n  languageName: node\n  linkType: hard\n\n"
         ));

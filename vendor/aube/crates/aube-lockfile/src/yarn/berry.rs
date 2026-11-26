@@ -330,13 +330,32 @@ pub(super) fn parse_berry_str(
     // Second pass: resolve raw header specs on each package's
     // `dependencies` / `optional_dependencies` map to canonical dep_paths.
     // Edge values are dep_path tails (`6.0.0`, not `is-number@6.0.0`), the
-    // convention the isolated linker builds sibling links from.
-    let tail = |name: &str, target: &str| crate::npm::dep_path_tail(name, target).to_string();
+    // convention the isolated linker builds sibling links from. An npm alias
+    // edge (`string-width-cjs: npm:string-width@^4.2.0`) lands on the real
+    // package's block, which yarn keys by its real name; like the npm and
+    // classic readers, it gets an alias-keyed package (`string-width-cjs@4.2.3`,
+    // `alias_of: string-width`) for the edge to name.
+    let mut aliases: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut tail = |name: &str, target: &str| -> String {
+        if let Some(rest) = target.strip_prefix(name).and_then(|r| r.strip_prefix('@')) {
+            return rest.to_string();
+        }
+        match packages.get(target) {
+            Some(real) if real.local_source.is_none() => {
+                aliases.insert(
+                    format!("{name}@{}", real.version),
+                    (target.to_string(), name.to_string()),
+                );
+                real.version.clone()
+            }
+            _ => target.to_string(),
+        }
+    };
     let mut resolved_deps: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut resolved_opts: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (dep_path, pkg) in &packages {
-        let resolve = |raw: &BTreeMap<String, String>,
-                       optional: bool|
+        let mut resolve = |raw: &BTreeMap<String, String>,
+                           optional: bool|
          -> Result<BTreeMap<String, String>, Error> {
             let mut out = BTreeMap::new();
             for (name, raw_spec) in raw {
@@ -390,6 +409,18 @@ pub(super) fn parse_berry_str(
             pkg.dependencies = deps;
             pkg.optional_dependencies = opts;
         }
+    }
+    for (alias_key, (target, alias_name)) in aliases {
+        if packages.contains_key(&alias_key) {
+            continue;
+        }
+        let Some(mut alias) = packages.get(&target).cloned() else {
+            continue;
+        };
+        alias.alias_of = Some(alias.registry_name().to_string());
+        alias.name = alias_name;
+        alias.dep_path = alias_key.clone();
+        packages.insert(alias_key, alias);
     }
 
     // Discover the workspace members from disk, mirroring the classic reader
@@ -677,9 +708,13 @@ fn collect_optional_meta(block: &yaml_serde::Mapping) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A block's `conditions:` (`os=linux & cpu=x64 & libc=glibc`,
-/// `(os=darwin | os=linux) & cpu=arm64`) as npm-style `os`/`cpu`/`libc`
-/// lists; `key!=value` becomes npm's `!value` negation.
+/// A block's `conditions:` as npm-style `os`/`cpu`/`libc` lists. Yarn writes
+/// one term per field, joined by `&` (`Manifest#getConditions`): `os=linux`,
+/// `!os=linux` for a negation, and `(os=darwin | os=linux)` for several
+/// values. Yarn evaluates a group as an OR, so a group holding a negation
+/// (`(!os=linux | !os=win32)`, true on every host) has no npm-list
+/// equivalent and is left unconstrained rather than pruning a package yarn
+/// would install.
 pub(super) fn parse_conditions(
     conditions: &str,
 ) -> (
@@ -688,22 +723,38 @@ pub(super) fn parse_conditions(
     crate::PlatformList,
 ) {
     let (mut os, mut cpu, mut libc) = Default::default();
-    for term in conditions.split(['&', '|']) {
-        let term = term.trim_matches(|c: char| c.is_whitespace() || c == '(' || c == ')');
-        let (key, value) = match term.split_once("!=") {
-            Some((k, v)) => (k, format!("!{}", v.trim())),
-            None => match term.split_once('=') {
-                Some((k, v)) => (k, v.trim().to_string()),
-                None => continue,
-            },
-        };
-        let list: &mut crate::PlatformList = match key.trim() {
-            "os" => &mut os,
-            "cpu" => &mut cpu,
-            "libc" => &mut libc,
-            _ => continue,
-        };
-        list.push(value);
+    for term in conditions.split('&') {
+        let tokens: Vec<(bool, &str, &str)> = term
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split('|')
+            .filter_map(|token| {
+                let token = token.trim();
+                let (negated, token) = match token.strip_prefix('!') {
+                    Some(rest) => (true, rest),
+                    None => (false, token),
+                };
+                let (key, value) = token.split_once('=')?;
+                Some((negated, key.trim(), value.trim()))
+            })
+            .collect();
+        if tokens.len() > 1 && tokens.iter().any(|(negated, ..)| *negated) {
+            continue;
+        }
+        for (negated, key, value) in tokens {
+            let list: &mut crate::PlatformList = match key {
+                "os" => &mut os,
+                "cpu" => &mut cpu,
+                "libc" => &mut libc,
+                _ => continue,
+            };
+            list.push(if negated {
+                format!("!{value}")
+            } else {
+                value.to_string()
+            });
+        }
     }
     (os, cpu, libc)
 }
@@ -983,7 +1034,14 @@ pub fn write_berry(
             let Some(resolved_value) = pkg.dependencies.get(dep_name) else {
                 continue;
             };
-            let target = crate::npm::child_canonical_key(dep_name, resolved_value);
+            let mut target = crate::npm::child_canonical_key(dep_name, resolved_value);
+            // An npm-alias edge names its alias-keyed package; yarn lists the
+            // alias descriptor on the real package's block instead.
+            if let Some(real) = canonical.get(&target).and_then(|p| alias_target_key(p))
+                && canonical.contains_key(&real)
+            {
+                target = real;
+            }
             let Some(target_pkg) = canonical.get(&target) else {
                 continue;
             };
@@ -1026,6 +1084,10 @@ pub fn write_berry(
     }
 
     for (canonical_key, pkg) in &canonical {
+        // An alias-keyed package is written as the real package's block.
+        if alias_target_key(pkg).is_some_and(|real| canonical.contains_key(&real)) {
+            continue;
+        }
         let mut out = String::new();
         // Yarn's block header lists every *specifier* that resolves to this
         // package — the declared ranges (`chalk@npm:^4.1.2`), not the exact
@@ -1110,7 +1172,7 @@ pub fn write_berry(
         }
         if let Some(conditions) = format_conditions(pkg) {
             out.push_str("  conditions: ");
-            out.push_str(&conditions);
+            out.push_str(&quote_yaml_value(&conditions));
             out.push('\n');
         }
         out.push_str("  languageName: node\n");
@@ -1232,6 +1294,13 @@ fn write_berry_dep_map(
     }
 }
 
+/// The real package's key for an npm-alias package (`string-width-cjs@4.2.3`
+/// aliasing `string-width` gives `string-width@4.2.3`).
+fn alias_target_key(pkg: &LockedPackage) -> Option<String> {
+    let real = pkg.alias_of.as_deref()?;
+    (pkg.local_source.is_none() && real != pkg.name).then(|| format!("{real}@{}", pkg.version))
+}
+
 /// `dependenciesMeta:` flagging each surviving optional edge, as yarn does.
 fn write_berry_optional_meta(
     out: &mut String,
@@ -1254,22 +1323,23 @@ fn write_berry_optional_meta(
     }
 }
 
-/// The inverse of [`parse_conditions`]: `os=darwin & cpu=arm64`, with a
-/// multi-value field as `(os=darwin | os=linux)`.
+/// The inverse of [`parse_conditions`], in yarn's own form
+/// (`Manifest#getConditions`): `os=darwin & cpu=arm64`, `!os=linux`, and
+/// `(os=darwin | os=linux)` for a field with several values.
 fn format_conditions(pkg: &LockedPackage) -> Option<String> {
     let mut terms = Vec::new();
     for (key, values) in [("os", &pkg.os), ("cpu", &pkg.cpu), ("libc", &pkg.libc)] {
-        let parts: Vec<String> = values
+        let tokens: Vec<String> = values
             .iter()
             .map(|v| match v.strip_prefix('!') {
-                Some(neg) => format!("{key}!={neg}"),
+                Some(neg) => format!("!{key}={neg}"),
                 None => format!("{key}={v}"),
             })
             .collect();
-        match parts.len() {
+        match tokens.len() {
             0 => {}
-            1 => terms.push(parts.into_iter().next().unwrap()),
-            _ => terms.push(format!("({})", parts.join(" | "))),
+            1 => terms.extend(tokens),
+            _ => terms.push(format!("({})", tokens.join(" | "))),
         }
     }
     (!terms.is_empty()).then(|| terms.join(" & "))

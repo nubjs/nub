@@ -605,11 +605,114 @@ fn berry_optional_dependencies_meta_and_conditions_round_trip() {
 }
 
 #[test]
-fn berry_conditions_parse_alternatives_and_negation() {
-    let (os, cpu, libc) = super::berry::parse_conditions("(os=darwin | os=linux) & cpu!=ia32");
+fn berry_conditions_read_and_write_yarns_negation_and_groups() {
+    use super::berry::parse_conditions;
+    let (os, cpu, _) = parse_conditions("(os=darwin | os=linux) & cpu=arm64");
     assert_eq!(os.as_slice(), ["darwin", "linux"]);
-    assert_eq!(cpu.as_slice(), ["!ia32"]);
-    assert!(libc.is_empty());
+    assert_eq!(cpu.as_slice(), ["arm64"]);
+    // Yarn writes `os: ["!linux"]` as a prefix negation.
+    let (os, ..) = parse_conditions("!os=linux");
+    assert_eq!(os.as_slice(), ["!linux"]);
+    // Yarn ORs a group, so this one holds on every host: no constraint.
+    let (os, ..) = parse_conditions("(!os=linux | !os=win32) & cpu=x64");
+    assert!(os.is_empty(), "{os:?}");
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"not-linux@npm:1.0.0":
+  version: 1.0.0
+  resolution: "not-linux@npm:1.0.0"
+  conditions: "!os=linux"
+  languageName: node
+  linkType: hard
+"#,
+    )
+    .unwrap();
+    let manifest = make_manifest(&[("not-linux", "1.0.0")], &[]);
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    assert_eq!(graph.packages["not-linux@1.0.0"].os.as_slice(), ["!linux"]);
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        written.contains("  conditions: \"!os=linux\"\n"),
+        "negated conditions must be written in yarn's quoted prefix form:\n{written}"
+    );
+}
+
+#[test]
+fn berry_npm_alias_edge_reaches_the_aliased_package() {
+    // `@isaacs/cliui` depends on both `string-width@^5.1.2` and
+    // `string-width-cjs: npm:string-width@^4.2.0`; yarn merges the alias
+    // descriptor into the real package's block.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"@isaacs/cliui@npm:8.0.2":
+  version: 8.0.2
+  resolution: "@isaacs/cliui@npm:8.0.2"
+  dependencies:
+    string-width: "npm:^5.1.2"
+    string-width-cjs: "npm:string-width@^4.2.0"
+  languageName: node
+  linkType: hard
+
+"string-width-cjs@npm:string-width@^4.2.0, string-width@npm:^4.1.0":
+  version: 4.2.3
+  resolution: "string-width@npm:4.2.3"
+  languageName: node
+  linkType: hard
+
+"string-width@npm:^5.1.2":
+  version: 5.1.2
+  resolution: "string-width@npm:5.1.2"
+  languageName: node
+  linkType: hard
+"#;
+    std::fs::write(tmp.path(), content).unwrap();
+    let manifest = make_manifest(&[("@isaacs/cliui", "8.0.2")], &[]);
+    let graph = parse(tmp.path(), &manifest).unwrap();
+
+    let cliui = &graph.packages["@isaacs/cliui@8.0.2"];
+    assert_eq!(
+        cliui.dependencies.get("string-width").map(String::as_str),
+        Some("5.1.2")
+    );
+    assert_eq!(
+        cliui
+            .dependencies
+            .get("string-width-cjs")
+            .map(String::as_str),
+        Some("4.2.3")
+    );
+    let alias = &graph.packages["string-width-cjs@4.2.3"];
+    assert_eq!(alias.name, "string-width-cjs");
+    assert_eq!(alias.registry_name(), "string-width");
+    assert_eq!(alias.version, "4.2.3");
+
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        !written.contains("resolution: \"string-width-cjs@"),
+        "the alias must not get a block of its own:\n{written}"
+    );
+    let reparsed = parse(out.path(), &manifest).unwrap();
+    assert_eq!(
+        reparsed.packages["@isaacs/cliui@8.0.2"]
+            .dependencies
+            .get("string-width-cjs")
+            .map(String::as_str),
+        Some("4.2.3"),
+        "the alias edge must survive a round trip:\n{written}"
+    );
 }
 
 #[test]
