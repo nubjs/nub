@@ -218,9 +218,11 @@ A `.ts` or `.tsx` file whose tsconfig sets `"module": "commonjs"`, under a packa
 
 Such a file is written against `tsc`'s CommonJS output, with `__dirname`, `require` and `module` beside `import`, and ts-node and tsx both run it that way. Run as an ES module, it fails at the first `__dirname`. The pass is [[crates/nub-native/src/cjs.rs#to_commonjs]], requested per file by the runtime's format decision.
 
-- **Emit:** one `require()` per import, `exports.<name>` per export, the `__esModule` marker, and `tsc` 5.9's own `__importDefault`, `__importStar` and `__exportStar` helpers, inline. A `.mts` file stays an ES module, and a `.cts` file is left as it is.
+- **Emit:** one `require()` per import, `exports.<name>` per export, the `__esModule` marker, and `tsc` 5.9's own `__importDefault`, `__importStar` and `__exportStar` helpers, inline, chosen per import as `tsc` chooses them. A write to an exported binding reaches every name it is exported as, destructuring included. A `.mts` file stays an ES module, and a `.cts` file is left as it is.
 - **Interop:** an explicit `esModuleInterop` wins. When it is unset, the installed TypeScript's major decides: off for 5, on from 6, where `false` is deprecated. With no TypeScript installed it is on.
-- **Dynamic import:** `import()` stays a real dynamic import, so an ES-module-only package loads on every supported Node, where `tsc`'s `require()` form needs `require(esm)`. A helper unwraps a module that carries `__esModule`, so the result matches `tsc`'s `__importStar(require())`.
+- **Dynamic import:** `import()` stays a real dynamic import, so an ES-module-only package loads on every supported Node, where `tsc`'s `require()` form needs `require(esm)`. A module that ran as CommonJS, a builtin or a JSON file comes back as `tsc`'s `require()` returns it, and an ES module as its namespace.
+- **Entry:** on Node 20.19 to 22.14, where hooks run in a loader thread, Nub hands a CommonJS entry back to Node without its source, so Node's CommonJS loader runs it. Given the source, Node runs the entry in a wrapper whose `require()` of an ES module fails.
+- **Checked against `tsc`:** [[crates/nub-cli/tests/ts_commonjs_corpus.rs#commonjs_output_observes_what_tsc_emit_observes]] compares what an importer observes for each import and export form with `tsc` 5.9.3's emit, `esModuleInterop` on and off. `tsc` leaves an export stale after a `for … in` or `for … of` head writes it, and Nub updates it, as an ES module would.
 - **Refused:** top-level `await` and `import.meta` have no CommonJS form, so either stops the run with an error naming the file.
 - **Not covered:** `"module": "node16"` and `"nodenext"`, whose files keep the syntax rule.
 

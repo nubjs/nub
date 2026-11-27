@@ -6,28 +6,38 @@
 //! TypeScript pass has already dropped type-only and unused imports, exactly the
 //! imports `tsc` elides.
 //!
-//! The emit mirrors `tsc` 5.9–7.0, verified against each:
+//! The emit mirrors `tsc` 5.9–7.0, verified against each, and
+//! tests/ts-commonjs/corpus.json holds what an importer observes under `tsc` 5.9.3
+//! for every form below:
 //! - an import binds `const <module>_1 = require(…)`, wrapped in `__importDefault`
-//!   (default only) or `__importStar` (a namespace, or default plus named) when
+//!   or `__importStar` by the names it imports, as `tsc` picks them, when
 //!   `esModuleInterop` is on; every reference becomes `<module>_1.name`, and a call
 //!   `(0, <module>_1.name)(…)` so the callee is not bound to the module;
 //! - `export const x = …` drops the local: every read and write of `x` becomes
 //!   `exports.x`, so a test stubbing `exports.x` reaches the module's own calls;
 //! - other exported locals (`export { x }`, functions, classes) keep the local and
-//!   copy it to `exports` after its declaration, hoisted for a function, and every
-//!   later assignment re-copies (`exports.x = x = v`);
-//! - re-exports from a module are getters, `export *` is `__exportStar`;
+//!   copy it to `exports` after its declaration, hoisted for a function;
+//! - every write to an exported binding reaches every name it is exported as:
+//!   `exports.alias = exports.x = x = v`, and after a destructuring assignment or a
+//!   `for … in`/`of` head, a copy of each binding it wrote;
+//! - re-exports from a module are getters, `export *` is `__exportStar`, and an
+//!   imported binding re-exported with `export { x }` is exported straight after its
+//!   `require()`;
 //! - the export names are declared up front (`exports.a = exports.b = void 0`), so a
 //!   local name shadows an `export *` of the same name, as in ESM.
 //!
-//! Where it departs from `tsc`: a dynamic `import()` stays a real `import()`, so an
-//! ES-module-only package still loads below Node's `require(esm)`; its result goes
-//! through `__importDynamic`, which hands back a CommonJS module compiled from
-//! TypeScript (`__esModule`) as `tsc`'s `__importStar(require(…))` would, rather than
-//! Node's namespace, whose `default` is the whole `module.exports`. Top-level `await`
-//! and `import.meta`, which `tsc` emits verbatim into a file Node then rejects, are
-//! errors that name the file. Helpers are always inlined (`importHelpers` would make
-//! the file depend on `tslib` being installed).
+//! Where it departs from `tsc`:
+//! - `tsc` leaves an export stale after a `for … in`/`of` head writes it; this pass
+//!   copies it, as ESM's live binding would.
+//! - A dynamic `import()` stays a real `import()`, so an ES-module-only package
+//!   still loads below Node's `require(esm)`. `__importDynamic` hands back a module
+//!   that ran as CommonJS (found in `require.cache`), a builtin or JSON the way
+//!   `tsc`'s `require()` would, and an ES module as its namespace.
+//! - Top-level `await` and `import.meta`, which `tsc` emits verbatim into a file
+//!   Node then rejects, are errors that name the file.
+//! - A helper whose name the file already uses gets a fresh one (`tsc` rejects the
+//!   file). Helpers are always inlined (`importHelpers` would make the file depend on
+//!   `tslib` being installed).
 
 use oxc::{
     allocator::{Allocator, ArenaVec, TakeIn},
@@ -53,21 +63,42 @@ pub struct CjsOptions {
 
 /// Facts the TypeScript pass erases, read off the parsed program before it runs: a
 /// file with only type imports is still a module to `tsc` (`"use strict"`,
-/// `__esModule`), and `export =` suppresses the `__esModule` marker.
-#[derive(Clone, Copy, Default)]
+/// `__esModule`), `export =` suppresses the `__esModule` marker, an
+/// `export import x = require(…)` is not among the names declared up front, and
+/// `import {} from "x"`, which the TypeScript pass turns into `import "x"`, is
+/// dropped as `tsc` drops it.
+#[derive(Clone, Default)]
 pub struct ModuleShape {
     is_module: bool,
     has_export_assignment: bool,
+    export_import_equals: Vec<String>,
+    empty_imports: Vec<u32>,
 }
 
 pub fn module_shape(program: &Program<'_>) -> ModuleShape {
     let mut shape = ModuleShape::default();
     for stmt in &program.body {
         match stmt {
-            Statement::ImportDeclaration(_)
-            | Statement::ExportAllDeclaration(_)
-            | Statement::ExportDefaultDeclaration(_)
-            | Statement::ExportNamedDeclaration(_) => shape.is_module = true,
+            Statement::ImportDeclaration(decl) => {
+                shape.is_module = true;
+                if decl.specifiers.as_ref().is_some_and(|s| s.is_empty()) {
+                    shape.empty_imports.push(decl.span.start);
+                }
+            }
+            Statement::ExportAllDeclaration(_) | Statement::ExportDefaultDeclaration(_) => {
+                shape.is_module = true;
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                shape.is_module = true;
+                if let Some(Declaration::TSImportEqualsDeclaration(decl)) = &export.declaration
+                    && matches!(
+                        decl.module_reference,
+                        TSModuleReference::ExternalModuleReference(_)
+                    )
+                {
+                    shape.export_import_equals.push(decl.id.name.to_string());
+                }
+            }
             Statement::TSExportAssignment(_) => {
                 shape.is_module = true;
                 shape.has_export_assignment = true;
@@ -146,16 +177,56 @@ const IMPORT_DEFAULT: &str = r#"var __importDefault = (this && this.__importDefa
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };"#;
 
-const IMPORT_DYNAMIC: &str = r#"var __importDynamic = (this && this.__importDynamic) || function (mod) {
-    return (mod && mod.default && mod.default.__esModule) ? mod.default : mod;
+/// `import(specifier)` resolved as `require.resolve` would: a builtin or JSON is
+/// required, as `tsc`'s `require()` would; anything else is imported, and if what
+/// ran was CommonJS (it is then in `require.cache`, as the namespace's `default`),
+/// its `module.exports` is handed back as `tsc`'s `require()` would, else the
+/// namespace. `WRAP` is `__importStar` under `esModuleInterop`, else nothing.
+const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, options) {
+    var id;
+    try { id = require.resolve(specifier); } catch (e) {}
+    if (id !== undefined && (require("node:module").isBuiltin(id) || /\.json$/i.test(id))) {
+        return Promise.resolve().then(function () { return WRAP(require(id)); });
+    }
+    return (arguments.length > 1 ? import(specifier, options) : import(specifier)).then(function (ns) {
+        var m = id !== undefined && require.cache[id];
+        return m && ns.default === m.exports ? WRAP(m.exports) : ns;
+    });
 };"#;
 
-#[derive(Default)]
-struct Helpers {
-    import_default: bool,
-    import_star: bool,
-    export_star: bool,
-    import_dynamic: bool,
+/// The helpers the emit can inline, in the order `tsc` prints them.
+#[derive(Clone, Copy)]
+enum Helper {
+    CreateBinding,
+    SetModuleDefault,
+    ImportStar,
+    ExportStar,
+    ImportDefault,
+    ImportDynamic,
+}
+
+const HELPERS: [(&str, &str); 6] = [
+    ("__createBinding", CREATE_BINDING),
+    ("__setModuleDefault", SET_MODULE_DEFAULT),
+    ("__importStar", IMPORT_STAR),
+    ("__exportStar", EXPORT_STAR),
+    ("__importDefault", IMPORT_DEFAULT),
+    ("__importDynamic", IMPORT_DYNAMIC),
+];
+
+/// Where a write to an exported binding lands: the kept local, or `exports.x` for
+/// an `export let x`, whose local is gone.
+#[derive(Clone, Copy)]
+enum Target<'a> {
+    Local(&'a str),
+    Exports(&'a str),
+}
+
+/// A binding a write touched, and the export names to copy it to afterwards.
+struct ExportCopy<'a> {
+    symbol: SymbolId,
+    target: Target<'a>,
+    names: Vec<&'a str>,
 }
 
 /// One exported local that keeps its binding: the names it is exported as.
@@ -177,12 +248,19 @@ struct CjsTransform<'a> {
     import_bindings: Vec<Option<&'a str>>,
     /// `export const x` locals, which become `exports.x` everywhere.
     exported_vars: FxHashMap<SymbolId, &'a str>,
+    /// The other names an `export let x` is exported as (`export { x as alias }`).
+    var_aliases: FxHashMap<SymbolId, Vec<&'a str>>,
     live: Vec<LiveLocal<'a>>,
     live_index: FxHashMap<SymbolId, usize>,
+    /// The import statement that binds each imported local, by statement index.
+    import_statement: FxHashMap<SymbolId, usize>,
+    /// `export { x }` of an imported `x`, emitted after that import's `require()`.
+    after_import: FxHashMap<usize, Vec<String>>,
     function_depth: u32,
     /// Temporaries a postfix update needs, declared as one `var` at the top.
     temps: Vec<&'a str>,
-    helpers: Helpers,
+    /// Each helper's name in this file, once something uses it.
+    helpers: [Option<&'a str>; HELPERS.len()],
     errors: Vec<OxcDiagnostic>,
 }
 
@@ -197,11 +275,14 @@ impl<'a> CjsTransform<'a> {
             namespace_imports: FxHashSet::default(),
             import_bindings: Vec::new(),
             exported_vars: FxHashMap::default(),
+            var_aliases: FxHashMap::default(),
             live: Vec::new(),
             live_index: FxHashMap::default(),
+            import_statement: FxHashMap::default(),
+            after_import: FxHashMap::default(),
             function_depth: 0,
             temps: Vec::new(),
-            helpers: Helpers::default(),
+            helpers: [None; HELPERS.len()],
             errors: Vec::new(),
         }
     }
@@ -236,6 +317,65 @@ impl<'a> CjsTransform<'a> {
         };
         self.temps.push(name);
         name
+    }
+
+    /// The helper's name, `__importStar` unless the file already uses it, and the
+    /// helpers it calls.
+    fn helper(&mut self, helper: Helper, ast: AstBuilder<'a>) -> &'a str {
+        if let Some(name) = self.helpers[helper as usize] {
+            return name;
+        }
+        let canonical = HELPERS[helper as usize].0;
+        let name = if self.taken.insert(canonical.to_string()) {
+            ast.allocator.alloc_str(canonical)
+        } else {
+            self.unique(canonical, ast)
+        };
+        self.helpers[helper as usize] = Some(name);
+        match helper {
+            Helper::ImportStar => {
+                self.helper(Helper::CreateBinding, ast);
+                self.helper(Helper::SetModuleDefault, ast);
+            }
+            Helper::ExportStar => {
+                self.helper(Helper::CreateBinding, ast);
+            }
+            Helper::ImportDynamic if self.interop => {
+                self.helper(Helper::ImportStar, ast);
+            }
+            _ => {}
+        }
+        name
+    }
+
+    /// The used helpers' source, each under the name `helper` gave it.
+    fn helper_source(&self) -> String {
+        let mut out = String::new();
+        for (i, &(_, text)) in HELPERS.iter().enumerate() {
+            if self.helpers[i].is_none() {
+                continue;
+            }
+            let mut text = text.to_string();
+            if i == Helper::ImportDynamic as usize {
+                // The canonical name, which the renaming below then maps.
+                let wrap = if self.interop {
+                    HELPERS[Helper::ImportStar as usize].0
+                } else {
+                    ""
+                };
+                text = text.replace("WRAP", wrap);
+            }
+            for (j, &(canonical, _)) in HELPERS.iter().enumerate() {
+                if let Some(name) = self.helpers[j]
+                    && name != canonical
+                {
+                    text = text.replace(canonical, name);
+                }
+            }
+            out.push_str(&text);
+            out.push('\n');
+        }
+        out
     }
 
     fn add_live(&mut self, symbol: SymbolId, name: &'a str) {
@@ -510,6 +650,7 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                 Some(local) => {
                     if let Some(symbol) = binding_symbol(local) {
                         self.namespace_imports.insert(symbol);
+                        self.import_statement.insert(symbol, i);
                     }
                     local.name.as_str()
                 }
@@ -528,6 +669,7 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                 };
                 if let Some(symbol) = binding_symbol(local) {
                     self.imports.insert(symbol, (binding, imported));
+                    self.import_statement.insert(symbol, i);
                 }
             }
             self.import_bindings[i] = Some(binding);
@@ -602,13 +744,37 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                 let Some(symbol) = reference_symbol(local, ctx) else {
                     continue;
                 };
-                if self.imports.contains_key(&symbol)
-                    || self.namespace_imports.contains(&symbol)
-                    || self.exported_vars.contains_key(&symbol)
-                {
+                let exported = spec.exported.name().as_str();
+                if let Some(&at) = self.import_statement.get(&symbol) {
+                    // `tsc` re-exports a named import live, a default import or a
+                    // namespace by value, straight after the import binds it.
+                    let line = match self.imports.get(&symbol) {
+                        Some(&(binding, imported)) if imported != "default" => format!(
+                            "Object.defineProperty(exports, {}, {{ enumerable: true, get: function () {{ return {}; }} }});",
+                            js_string(exported),
+                            member_text(binding, imported)
+                        ),
+                        Some(&(binding, imported)) => format!(
+                            "{} = {};",
+                            member_text("exports", exported),
+                            member_text(binding, imported)
+                        ),
+                        None => format!(
+                            "{} = {};",
+                            member_text("exports", exported),
+                            local.name.as_str()
+                        ),
+                    };
+                    self.after_import.entry(at).or_default().push(line);
                     continue;
                 }
-                self.add_live(symbol, spec.exported.name().as_str());
+                if let Some(&primary) = self.exported_vars.get(&symbol) {
+                    if exported != primary {
+                        self.var_aliases.entry(symbol).or_default().push(exported);
+                    }
+                    continue;
+                }
+                self.add_live(symbol, exported);
             }
         }
     }
@@ -674,59 +840,81 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
     fn exit_expression(&mut self, expr: &mut Expression<'a>, ctx: &mut Ctx<'a>) {
         match expr {
             Expression::ImportExpression(import) if import.phase.is_none() => {
-                self.helpers.import_dynamic = true;
+                let helper = self.helper(Helper::ImportDynamic, ctx.ast);
                 let span = import.span;
-                let import = expr.take_in(&ctx.ast);
-                let then = Expression::new_static_member_expression(
-                    SPAN,
-                    import,
-                    IdentifierName::new(SPAN, "then", ctx),
-                    false,
-                    ctx,
-                );
-                let helper = Expression::new_identifier(SPAN, "__importDynamic", ctx);
+                let mut arguments = ArenaVec::with_capacity_in(2, &ctx.ast);
+                arguments.push(Argument::from(import.source.take_in(&ctx.ast)));
+                if let Some(options) = import.options.take() {
+                    arguments.push(Argument::from(options));
+                }
                 *expr = Expression::new_call_expression(
                     span,
-                    then,
+                    Expression::new_identifier(SPAN, helper, ctx),
                     NONE,
-                    ArenaVec::from_value_in(Argument::from(helper), ctx),
+                    arguments,
                     false,
                     ctx,
                 );
             }
             Expression::AssignmentExpression(assign) => {
-                let AssignmentTarget::AssignmentTargetIdentifier(id) = &assign.left else {
+                let simple = matches!(assign.left, AssignmentTarget::AssignmentTargetIdentifier(_));
+                let mut copies = Vec::new();
+                self.rewrite_target(&mut assign.left, &mut copies, ctx);
+                if copies.is_empty() {
                     return;
-                };
-                let Some(names) = self.live_names(id, ctx) else {
-                    return;
-                };
-                let span = assign.span;
-                let mut value = expr.take_in(&ctx.ast);
-                for name in names.iter().rev() {
-                    value = assign_to_exports(span, name, value, ctx.ast);
                 }
-                *expr = value;
+                let span = assign.span;
+                if simple {
+                    // `exports.alias = exports.x = x = v` keeps the expression's value.
+                    let names = copies.pop().map(|c| c.names).unwrap_or_default();
+                    let mut value = expr.take_in(&ctx.ast);
+                    for name in names.iter().rev() {
+                        value = assign_to_exports(span, name, value, ctx.ast);
+                    }
+                    *expr = value;
+                    return;
+                }
+                // A destructuring assignment: copy each binding it wrote afterwards,
+                // keeping its value (the right-hand side) where something reads it.
+                let temp = (!value_unused(ctx)).then(|| self.temp(ctx.ast));
+                let mut value = expr.take_in(&ctx.ast);
+                if let Some(temp) = temp {
+                    value = assign_to_local(span, temp, value, ctx.ast);
+                }
+                let mut items = ArenaVec::with_capacity_in(copies.len() + 2, &ctx.ast);
+                items.push(value);
+                for copy in &copies {
+                    items.push(copy_expression(copy, ctx.ast));
+                }
+                if let Some(temp) = temp {
+                    items.push(Expression::new_identifier(SPAN, temp, ctx));
+                }
+                *expr = Expression::new_sequence_expression(span, items, ctx);
             }
             Expression::UpdateExpression(update) => {
                 let SimpleAssignmentTarget::AssignmentTargetIdentifier(id) = &update.argument
                 else {
                     return;
                 };
-                let Some(names) = self.live_names(id, ctx) else {
+                let Some(symbol) = reference_symbol(id, ctx) else {
                     return;
                 };
+                let Some((target, names)) = self.write_plan(symbol, id.name.as_str()) else {
+                    return;
+                };
+                if let Target::Exports(name) = target {
+                    let member = member_expression(id.span, "exports", name, ctx.ast);
+                    update.argument = SimpleAssignmentTarget::from(member);
+                }
+                if names.is_empty() {
+                    return;
+                }
                 let span = update.span;
                 let prefix = update.prefix;
-                let local = id.name.as_str();
                 // A postfix update copies the new value to `exports`, and where its
                 // own value is read, a temporary keeps the old one, as `tsc` does:
                 // `(exports.x = (_a = x++, x), _a)`.
-                let value_unused = matches!(
-                    ctx.parent(),
-                    Ancestor::ExpressionStatementExpression(_) | Ancestor::ForStatementUpdate(_)
-                );
-                let temp = (!prefix && !value_unused).then(|| self.temp(ctx.ast));
+                let temp = (!prefix && !value_unused(ctx)).then(|| self.temp(ctx.ast));
                 let mut original = expr.take_in(&ctx.ast);
                 if let Some(temp) = temp {
                     original = assign_to_local(span, temp, original, ctx.ast);
@@ -734,10 +922,9 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                 let mut value = if prefix {
                     original
                 } else {
-                    let read = Expression::new_identifier(SPAN, local, ctx);
                     Expression::new_sequence_expression(
                         span,
-                        ArenaVec::from_array_in([original, read], ctx),
+                        ArenaVec::from_array_in([original, read_target(target, ctx.ast)], ctx),
                         ctx,
                     )
                 };
@@ -758,59 +945,22 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
         }
     }
 
-    fn enter_simple_assignment_target(
-        &mut self,
-        target: &mut SimpleAssignmentTarget<'a>,
-        ctx: &mut Ctx<'a>,
-    ) {
-        let SimpleAssignmentTarget::AssignmentTargetIdentifier(ident) = target else {
-            return;
-        };
-        let Some(symbol) = reference_symbol(ident, ctx) else {
-            return;
-        };
-        let Some(&name) = self.exported_vars.get(&symbol) else {
-            return;
-        };
-        let member = member_expression(ident.span, "exports", name, ctx.ast);
-        *target = SimpleAssignmentTarget::from(member);
+    fn exit_for_in_statement(&mut self, stmt: &mut ForInStatement<'a>, ctx: &mut Ctx<'a>) {
+        self.copy_after_loop_head(&mut stmt.left, &mut stmt.body, ctx);
     }
 
-    fn enter_assignment_target_property(
-        &mut self,
-        prop: &mut AssignmentTargetProperty<'a>,
-        ctx: &mut Ctx<'a>,
-    ) {
-        let AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) = prop else {
-            return;
-        };
-        let Some(symbol) = reference_symbol(&shorthand.binding, ctx) else {
-            return;
-        };
-        let Some(&name) = self.exported_vars.get(&symbol) else {
-            return;
-        };
-        let span = shorthand.span;
-        let key = PropertyKey::new_static_identifier(shorthand.binding.span, name, ctx);
-        let member = member_expression(shorthand.binding.span, "exports", name, ctx.ast);
-        let target = AssignmentTarget::from(SimpleAssignmentTarget::from(member));
-        let binding = match shorthand.init.take() {
-            Some(init) => AssignmentTargetMaybeDefault::new_assignment_target_with_default(
-                span, target, init, ctx,
-            ),
-            None => AssignmentTargetMaybeDefault::from(target),
-        };
-        *prop = AssignmentTargetProperty::new_assignment_target_property_property(
-            span, key, binding, false, ctx,
-        );
+    fn exit_for_of_statement(&mut self, stmt: &mut ForOfStatement<'a>, ctx: &mut Ctx<'a>) {
+        self.copy_after_loop_head(&mut stmt.left, &mut stmt.body, ctx);
     }
 
     fn exit_program(&mut self, program: &mut Program<'a>, ctx: &mut Ctx<'a>) {
         let ast = ctx.ast;
         if !self.shape.is_module {
-            if self.helpers.import_dynamic {
-                let helper = parse_statements(IMPORT_DYNAMIC, SPAN, ast);
-                program.body.splice(0..0, helper);
+            let helpers = self.helper_source();
+            if !helpers.is_empty() {
+                program
+                    .body
+                    .splice(0..0, parse_statements(&helpers, SPAN, ast));
             }
             return;
         }
@@ -865,36 +1015,28 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                 Statement::ImportDeclaration(decl) => {
                     let span = decl.span;
                     let source = js_string(decl.source.value.as_str());
-                    let text = match (&decl.specifiers, self.import_bindings[i]) {
+                    let mut text = match (&decl.specifiers, self.import_bindings[i]) {
+                        (None, _) if self.shape.empty_imports.contains(&span.start) => {
+                            String::new()
+                        }
                         (Some(specifiers), Some(binding)) if !specifiers.is_empty() => {
-                            let has = |f: fn(&ImportDeclarationSpecifier<'a>) -> bool| {
-                                specifiers.iter().any(f)
-                            };
-                            let default = has(|s| {
-                                matches!(s, ImportDeclarationSpecifier::ImportDefaultSpecifier(_))
-                            });
-                            let named = has(|s| {
-                                matches!(s, ImportDeclarationSpecifier::ImportSpecifier(_))
-                            });
-                            let namespace = has(|s| {
-                                matches!(s, ImportDeclarationSpecifier::ImportNamespaceSpecifier(_))
-                            });
                             let require = format!("require({source})");
-                            let init = if !self.interop {
-                                require
-                            } else if namespace || (default && named) {
-                                self.helpers.import_star = true;
-                                format!("__importStar({require})")
-                            } else if default {
-                                self.helpers.import_default = true;
-                                format!("__importDefault({require})")
-                            } else {
-                                require
+                            let init = match self.interop.then(|| import_helper(specifiers)) {
+                                Some(Some(helper)) => {
+                                    format!("{}({require})", self.helper(helper, ast))
+                                }
+                                _ => require,
                             };
                             format!("const {binding} = {init};")
                         }
                         _ => format!("require({source});"),
                     };
+                    if let Some(lines) = self.after_import.remove(&i) {
+                        for line in lines {
+                            text.push('\n');
+                            text.push_str(&line);
+                        }
+                    }
                     body.extend(parse_statements(&text, span, ast));
                 }
                 Statement::ExportAllDeclaration(decl) => {
@@ -904,15 +1046,16 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                         let name = exported.name().as_str();
                         void_names.push(name);
                         let value = if self.interop {
-                            self.helpers.import_star = true;
-                            format!("__importStar({require})")
+                            format!("{}({require})", self.helper(Helper::ImportStar, ast))
                         } else {
                             require
                         };
                         format!("{} = {value};", member_text("exports", name))
                     } else {
-                        self.helpers.export_star = true;
-                        format!("__exportStar({require}, exports);")
+                        format!(
+                            "{}({require}, exports);",
+                            self.helper(Helper::ExportStar, ast)
+                        )
                     };
                     body.extend(parse_statements(&text, span, ast));
                 }
@@ -930,8 +1073,8 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                             let exported = spec.exported.name().as_str();
                             void_names.push(exported);
                             let value = if local == "default" && self.interop {
-                                self.helpers.import_default = true;
-                                format!("__importDefault({binding}).default")
+                                let helper = self.helper(Helper::ImportDefault, ast);
+                                format!("{helper}({binding}).default")
                             } else {
                                 member_text(binding, local)
                             };
@@ -951,7 +1094,14 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                                     match d.id {
                                         BindingPattern::BindingIdentifier(id) => {
                                             let name = id.name.as_str();
-                                            void_names.push(name);
+                                            if !self
+                                                .shape
+                                                .export_import_equals
+                                                .iter()
+                                                .any(|n| n == name)
+                                            {
+                                                void_names.push(name);
+                                            }
                                             if let Some(init) = d.init {
                                                 let value =
                                                     assign_to_exports(d_span, name, init, ast);
@@ -997,31 +1147,9 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
                                 continue;
                             };
                             let exported = spec.exported.name().as_str();
-                            if let Some(&(binding, imported)) = self.imports.get(&symbol) {
+                            if self.import_statement.contains_key(&symbol) {
+                                // Exported after the import's `require()`, in `after_import`.
                                 void_names.push(exported);
-                                // `tsc` re-exports a named import live, a default import by value.
-                                let text = if imported == "default" {
-                                    format!(
-                                        "{} = {};",
-                                        member_text("exports", exported),
-                                        member_text(binding, imported)
-                                    )
-                                } else {
-                                    format!(
-                                        "Object.defineProperty(exports, {}, {{ enumerable: true, get: function () {{ return {}; }} }});",
-                                        js_string(exported),
-                                        member_text(binding, imported)
-                                    )
-                                };
-                                body.extend(parse_statements(&text, spec.span, ast));
-                            } else if self.namespace_imports.contains(&symbol) {
-                                void_names.push(exported);
-                                let text = format!(
-                                    "{} = {};",
-                                    member_text("exports", exported),
-                                    local.name.as_str()
-                                );
-                                body.extend(parse_statements(&text, spec.span, ast));
                             } else if let Some(&var_name) = self.exported_vars.get(&symbol) {
                                 void_names.push(exported);
                                 let line = format!(
@@ -1095,20 +1223,7 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
         if !self.temps.is_empty() {
             preamble.push_str(&format!("var {};\n", self.temps.join(", ")));
         }
-        let needs_binding = self.helpers.import_star || self.helpers.export_star;
-        for (used, text) in [
-            (needs_binding, CREATE_BINDING),
-            (self.helpers.import_star, SET_MODULE_DEFAULT),
-            (self.helpers.import_star, IMPORT_STAR),
-            (self.helpers.export_star, EXPORT_STAR),
-            (self.helpers.import_default, IMPORT_DEFAULT),
-            (self.helpers.import_dynamic, IMPORT_DYNAMIC),
-        ] {
-            if used {
-                preamble.push_str(text);
-                preamble.push('\n');
-            }
-        }
+        preamble.push_str(&self.helper_source());
         if !self.shape.has_export_assignment {
             preamble.push_str("Object.defineProperty(exports, \"__esModule\", { value: true });\n");
         }
@@ -1144,10 +1259,219 @@ impl<'a> Traverse<'a, ()> for CjsTransform<'a> {
 }
 
 impl<'a> CjsTransform<'a> {
-    fn live_names(&self, id: &IdentifierReference<'a>, ctx: &Ctx<'a>) -> Option<Vec<&'a str>> {
-        let symbol = reference_symbol(id, ctx)?;
+    /// Where a write to `symbol` (spelled `local`) lands, and the export names to
+    /// copy it to: every name for a kept local, the aliases for an `export let`.
+    fn write_plan(&self, symbol: SymbolId, local: &'a str) -> Option<(Target<'a>, Vec<&'a str>)> {
+        if let Some(&name) = self.exported_vars.get(&symbol) {
+            let aliases = self.var_aliases.get(&symbol).cloned().unwrap_or_default();
+            return Some((Target::Exports(name), aliases));
+        }
         let &i = self.live_index.get(&symbol)?;
-        Some(self.live[i].names.clone())
+        Some((Target::Local(local), self.live[i].names.clone()))
+    }
+
+    /// Points each `export let` binding `target` writes at `exports.x`, and lists the
+    /// bindings whose export names need a copy afterwards. Walks destructuring
+    /// patterns, defaults and rest elements included.
+    fn rewrite_target(
+        &self,
+        target: &mut AssignmentTarget<'a>,
+        copies: &mut Vec<ExportCopy<'a>>,
+        ctx: &Ctx<'a>,
+    ) {
+        let mut replacement = None;
+        match target {
+            AssignmentTarget::AssignmentTargetIdentifier(id) => {
+                if let Some(symbol) = reference_symbol(id, ctx)
+                    && let Some((plan, names)) = self.write_plan(symbol, id.name.as_str())
+                {
+                    if let Target::Exports(name) = plan {
+                        let member = member_expression(id.span, "exports", name, ctx.ast);
+                        replacement =
+                            Some(AssignmentTarget::from(SimpleAssignmentTarget::from(member)));
+                    }
+                    push_copy(copies, symbol, plan, names);
+                }
+            }
+            AssignmentTarget::ArrayAssignmentTarget(array) => {
+                for element in array.elements.iter_mut().flatten() {
+                    self.rewrite_maybe_default(element, copies, ctx);
+                }
+                if let Some(rest) = &mut array.rest {
+                    self.rewrite_target(&mut rest.target, copies, ctx);
+                }
+            }
+            AssignmentTarget::ObjectAssignmentTarget(object) => {
+                for property in object.properties.iter_mut() {
+                    match property {
+                        AssignmentTargetProperty::AssignmentTargetPropertyIdentifier(shorthand) => {
+                            let Some(symbol) = reference_symbol(&shorthand.binding, ctx) else {
+                                continue;
+                            };
+                            let Some((plan, names)) =
+                                self.write_plan(symbol, shorthand.binding.name.as_str())
+                            else {
+                                continue;
+                            };
+                            push_copy(copies, symbol, plan, names);
+                            let Target::Exports(name) = plan else {
+                                continue;
+                            };
+                            // `{ x } = o` becomes `{ x: exports.x } = o`.
+                            let span = shorthand.span;
+                            let at = shorthand.binding.span;
+                            let key = PropertyKey::new_static_identifier(at, name, ctx);
+                            let member = member_expression(at, "exports", name, ctx.ast);
+                            let target =
+                                AssignmentTarget::from(SimpleAssignmentTarget::from(member));
+                            let binding = match shorthand.init.take() {
+                                Some(init) => {
+                                    AssignmentTargetMaybeDefault::new_assignment_target_with_default(
+                                        span, target, init, ctx,
+                                    )
+                                }
+                                None => AssignmentTargetMaybeDefault::from(target),
+                            };
+                            *property =
+                                AssignmentTargetProperty::new_assignment_target_property_property(
+                                    span, key, binding, false, ctx,
+                                );
+                        }
+                        AssignmentTargetProperty::AssignmentTargetPropertyProperty(property) => {
+                            self.rewrite_maybe_default(&mut property.binding, copies, ctx);
+                        }
+                    }
+                }
+                if let Some(rest) = &mut object.rest {
+                    self.rewrite_target(&mut rest.target, copies, ctx);
+                }
+            }
+            _ => {}
+        }
+        if let Some(replacement) = replacement {
+            *target = replacement;
+        }
+    }
+
+    fn rewrite_maybe_default(
+        &self,
+        element: &mut AssignmentTargetMaybeDefault<'a>,
+        copies: &mut Vec<ExportCopy<'a>>,
+        ctx: &Ctx<'a>,
+    ) {
+        if let AssignmentTargetMaybeDefault::AssignmentTargetWithDefault(with_default) = element {
+            self.rewrite_target(&mut with_default.binding, copies, ctx);
+        } else if let Some(target) = element.as_assignment_target_mut() {
+            self.rewrite_target(target, copies, ctx);
+        }
+    }
+
+    /// `for (x of xs)` writes `x` on every iteration, so each copy opens the body.
+    fn copy_after_loop_head(
+        &self,
+        left: &mut ForStatementLeft<'a>,
+        body: &mut Statement<'a>,
+        ctx: &mut Ctx<'a>,
+    ) {
+        let Some(target) = left.as_assignment_target_mut() else {
+            return;
+        };
+        let mut copies = Vec::new();
+        self.rewrite_target(target, &mut copies, ctx);
+        if copies.is_empty() {
+            return;
+        }
+        let ast = ctx.ast;
+        let mut statements = ArenaVec::with_capacity_in(copies.len() + 1, &ast);
+        for copy in &copies {
+            statements.push(Statement::new_expression_statement(
+                SPAN,
+                copy_expression(copy, ast),
+                &ast,
+            ));
+        }
+        if let Statement::BlockStatement(block) = body {
+            block.body.splice(0..0, statements);
+        } else {
+            statements.push(body.take_in(&ast));
+            *body = Statement::new_block_statement(SPAN, statements, &ast);
+        }
+    }
+}
+
+fn push_copy<'a>(
+    copies: &mut Vec<ExportCopy<'a>>,
+    symbol: SymbolId,
+    target: Target<'a>,
+    names: Vec<&'a str>,
+) {
+    if !names.is_empty() && !copies.iter().any(|c| c.symbol == symbol) {
+        copies.push(ExportCopy {
+            symbol,
+            target,
+            names,
+        });
+    }
+}
+
+fn read_target<'a>(target: Target<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
+    match target {
+        Target::Local(name) => Expression::new_identifier(SPAN, name, &ast),
+        Target::Exports(name) => Expression::from(member_expression(SPAN, "exports", name, ast)),
+    }
+}
+
+/// `exports.a = exports.b = x`.
+fn copy_expression<'a>(copy: &ExportCopy<'a>, ast: AstBuilder<'a>) -> Expression<'a> {
+    let mut value = read_target(copy.target, ast);
+    for name in copy.names.iter().rev() {
+        value = assign_to_exports(SPAN, name, value, ast);
+    }
+    value
+}
+
+/// Whether nothing reads the current expression's value.
+fn value_unused(ctx: &Ctx<'_>) -> bool {
+    for ancestor in ctx.ancestors() {
+        match ancestor {
+            Ancestor::ParenthesizedExpressionExpression(_) => {}
+            Ancestor::ExpressionStatementExpression(_) | Ancestor::ForStatementUpdate(_) => {
+                return true;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The interop helper `tsc` wraps an import's `require()` in, by the names it
+/// imports: `__importStar` for a namespace, or for `default` beside other names
+/// (as a default import or `{ default as x }`); `__importDefault` for `default`
+/// alone; none for named imports only.
+fn import_helper(specifiers: &[ImportDeclarationSpecifier<'_>]) -> Option<Helper> {
+    let mut default_import = false;
+    let mut named = 0;
+    let mut default_refs = 0;
+    for specifier in specifiers {
+        match specifier {
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
+                return Some(Helper::ImportStar);
+            }
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(_) => default_import = true,
+            ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                named += 1;
+                if s.imported.name() == "default" {
+                    default_refs += 1;
+                }
+            }
+        }
+    }
+    if (default_refs > 0 && default_refs != named) || (named > default_refs && default_import) {
+        Some(Helper::ImportStar)
+    } else if default_import || default_refs > 0 {
+        Some(Helper::ImportDefault)
+    } else {
+        None
     }
 }
 

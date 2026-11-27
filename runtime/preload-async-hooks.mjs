@@ -81,11 +81,23 @@ const __pnp = (() => {
 // Sent only when that wait is actually needed, and answered exactly once.
 let entryLoad = null;
 let utilRateShimsEnabled = true;
+
+// `{ classicCjs: true }` says the main thread installed the `require.extensions`
+// transpile shim. Then a CommonJS entry Nub transpiled goes back to Node with no
+// source, and Node loads it through its own CommonJS loader, where that shim
+// compiles it from the same transform. With the source attached, Node runs the
+// entry in the ESM loader's wrapper for imported CommonJS, whose `require()` fails
+// for a file this hook hands back without source on 20.6-20.10 and for an ES
+// module on 20.19-22.14 (`cjsCache.get(job.url)` is undefined).
+// `mainEntryUrl` is undefined until Node resolves the entry, then null once handled.
+let cjsEntryHandoff = false;
+let mainEntryUrl;
 const { resolveUtilRateFacade } = createRequire(import.meta.url)("./util/rate.cjs");
 
 export async function initialize(data) {
   if (data && data.standaloneLoader) CLOBBER_MAP.clear();
   if (data && data.standaloneLoader) utilRateShimsEnabled = false;
+  if (data && data.classicCjs) cjsEntryHandoff = true;
   if (data && data.entryLoad) {
     entryLoad = {
       port: data.entryLoad.port,
@@ -106,6 +118,14 @@ function withoutQuery(url) {
 
 // ── Resolve hook ────────────────────────────────────────────────────
 export async function resolve(specifier, context, nextResolve) {
+  const result = await resolveInner(specifier, context, nextResolve);
+  if (cjsEntryHandoff && mainEntryUrl === undefined && context.parentURL === undefined) {
+    mainEntryUrl = result?.url ?? null;
+  }
+  return result;
+}
+
+async function resolveInner(specifier, context, nextResolve) {
   // Node resolves its main entry with no parent and nothing else that way, so only
   // a load after this can be the entry's own — not a preload's import of the same
   // file under another query (preload-common.cjs `noteEntryResolve`).
@@ -148,7 +168,15 @@ export async function load(url, context, nextLoad) {
     entryLoad = null;
     port.postMessage(url);
   }
-  return noteRuntimeV8FlagSource(await loadInner(url, context, nextLoad));
+  const result = noteRuntimeV8FlagSource(await loadInner(url, context, nextLoad));
+  if (url === mainEntryUrl) {
+    mainEntryUrl = null;
+    if (result?.format === "commonjs" && result.source != null &&
+        TRANSPILE_EXTS.has(extname(url)) && !isDependency(url)) {
+      return { format: "commonjs", source: null, shortCircuit: true };
+    }
+  }
+  return result;
 }
 
 async function loadInner(url, context, nextLoad) {

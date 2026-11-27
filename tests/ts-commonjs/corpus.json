@@ -1,0 +1,450 @@
+{
+  "typescript": "5.9.3",
+  "node": "v26.13.0",
+  "shared": {
+    "show.cjs": "\"use strict\";\nfunction fmt(v, depth) {\n  if (v === null) return \"null\";\n  if (typeof v === \"function\") return \"[function \" + (v.name || \"anonymous\") + \"]\" + props(v, depth, false);\n  if (typeof v === \"string\") return JSON.stringify(v);\n  if (typeof v !== \"object\") return String(v);\n  if (Array.isArray(v)) return \"[\" + v.map(function (x) { return fmt(x, depth + 1); }).join(\", \") + \"]\";\n  return props(v, depth, true);\n}\nfunction props(o, depth, always) {\n  var keys = Object.keys(o);\n  var marker = Object.prototype.hasOwnProperty.call(o, \"__esModule\") && keys.indexOf(\"__esModule\") < 0;\n  if (!always && keys.length === 0) return \"\";\n  if (depth > 1) return \"{...}\";\n  var parts = keys.map(function (k) { return k + \": \" + fmt(o[k], depth + 1); });\n  if (marker) parts.unshift(\"(__esModule)\");\n  return \"{\" + parts.join(\", \") + \"}\";\n}\nmodule.exports = function show(label, v) { console.log(label + \" = \" + fmt(v, 0)); };\n"
+  },
+  "cases": [
+    {
+      "name": "default import of module.exports",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "main.ts": "import fn from \"./fn.cjs\";\nconst show = require(\"./show.cjs\");\nshow(\"fn\", fn);\nshow(\"call\", typeof fn === \"function\" ? fn() : \"not callable\");\n"
+      },
+      "expected": {
+        "esModuleInterop": "fn = [function fn]{extra: \"extra\", self: [function anonymous]}\ncall = \"fn\"\n",
+        "noEsModuleInterop": "fn = undefined\ncall = \"not callable\"\n"
+      }
+    },
+    {
+      "name": "default imported by name",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "dep.cjs": "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.default = \"the default\";\nexports.named = \"named\";\nexports.count = 0;\nexports.bump = function () { exports.count++; };\n",
+        "main.ts": "import { default as fn } from \"./fn.cjs\";\nimport { default as fn2, extra } from \"./fn.cjs\";\nimport fn3, { default as fn4 } from \"./fn.cjs\";\nimport { default as d, named } from \"./dep.cjs\";\nconst show = require(\"./show.cjs\");\nshow(\"fn\", fn);\nshow(\"fn2\", [fn2, extra]);\nshow(\"fn3\", [fn3, fn4]);\nshow(\"dep\", [d, named]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "fn = [function fn]{extra: \"extra\", self: [function anonymous]}\nfn2 = [[function fn]{extra: \"extra\", self: [function anonymous]}, \"extra\"]\nfn3 = [[function fn]{extra: \"extra\", self: [function anonymous]}, [function fn]{extra: \"extra\", self: [function anonymous]}]\ndep = [\"the default\", \"named\"]\n",
+        "noEsModuleInterop": "fn = undefined\nfn2 = [undefined, \"extra\"]\nfn3 = [undefined, undefined]\ndep = [\"the default\", \"named\"]\n"
+      }
+    },
+    {
+      "name": "namespace import",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "dep.cjs": "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.default = \"the default\";\nexports.named = \"named\";\nexports.count = 0;\nexports.bump = function () { exports.count++; };\n",
+        "main.ts": "import * as ns from \"./fn.cjs\";\nimport * as dep from \"./dep.cjs\";\nconst show = require(\"./show.cjs\");\nshow(\"typeof ns\", typeof ns);\nshow(\"ns\", ns);\nshow(\"ns.default\", (ns as any).default);\nshow(\"dep\", dep);\n"
+      },
+      "expected": {
+        "esModuleInterop": "typeof ns = \"object\"\nns = {length: 0, name: \"fn\", prototype: {}, extra: \"extra\", self: [function anonymous], default: [function fn]{extra: \"extra\", self: [function anonymous]}}\nns.default = [function fn]{extra: \"extra\", self: [function anonymous]}\ndep = {(__esModule), default: \"the default\", named: \"named\", count: 0, bump: [function anonymous]}\n",
+        "noEsModuleInterop": "typeof ns = \"function\"\nns = [function fn]{extra: \"extra\", self: [function anonymous]}\nns.default = undefined\ndep = {(__esModule), default: \"the default\", named: \"named\", count: 0, bump: [function anonymous]}\n"
+      }
+    },
+    {
+      "name": "default with named and with namespace",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "main.ts": "import fn, { extra, self } from \"./fn.cjs\";\nimport fn2, * as ns from \"./fn.cjs\";\nconst show = require(\"./show.cjs\");\nshow(\"fn\", [fn, extra]);\nshow(\"unbound call\", self());\nshow(\"fn2\", fn2);\nshow(\"ns\", ns);\n"
+      },
+      "expected": {
+        "esModuleInterop": "fn = [[function fn]{extra: \"extra\", self: [function anonymous]}, \"extra\"]\nunbound call = \"global\"\nfn2 = [function fn]{extra: \"extra\", self: [function anonymous]}\nns = {length: 0, name: \"fn\", prototype: {}, extra: \"extra\", self: [function anonymous], default: [function fn]{extra: \"extra\", self: [function anonymous]}}\n",
+        "noEsModuleInterop": "fn = [undefined, \"extra\"]\nunbound call = \"global\"\nfn2 = undefined\nns = [function fn]{extra: \"extra\", self: [function anonymous]}\n"
+      }
+    },
+    {
+      "name": "imports from a module with __esModule",
+      "files": {
+        "dep.cjs": "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.default = \"the default\";\nexports.named = \"named\";\nexports.count = 0;\nexports.bump = function () { exports.count++; };\n",
+        "main.ts": "import d, { named, count, bump } from \"./dep.cjs\";\nimport d2 from \"./dep.cjs\";\nimport * as ns from \"./dep.cjs\";\nconst show = require(\"./show.cjs\");\nshow(\"default\", [d, d2, (ns as any).default]);\nshow(\"named\", named);\nshow(\"count\", [count, ns.count]);\nbump();\nshow(\"count after bump\", [count, ns.count]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "default = [\"the default\", \"the default\", \"the default\"]\nnamed = \"named\"\ncount = [0, 0]\ncount after bump = [1, 1]\n",
+        "noEsModuleInterop": "default = [\"the default\", \"the default\", \"the default\"]\nnamed = \"named\"\ncount = [0, 0]\ncount after bump = [1, 1]\n"
+      }
+    },
+    {
+      "name": "imports from a compiled TypeScript module",
+      "files": {
+        "lib.ts": "export default function greet() { return \"hi\"; }\nexport const named = \"named\";\nexport let counter = 0;\nexport function inc() { counter++; }\n",
+        "main.ts": "import greet, { named, counter, inc } from \"./lib\";\nimport greet2 from \"./lib\";\nimport * as ns from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"default\", [greet, greet2, greet()]);\nshow(\"named\", named);\nshow(\"ns\", ns);\ninc();\nshow(\"after inc\", [counter, ns.counter]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "default = [[function greet], [function greet], \"hi\"]\nnamed = \"named\"\nns = {(__esModule), named: \"named\", counter: 0, default: [function greet], inc: [function inc]}\nafter inc = [1, 1]\n",
+        "noEsModuleInterop": "default = [[function greet], [function greet], \"hi\"]\nnamed = \"named\"\nns = {(__esModule), named: \"named\", counter: 0, default: [function greet], inc: [function inc]}\nafter inc = [1, 1]\n"
+      }
+    },
+    {
+      "name": "named imports read live and unbound",
+      "files": {
+        "dep.cjs": "exports.count = 0;\nexports.bump = function () { exports.count++; return this === exports ? \"module\" : typeof this; };\nexports.tag = function () { return this === exports ? \"module\" : typeof this; };\n",
+        "main.ts": "import { count, bump, tag } from \"./dep.cjs\";\nimport * as ns from \"./dep.cjs\";\nconst show = require(\"./show.cjs\");\nshow(\"count\", count);\nshow(\"bump this\", bump());\nshow(\"tag this\", tag`x`);\nshow(\"count after\", [count, ns.count]);\nshow(\"namespace call this\", ns.bump());\n"
+      },
+      "expected": {
+        "esModuleInterop": "count = 0\nbump this = \"object\"\ntag this = \"object\"\ncount after = [1, 1]\nnamespace call this = \"object\"\n",
+        "noEsModuleInterop": "count = 0\nbump this = \"object\"\ntag this = \"object\"\ncount after = [1, 1]\nnamespace call this = \"module\"\n"
+      }
+    },
+    {
+      "name": "import order and side effects",
+      "files": {
+        "a.cjs": "console.log(\"a runs\");\n",
+        "b.cjs": "console.log(\"b runs\");\nexports.b = \"b\";\n",
+        "main.ts": "console.log(\"main starts\");\nimport \"./a.cjs\";\nimport { b } from \"./b.cjs\";\nconsole.log(\"main reads\", b);\n"
+      },
+      "expected": {
+        "esModuleInterop": "main starts\na runs\nb runs\nmain reads b\n",
+        "noEsModuleInterop": "main starts\na runs\nb runs\nmain reads b\n"
+      }
+    },
+    {
+      "name": "unused and type-only imports",
+      "files": {
+        "a.cjs": "console.log(\"a runs\");\nexports.unused = 1;\n",
+        "b.cjs": "console.log(\"b runs\");\n",
+        "c.cjs": "console.log(\"c runs\");\n",
+        "d.cjs": "console.log(\"d runs\");\n",
+        "e.cjs": "console.log(\"e runs\");\n",
+        "main.ts": "import { unused } from \"./a.cjs\";\nimport type { T } from \"./b.cjs\";\nimport { type U } from \"./c.cjs\";\nimport {} from \"./d.cjs\";\nimport \"./e.cjs\";\nconsole.log(\"main runs\");\n"
+      },
+      "expected": {
+        "esModuleInterop": "e runs\nmain runs\n",
+        "noEsModuleInterop": "e runs\nmain runs\n"
+      }
+    },
+    {
+      "name": "import equals and export import",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "lib.ts": "export import again = require(\"./fn.cjs\");\nexport const own = \"own\";\n",
+        "main.ts": "import fn = require(\"./fn.cjs\");\nimport path = require(\"node:path\");\nimport * as lib from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"fn\", fn);\nshow(\"sep\", path.sep);\nshow(\"lib\", lib);\n"
+      },
+      "expected": {
+        "esModuleInterop": "fn = [function fn]{extra: \"extra\", self: [function anonymous]}\nsep = \"/\"\nlib = {(__esModule), own: \"own\", again: [function fn]{extra: \"extra\", self: [function anonymous]}}\n",
+        "noEsModuleInterop": "fn = [function fn]{extra: \"extra\", self: [function anonymous]}\nsep = \"/\"\nlib = {(__esModule), own: \"own\", again: [function fn]{extra: \"extra\", self: [function anonymous]}}\n"
+      }
+    },
+    {
+      "name": "export equals",
+      "files": {
+        "obj.ts": "const value = { a: 1, b: \"b\" };\nexport = value;\n",
+        "func.ts": "function named() { return 2; }\nnamespace named { export const prop = \"prop\"; }\nexport = named;\n",
+        "main.ts": "import obj = require(\"./obj\");\nimport func = require(\"./func\");\nimport d from \"./func\";\nimport * as ns from \"./obj\";\nimport { a } from \"./obj\";\nconst show = require(\"./show.cjs\");\nshow(\"obj\", obj);\nshow(\"func\", [func, func.prop]);\nshow(\"default import\", d);\nshow(\"namespace\", ns);\nshow(\"named\", a);\n"
+      },
+      "expected": {
+        "esModuleInterop": "obj = {a: 1, b: \"b\"}\nfunc = [[function named]{prop: \"prop\"}, \"prop\"]\ndefault import = [function named]{prop: \"prop\"}\nnamespace = {a: 1, b: \"b\", default: {a: 1, b: \"b\"}}\nnamed = 1\n",
+        "noEsModuleInterop": "obj = {a: 1, b: \"b\"}\nfunc = [[function named]{prop: \"prop\"}, \"prop\"]\ndefault import = undefined\nnamespace = {a: 1, b: \"b\"}\nnamed = 1\n"
+      }
+    },
+    {
+      "name": "json imports",
+      "files": {
+        "data.json": "{ \"a\": 1, \"list\": [2, 3] }\n",
+        "main.ts": "import data from \"./data.json\";\nimport * as ns from \"./data.json\";\nimport { a } from \"./data.json\";\nconst show = require(\"./show.cjs\");\nshow(\"default\", data);\nshow(\"namespace\", ns);\nshow(\"named\", a);\n"
+      },
+      "expected": {
+        "esModuleInterop": "default = {a: 1, list: [2, 3]}\nnamespace = {a: 1, list: [2, 3], default: {a: 1, list: [2, 3]}}\nnamed = 1\n",
+        "noEsModuleInterop": "default = undefined\nnamespace = {a: 1, list: [2, 3]}\nnamed = 1\n"
+      }
+    },
+    {
+      "name": "dynamic import",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "dep.cjs": "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.default = \"the default\";\nexports.named = \"named\";\nexports.count = 0;\nexports.bump = function () { exports.count++; };\n",
+        "lib.ts": "export default \"lib default\";\nexport const named = \"named\";\n",
+        "data.json": "{ \"a\": 1 }\n",
+        "main.ts": "const show = require(\"./show.cjs\");\nasync function main() {\n  show(\"json\", await import(\"./data.json\"));\n  show(\"module.exports function\", await import(\"./fn.cjs\"));\n  show(\"__esModule\", await import(\"./dep.cjs\"));\n  show(\"compiled TypeScript\", await import(\"./lib\"));\n  const path = await import(\"node:path\");\n  show(\"builtin\", [typeof path.join, typeof (path as any).default]);\n  const specifier = \"./fn.cjs\";\n  show(\"computed specifier\", await import(specifier));\n  show(\"same object\", (await import(\"./dep.cjs\")) === (await import(\"./dep.cjs\")));\n}\nmain();\n"
+      },
+      "expected": {
+        "esModuleInterop": "json = {a: 1, default: {a: 1}}\nmodule.exports function = {length: 0, name: \"fn\", prototype: {}, extra: \"extra\", self: [function anonymous], default: [function fn]{extra: \"extra\", self: [function anonymous]}}\n__esModule = {(__esModule), default: \"the default\", named: \"named\", count: 0, bump: [function anonymous]}\ncompiled TypeScript = {(__esModule), named: \"named\", default: \"lib default\"}\nbuiltin = [\"function\", \"object\"]\ncomputed specifier = {length: 0, name: \"fn\", prototype: {}, extra: \"extra\", self: [function anonymous], default: [function fn]{extra: \"extra\", self: [function anonymous]}}\nsame object = true\n",
+        "noEsModuleInterop": "json = {a: 1}\nmodule.exports function = [function fn]{extra: \"extra\", self: [function anonymous]}\n__esModule = {(__esModule), default: \"the default\", named: \"named\", count: 0, bump: [function anonymous]}\ncompiled TypeScript = {(__esModule), named: \"named\", default: \"lib default\"}\nbuiltin = [\"function\", \"undefined\"]\ncomputed specifier = [function fn]{extra: \"extra\", self: [function anonymous]}\nsame object = true\n"
+      }
+    },
+    {
+      "name": "dynamic import of an ES module",
+      "files": {
+        "plain.mjs": "export const named = \"named\";\nexport default \"plain default\";\n",
+        "marked.mjs": "export const named = \"named\";\nexport default { __esModule: true, value: \"value\" };\n",
+        "main.ts": "const show = require(\"./show.cjs\");\nasync function main() {\n  const plain = await import(\"./plain.mjs\");\n  show(\"plain\", [plain.named, plain.default]);\n  const marked = await import(\"./marked.mjs\");\n  show(\"marked\", [marked.named, (marked.default as any).value]);\n}\nmain();\n"
+      },
+      "expected": {
+        "esModuleInterop": "plain = [\"named\", \"plain default\"]\nmarked = [\"named\", \"value\"]\n",
+        "noEsModuleInterop": "plain = [\"named\", \"plain default\"]\nmarked = [\"named\", \"value\"]\n"
+      }
+    },
+    {
+      "name": "export declarations",
+      "files": {
+        "lib.ts": "export const c = \"c\";\nexport let l = \"l\";\nexport var v = \"v\";\nexport function f() { return \"f\"; }\nexport function* g() { yield 1; }\nexport async function af() { return 1; }\nexport class C { static s = \"s\"; }\nexport let uninit: string;\nexport function setAll() { l = \"l2\"; v = \"v2\"; uninit = \"set\"; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { l, v, uninit, setAll, C } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"keys\", Object.keys(lib));\nshow(\"lib\", lib);\nshow(\"class\", [C.s, new C() instanceof C]);\nsetAll();\nshow(\"after\", [l, v, uninit, lib.l, lib.v, lib.uninit]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "keys = [\"c\", \"l\", \"v\", \"C\", \"uninit\", \"f\", \"g\", \"af\", \"setAll\"]\nlib = {(__esModule), c: \"c\", l: \"l\", v: \"v\", C: [function C]{s: \"s\"}, uninit: undefined, f: [function f], g: [function g], af: [function af], setAll: [function setAll]}\nclass = [\"s\", true]\nafter = [\"l2\", \"v2\", \"set\", \"l2\", \"v2\", \"set\"]\n",
+        "noEsModuleInterop": "keys = [\"c\", \"l\", \"v\", \"C\", \"uninit\", \"f\", \"g\", \"af\", \"setAll\"]\nlib = {(__esModule), c: \"c\", l: \"l\", v: \"v\", C: [function C]{s: \"s\"}, uninit: undefined, f: [function f], g: [function g], af: [function af], setAll: [function setAll]}\nclass = [\"s\", true]\nafter = [\"l2\", \"v2\", \"set\", \"l2\", \"v2\", \"set\"]\n"
+      }
+    },
+    {
+      "name": "writes to export let",
+      "files": {
+        "lib.ts": "export let x: any = 0;\nexport function assign() { x = 1; }\nexport function compound() { x += 10; }\nexport function postfixStatement() { x++; }\nexport function postfixValue() { return x++; }\nexport function prefix() { return ++x; }\nexport function decrement() { return x--; }\nexport function logicalOr() { x = 0; x ||= 5; }\nexport function logicalAnd() { x &&= 6; }\nexport function nullish() { x = null; x ??= 7; }\nexport function arrayPattern() { [x] = [8]; }\nexport function objectShorthand() { ({ x } = { x: 9 }); }\nexport function objectRenamed() { ({ value: x } = { value: 10 }); }\nexport function arrayDefault() { [x = 11] = []; }\nexport function objectDefault() { ({ x = 12 } = {}); }\nexport function nested() { ({ deep: [x] } = { deep: [13] }); }\nexport function arrayRest() { [, ...x] = [0, 14]; }\nexport function objectRest() { ({ ...x } = { r: 15 }); }\nexport function forOf() { for (x of [16, 17]) {} }\nexport function forIn() { for (x in { 18: 1 }) {} }\nexport function forUpdate() { for (x = 0; x < 3; x++) {} }\nexport function closure() { const set = () => { x = 19; }; set(); }\nexport function swap() { let y = 20; [x, y] = [y, x]; return y; }\nexport function shadowed() { let x = 99; x = 100; return x; }\nexport function inExpression() { return [(x = 21), x + 1]; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { x } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"start\", [x]);\nfor (const step of [\"assign\",\"compound\",\"postfixStatement\",\"postfixValue\",\"prefix\",\"decrement\",\"logicalOr\",\"logicalAnd\",\"nullish\",\"arrayPattern\",\"objectShorthand\",\"objectRenamed\",\"arrayDefault\",\"objectDefault\",\"nested\",\"arrayRest\",\"objectRest\",\"forOf\",\"forIn\",\"forUpdate\",\"closure\",\"swap\",\"shadowed\",\"inExpression\"]) {\n  const returned = (lib as any)[step]();\n  show(step, [returned, x, lib.x]);\n}\n"
+      },
+      "expected": {
+        "esModuleInterop": "start = [0]\nassign = [undefined, 1, 1]\ncompound = [undefined, 11, 11]\npostfixStatement = [undefined, 12, 12]\npostfixValue = [12, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [14, 13, 13]\nlogicalOr = [undefined, 5, 5]\nlogicalAnd = [undefined, 6, 6]\nnullish = [undefined, 7, 7]\narrayPattern = [undefined, 8, 8]\nobjectShorthand = [undefined, 9, 9]\nobjectRenamed = [undefined, 10, 10]\narrayDefault = [undefined, 11, 11]\nobjectDefault = [undefined, 12, 12]\nnested = [undefined, 13, 13]\narrayRest = [undefined, [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17]\nforIn = [undefined, \"18\", \"18\"]\nforUpdate = [undefined, 3, 3]\nclosure = [undefined, 19, 19]\nswap = [19, 20, 20]\nshadowed = [100, 20, 20]\ninExpression = [[21, 22], 21, 21]\n",
+        "noEsModuleInterop": "start = [0]\nassign = [undefined, 1, 1]\ncompound = [undefined, 11, 11]\npostfixStatement = [undefined, 12, 12]\npostfixValue = [12, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [14, 13, 13]\nlogicalOr = [undefined, 5, 5]\nlogicalAnd = [undefined, 6, 6]\nnullish = [undefined, 7, 7]\narrayPattern = [undefined, 8, 8]\nobjectShorthand = [undefined, 9, 9]\nobjectRenamed = [undefined, 10, 10]\narrayDefault = [undefined, 11, 11]\nobjectDefault = [undefined, 12, 12]\nnested = [undefined, 13, 13]\narrayRest = [undefined, [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17]\nforIn = [undefined, \"18\", \"18\"]\nforUpdate = [undefined, 3, 3]\nclosure = [undefined, 19, 19]\nswap = [19, 20, 20]\nshadowed = [100, 20, 20]\ninExpression = [[21, 22], 21, 21]\n"
+      }
+    },
+    {
+      "name": "writes to export var",
+      "files": {
+        "lib.ts": "export var x: any = 0;\nexport function assign() { x = 1; }\nexport function compound() { x += 10; }\nexport function postfixStatement() { x++; }\nexport function postfixValue() { return x++; }\nexport function prefix() { return ++x; }\nexport function decrement() { return x--; }\nexport function logicalOr() { x = 0; x ||= 5; }\nexport function logicalAnd() { x &&= 6; }\nexport function nullish() { x = null; x ??= 7; }\nexport function arrayPattern() { [x] = [8]; }\nexport function objectShorthand() { ({ x } = { x: 9 }); }\nexport function objectRenamed() { ({ value: x } = { value: 10 }); }\nexport function arrayDefault() { [x = 11] = []; }\nexport function objectDefault() { ({ x = 12 } = {}); }\nexport function nested() { ({ deep: [x] } = { deep: [13] }); }\nexport function arrayRest() { [, ...x] = [0, 14]; }\nexport function objectRest() { ({ ...x } = { r: 15 }); }\nexport function forOf() { for (x of [16, 17]) {} }\nexport function forIn() { for (x in { 18: 1 }) {} }\nexport function forUpdate() { for (x = 0; x < 3; x++) {} }\nexport function closure() { const set = () => { x = 19; }; set(); }\nexport function swap() { let y = 20; [x, y] = [y, x]; return y; }\nexport function shadowed() { let x = 99; x = 100; return x; }\nexport function inExpression() { return [(x = 21), x + 1]; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { x } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"start\", [x]);\nfor (const step of [\"assign\",\"compound\",\"postfixStatement\",\"postfixValue\",\"prefix\",\"decrement\",\"logicalOr\",\"logicalAnd\",\"nullish\",\"arrayPattern\",\"objectShorthand\",\"objectRenamed\",\"arrayDefault\",\"objectDefault\",\"nested\",\"arrayRest\",\"objectRest\",\"forOf\",\"forIn\",\"forUpdate\",\"closure\",\"swap\",\"shadowed\",\"inExpression\"]) {\n  const returned = (lib as any)[step]();\n  show(step, [returned, x, lib.x]);\n}\n"
+      },
+      "expected": {
+        "esModuleInterop": "start = [0]\nassign = [undefined, 1, 1]\ncompound = [undefined, 11, 11]\npostfixStatement = [undefined, 12, 12]\npostfixValue = [12, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [14, 13, 13]\nlogicalOr = [undefined, 5, 5]\nlogicalAnd = [undefined, 6, 6]\nnullish = [undefined, 7, 7]\narrayPattern = [undefined, 8, 8]\nobjectShorthand = [undefined, 9, 9]\nobjectRenamed = [undefined, 10, 10]\narrayDefault = [undefined, 11, 11]\nobjectDefault = [undefined, 12, 12]\nnested = [undefined, 13, 13]\narrayRest = [undefined, [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17]\nforIn = [undefined, \"18\", \"18\"]\nforUpdate = [undefined, 3, 3]\nclosure = [undefined, 19, 19]\nswap = [19, 20, 20]\nshadowed = [100, 20, 20]\ninExpression = [[21, 22], 21, 21]\n",
+        "noEsModuleInterop": "start = [0]\nassign = [undefined, 1, 1]\ncompound = [undefined, 11, 11]\npostfixStatement = [undefined, 12, 12]\npostfixValue = [12, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [14, 13, 13]\nlogicalOr = [undefined, 5, 5]\nlogicalAnd = [undefined, 6, 6]\nnullish = [undefined, 7, 7]\narrayPattern = [undefined, 8, 8]\nobjectShorthand = [undefined, 9, 9]\nobjectRenamed = [undefined, 10, 10]\narrayDefault = [undefined, 11, 11]\nobjectDefault = [undefined, 12, 12]\nnested = [undefined, 13, 13]\narrayRest = [undefined, [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17]\nforIn = [undefined, \"18\", \"18\"]\nforUpdate = [undefined, 3, 3]\nclosure = [undefined, 19, 19]\nswap = [19, 20, 20]\nshadowed = [100, 20, 20]\ninExpression = [[21, 22], 21, 21]\n"
+      }
+    },
+    {
+      "name": "writes to a local in an export list",
+      "files": {
+        "lib.ts": "let x: any = 0;\nexport { x };\nexport function assign() { x = 1; }\nexport function compound() { x += 10; }\nexport function postfixStatement() { x++; }\nexport function postfixValue() { return x++; }\nexport function prefix() { return ++x; }\nexport function decrement() { return x--; }\nexport function logicalOr() { x = 0; x ||= 5; }\nexport function logicalAnd() { x &&= 6; }\nexport function nullish() { x = null; x ??= 7; }\nexport function arrayPattern() { [x] = [8]; }\nexport function objectShorthand() { ({ x } = { x: 9 }); }\nexport function objectRenamed() { ({ value: x } = { value: 10 }); }\nexport function arrayDefault() { [x = 11] = []; }\nexport function objectDefault() { ({ x = 12 } = {}); }\nexport function nested() { ({ deep: [x] } = { deep: [13] }); }\nexport function arrayRest() { [, ...x] = [0, 14]; }\nexport function objectRest() { ({ ...x } = { r: 15 }); }\nexport function forOf() { for (x of [16, 17]) {} }\nexport function forIn() { for (x in { 18: 1 }) {} }\nexport function forUpdate() { for (x = 0; x < 3; x++) {} }\nexport function closure() { const set = () => { x = 19; }; set(); }\nexport function swap() { let y = 20; [x, y] = [y, x]; return y; }\nexport function shadowed() { let x = 99; x = 100; return x; }\nexport function inExpression() { return [(x = 21), x + 1]; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { x } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"start\", [x]);\nfor (const step of [\"assign\",\"compound\",\"postfixStatement\",\"postfixValue\",\"prefix\",\"decrement\",\"logicalOr\",\"logicalAnd\",\"nullish\",\"arrayPattern\",\"objectShorthand\",\"objectRenamed\",\"arrayDefault\",\"objectDefault\",\"nested\",\"arrayRest\",\"objectRest\",\"forOf\",\"forIn\",\"forUpdate\",\"closure\",\"swap\",\"shadowed\",\"inExpression\"]) {\n  const returned = (lib as any)[step]();\n  show(step, [returned, x, lib.x]);\n}\n"
+      },
+      "expected": {
+        "esModuleInterop": "start = [0]\nassign = [undefined, 1, 1]\ncompound = [undefined, 11, 11]\npostfixStatement = [undefined, 12, 12]\npostfixValue = [12, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [14, 13, 13]\nlogicalOr = [undefined, 5, 5]\nlogicalAnd = [undefined, 6, 6]\nnullish = [undefined, 7, 7]\narrayPattern = [undefined, 8, 8]\nobjectShorthand = [undefined, 9, 9]\nobjectRenamed = [undefined, 10, 10]\narrayDefault = [undefined, 11, 11]\nobjectDefault = [undefined, 12, 12]\nnested = [undefined, 13, 13]\narrayRest = [undefined, [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17]\nforIn = [undefined, \"18\", \"18\"]\nforUpdate = [undefined, 3, 3]\nclosure = [undefined, 19, 19]\nswap = [19, 20, 20]\nshadowed = [100, 20, 20]\ninExpression = [[21, 22], 21, 21]\n",
+        "noEsModuleInterop": "start = [0]\nassign = [undefined, 1, 1]\ncompound = [undefined, 11, 11]\npostfixStatement = [undefined, 12, 12]\npostfixValue = [12, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [14, 13, 13]\nlogicalOr = [undefined, 5, 5]\nlogicalAnd = [undefined, 6, 6]\nnullish = [undefined, 7, 7]\narrayPattern = [undefined, 8, 8]\nobjectShorthand = [undefined, 9, 9]\nobjectRenamed = [undefined, 10, 10]\narrayDefault = [undefined, 11, 11]\nobjectDefault = [undefined, 12, 12]\nnested = [undefined, 13, 13]\narrayRest = [undefined, [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17]\nforIn = [undefined, \"18\", \"18\"]\nforUpdate = [undefined, 3, 3]\nclosure = [undefined, 19, 19]\nswap = [19, 20, 20]\nshadowed = [100, 20, 20]\ninExpression = [[21, 22], 21, 21]\n"
+      }
+    },
+    {
+      "name": "writes to export let with an alias",
+      "files": {
+        "lib.ts": "export let x: any = 0;\nexport { x as alias };\nexport function assign() { x = 1; }\nexport function compound() { x += 10; }\nexport function postfixStatement() { x++; }\nexport function postfixValue() { return x++; }\nexport function prefix() { return ++x; }\nexport function decrement() { return x--; }\nexport function logicalOr() { x = 0; x ||= 5; }\nexport function logicalAnd() { x &&= 6; }\nexport function nullish() { x = null; x ??= 7; }\nexport function arrayPattern() { [x] = [8]; }\nexport function objectShorthand() { ({ x } = { x: 9 }); }\nexport function objectRenamed() { ({ value: x } = { value: 10 }); }\nexport function arrayDefault() { [x = 11] = []; }\nexport function objectDefault() { ({ x = 12 } = {}); }\nexport function nested() { ({ deep: [x] } = { deep: [13] }); }\nexport function arrayRest() { [, ...x] = [0, 14]; }\nexport function objectRest() { ({ ...x } = { r: 15 }); }\nexport function forOf() { for (x of [16, 17]) {} }\nexport function forIn() { for (x in { 18: 1 }) {} }\nexport function forUpdate() { for (x = 0; x < 3; x++) {} }\nexport function closure() { const set = () => { x = 19; }; set(); }\nexport function swap() { let y = 20; [x, y] = [y, x]; return y; }\nexport function shadowed() { let x = 99; x = 100; return x; }\nexport function inExpression() { return [(x = 21), x + 1]; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { x, alias } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"start\", [x, alias]);\nfor (const step of [\"assign\",\"compound\",\"postfixStatement\",\"postfixValue\",\"prefix\",\"decrement\",\"logicalOr\",\"logicalAnd\",\"nullish\",\"arrayPattern\",\"objectShorthand\",\"objectRenamed\",\"arrayDefault\",\"objectDefault\",\"nested\",\"arrayRest\",\"objectRest\",\"forOf\",\"forIn\",\"forUpdate\",\"closure\",\"swap\",\"shadowed\",\"inExpression\"]) {\n  const returned = (lib as any)[step]();\n  show(step, [returned, x, lib.x, alias, (lib as any).alias]);\n}\n"
+      },
+      "expected": {
+        "esModuleInterop": "start = [0, 0]\nassign = [undefined, 1, 1, 1, 1]\ncompound = [undefined, 11, 11, 11, 11]\npostfixStatement = [undefined, 12, 12, 12, 12]\npostfixValue = [12, 13, 13, 13, 13]\nprefix = [14, 14, 14, 14, 14]\ndecrement = [14, 13, 13, 13, 13]\nlogicalOr = [undefined, 5, 5, 5, 5]\nlogicalAnd = [undefined, 6, 6, 6, 6]\nnullish = [undefined, 7, 7, 7, 7]\narrayPattern = [undefined, 8, 8, 8, 8]\nobjectShorthand = [undefined, 9, 9, 9, 9]\nobjectRenamed = [undefined, 10, 10, 10, 10]\narrayDefault = [undefined, 11, 11, 11, 11]\nobjectDefault = [undefined, 12, 12, 12, 12]\nnested = [undefined, 13, 13, 13, 13]\narrayRest = [undefined, [14], [14], [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17, 17, 17]\nforIn = [undefined, \"18\", \"18\", \"18\", \"18\"]\nforUpdate = [undefined, 3, 3, 3, 3]\nclosure = [undefined, 19, 19, 19, 19]\nswap = [19, 20, 20, 20, 20]\nshadowed = [100, 20, 20, 20, 20]\ninExpression = [[21, 22], 21, 21, 21, 21]\n",
+        "noEsModuleInterop": "start = [0, 0]\nassign = [undefined, 1, 1, 1, 1]\ncompound = [undefined, 11, 11, 11, 11]\npostfixStatement = [undefined, 12, 12, 12, 12]\npostfixValue = [12, 13, 13, 13, 13]\nprefix = [14, 14, 14, 14, 14]\ndecrement = [14, 13, 13, 13, 13]\nlogicalOr = [undefined, 5, 5, 5, 5]\nlogicalAnd = [undefined, 6, 6, 6, 6]\nnullish = [undefined, 7, 7, 7, 7]\narrayPattern = [undefined, 8, 8, 8, 8]\nobjectShorthand = [undefined, 9, 9, 9, 9]\nobjectRenamed = [undefined, 10, 10, 10, 10]\narrayDefault = [undefined, 11, 11, 11, 11]\nobjectDefault = [undefined, 12, 12, 12, 12]\nnested = [undefined, 13, 13, 13, 13]\narrayRest = [undefined, [14], [14], [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17, 17, 17]\nforIn = [undefined, \"18\", \"18\", \"18\", \"18\"]\nforUpdate = [undefined, 3, 3, 3, 3]\nclosure = [undefined, 19, 19, 19, 19]\nswap = [19, 20, 20, 20, 20]\nshadowed = [100, 20, 20, 20, 20]\ninExpression = [[21, 22], 21, 21, 21, 21]\n"
+      }
+    },
+    {
+      "name": "writes to an aliased local",
+      "files": {
+        "lib.ts": "let x: any = 0;\nexport { x, x as alias };\nexport function assign() { x = 1; }\nexport function compound() { x += 10; }\nexport function postfixStatement() { x++; }\nexport function postfixValue() { return x++; }\nexport function prefix() { return ++x; }\nexport function decrement() { return x--; }\nexport function logicalOr() { x = 0; x ||= 5; }\nexport function logicalAnd() { x &&= 6; }\nexport function nullish() { x = null; x ??= 7; }\nexport function arrayPattern() { [x] = [8]; }\nexport function objectShorthand() { ({ x } = { x: 9 }); }\nexport function objectRenamed() { ({ value: x } = { value: 10 }); }\nexport function arrayDefault() { [x = 11] = []; }\nexport function objectDefault() { ({ x = 12 } = {}); }\nexport function nested() { ({ deep: [x] } = { deep: [13] }); }\nexport function arrayRest() { [, ...x] = [0, 14]; }\nexport function objectRest() { ({ ...x } = { r: 15 }); }\nexport function forOf() { for (x of [16, 17]) {} }\nexport function forIn() { for (x in { 18: 1 }) {} }\nexport function forUpdate() { for (x = 0; x < 3; x++) {} }\nexport function closure() { const set = () => { x = 19; }; set(); }\nexport function swap() { let y = 20; [x, y] = [y, x]; return y; }\nexport function shadowed() { let x = 99; x = 100; return x; }\nexport function inExpression() { return [(x = 21), x + 1]; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { x, alias } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"start\", [x, alias]);\nfor (const step of [\"assign\",\"compound\",\"postfixStatement\",\"postfixValue\",\"prefix\",\"decrement\",\"logicalOr\",\"logicalAnd\",\"nullish\",\"arrayPattern\",\"objectShorthand\",\"objectRenamed\",\"arrayDefault\",\"objectDefault\",\"nested\",\"arrayRest\",\"objectRest\",\"forOf\",\"forIn\",\"forUpdate\",\"closure\",\"swap\",\"shadowed\",\"inExpression\"]) {\n  const returned = (lib as any)[step]();\n  show(step, [returned, x, lib.x, alias, (lib as any).alias]);\n}\n"
+      },
+      "expected": {
+        "esModuleInterop": "start = [0, 0]\nassign = [undefined, 1, 1, 1, 1]\ncompound = [undefined, 11, 11, 11, 11]\npostfixStatement = [undefined, 12, 12, 12, 12]\npostfixValue = [12, 13, 13, 13, 13]\nprefix = [14, 14, 14, 14, 14]\ndecrement = [14, 13, 13, 13, 13]\nlogicalOr = [undefined, 5, 5, 5, 5]\nlogicalAnd = [undefined, 6, 6, 6, 6]\nnullish = [undefined, 7, 7, 7, 7]\narrayPattern = [undefined, 8, 8, 8, 8]\nobjectShorthand = [undefined, 9, 9, 9, 9]\nobjectRenamed = [undefined, 10, 10, 10, 10]\narrayDefault = [undefined, 11, 11, 11, 11]\nobjectDefault = [undefined, 12, 12, 12, 12]\nnested = [undefined, 13, 13, 13, 13]\narrayRest = [undefined, [14], [14], [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17, 17, 17]\nforIn = [undefined, \"18\", \"18\", \"18\", \"18\"]\nforUpdate = [undefined, 3, 3, 3, 3]\nclosure = [undefined, 19, 19, 19, 19]\nswap = [19, 20, 20, 20, 20]\nshadowed = [100, 20, 20, 20, 20]\ninExpression = [[21, 22], 21, 21, 21, 21]\n",
+        "noEsModuleInterop": "start = [0, 0]\nassign = [undefined, 1, 1, 1, 1]\ncompound = [undefined, 11, 11, 11, 11]\npostfixStatement = [undefined, 12, 12, 12, 12]\npostfixValue = [12, 13, 13, 13, 13]\nprefix = [14, 14, 14, 14, 14]\ndecrement = [14, 13, 13, 13, 13]\nlogicalOr = [undefined, 5, 5, 5, 5]\nlogicalAnd = [undefined, 6, 6, 6, 6]\nnullish = [undefined, 7, 7, 7, 7]\narrayPattern = [undefined, 8, 8, 8, 8]\nobjectShorthand = [undefined, 9, 9, 9, 9]\nobjectRenamed = [undefined, 10, 10, 10, 10]\narrayDefault = [undefined, 11, 11, 11, 11]\nobjectDefault = [undefined, 12, 12, 12, 12]\nnested = [undefined, 13, 13, 13, 13]\narrayRest = [undefined, [14], [14], [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17, 17, 17]\nforIn = [undefined, \"18\", \"18\", \"18\", \"18\"]\nforUpdate = [undefined, 3, 3, 3, 3]\nclosure = [undefined, 19, 19, 19, 19]\nswap = [19, 20, 20, 20, 20]\nshadowed = [100, 20, 20, 20, 20]\ninExpression = [[21, 22], 21, 21, 21, 21]\n"
+      }
+    },
+    {
+      "name": "writes to export let aliased before its declaration",
+      "files": {
+        "lib.ts": "export { x as alias };\nexport let x: any = 0;\nexport function assign() { x = 1; }\nexport function compound() { x += 10; }\nexport function postfixStatement() { x++; }\nexport function postfixValue() { return x++; }\nexport function prefix() { return ++x; }\nexport function decrement() { return x--; }\nexport function logicalOr() { x = 0; x ||= 5; }\nexport function logicalAnd() { x &&= 6; }\nexport function nullish() { x = null; x ??= 7; }\nexport function arrayPattern() { [x] = [8]; }\nexport function objectShorthand() { ({ x } = { x: 9 }); }\nexport function objectRenamed() { ({ value: x } = { value: 10 }); }\nexport function arrayDefault() { [x = 11] = []; }\nexport function objectDefault() { ({ x = 12 } = {}); }\nexport function nested() { ({ deep: [x] } = { deep: [13] }); }\nexport function arrayRest() { [, ...x] = [0, 14]; }\nexport function objectRest() { ({ ...x } = { r: 15 }); }\nexport function forOf() { for (x of [16, 17]) {} }\nexport function forIn() { for (x in { 18: 1 }) {} }\nexport function forUpdate() { for (x = 0; x < 3; x++) {} }\nexport function closure() { const set = () => { x = 19; }; set(); }\nexport function swap() { let y = 20; [x, y] = [y, x]; return y; }\nexport function shadowed() { let x = 99; x = 100; return x; }\nexport function inExpression() { return [(x = 21), x + 1]; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { x, alias } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"start\", [x, alias]);\nfor (const step of [\"assign\",\"compound\",\"postfixStatement\",\"postfixValue\",\"prefix\",\"decrement\",\"logicalOr\",\"logicalAnd\",\"nullish\",\"arrayPattern\",\"objectShorthand\",\"objectRenamed\",\"arrayDefault\",\"objectDefault\",\"nested\",\"arrayRest\",\"objectRest\",\"forOf\",\"forIn\",\"forUpdate\",\"closure\",\"swap\",\"shadowed\",\"inExpression\"]) {\n  const returned = (lib as any)[step]();\n  show(step, [returned, x, lib.x, alias, (lib as any).alias]);\n}\n"
+      },
+      "expected": {
+        "esModuleInterop": "start = [0, 0]\nassign = [undefined, 1, 1, 1, 1]\ncompound = [undefined, 11, 11, 11, 11]\npostfixStatement = [undefined, 12, 12, 12, 12]\npostfixValue = [12, 13, 13, 13, 13]\nprefix = [14, 14, 14, 14, 14]\ndecrement = [14, 13, 13, 13, 13]\nlogicalOr = [undefined, 5, 5, 5, 5]\nlogicalAnd = [undefined, 6, 6, 6, 6]\nnullish = [undefined, 7, 7, 7, 7]\narrayPattern = [undefined, 8, 8, 8, 8]\nobjectShorthand = [undefined, 9, 9, 9, 9]\nobjectRenamed = [undefined, 10, 10, 10, 10]\narrayDefault = [undefined, 11, 11, 11, 11]\nobjectDefault = [undefined, 12, 12, 12, 12]\nnested = [undefined, 13, 13, 13, 13]\narrayRest = [undefined, [14], [14], [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17, 17, 17]\nforIn = [undefined, \"18\", \"18\", \"18\", \"18\"]\nforUpdate = [undefined, 3, 3, 3, 3]\nclosure = [undefined, 19, 19, 19, 19]\nswap = [19, 20, 20, 20, 20]\nshadowed = [100, 20, 20, 20, 20]\ninExpression = [[21, 22], 21, 21, 21, 21]\n",
+        "noEsModuleInterop": "start = [0, 0]\nassign = [undefined, 1, 1, 1, 1]\ncompound = [undefined, 11, 11, 11, 11]\npostfixStatement = [undefined, 12, 12, 12, 12]\npostfixValue = [12, 13, 13, 13, 13]\nprefix = [14, 14, 14, 14, 14]\ndecrement = [14, 13, 13, 13, 13]\nlogicalOr = [undefined, 5, 5, 5, 5]\nlogicalAnd = [undefined, 6, 6, 6, 6]\nnullish = [undefined, 7, 7, 7, 7]\narrayPattern = [undefined, 8, 8, 8, 8]\nobjectShorthand = [undefined, 9, 9, 9, 9]\nobjectRenamed = [undefined, 10, 10, 10, 10]\narrayDefault = [undefined, 11, 11, 11, 11]\nobjectDefault = [undefined, 12, 12, 12, 12]\nnested = [undefined, 13, 13, 13, 13]\narrayRest = [undefined, [14], [14], [14], [14]]\nobjectRest = [undefined, {r: 15}, {r: 15}, {r: 15}, {r: 15}]\nforOf = [undefined, 17, 17, 17, 17]\nforIn = [undefined, \"18\", \"18\", \"18\", \"18\"]\nforUpdate = [undefined, 3, 3, 3, 3]\nclosure = [undefined, 19, 19, 19, 19]\nswap = [19, 20, 20, 20, 20]\nshadowed = [100, 20, 20, 20, 20]\ninExpression = [[21, 22], 21, 21, 21, 21]\n"
+      }
+    },
+    {
+      "name": "writes to a local exported as default",
+      "files": {
+        "lib.ts": "let x: any = 0;\nexport { x, x as default };\nexport function assign() { x = 1; }\nexport function compound() { x += 10; }\nexport function postfixStatement() { x++; }\nexport function postfixValue() { return x++; }\nexport function prefix() { return ++x; }\nexport function decrement() { return x--; }\nexport function logicalOr() { x = 0; x ||= 5; }\nexport function logicalAnd() { x &&= 6; }\nexport function nullish() { x = null; x ??= 7; }\nexport function arrayPattern() { [x] = [8]; }\nexport function objectShorthand() { ({ x } = { x: 9 }); }\nexport function objectRenamed() { ({ value: x } = { value: 10 }); }\nexport function arrayDefault() { [x = 11] = []; }\nexport function objectDefault() { ({ x = 12 } = {}); }\nexport function nested() { ({ deep: [x] } = { deep: [13] }); }\nexport function arrayRest() { [, ...x] = [0, 14]; }\nexport function objectRest() { ({ ...x } = { r: 15 }); }\nexport function forOf() { for (x of [16, 17]) {} }\nexport function forIn() { for (x in { 18: 1 }) {} }\nexport function forUpdate() { for (x = 0; x < 3; x++) {} }\nexport function closure() { const set = () => { x = 19; }; set(); }\nexport function swap() { let y = 20; [x, y] = [y, x]; return y; }\nexport function shadowed() { let x = 99; x = 100; return x; }\nexport function inExpression() { return [(x = 21), x + 1]; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport d, { x } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"start\", [d, x]);\nfor (const step of [\"assign\",\"compound\",\"postfixStatement\",\"postfixValue\",\"prefix\",\"decrement\",\"logicalOr\",\"logicalAnd\",\"nullish\",\"arrayPattern\",\"objectShorthand\",\"objectRenamed\",\"arrayDefault\",\"objectDefault\",\"nested\",\"arrayRest\",\"objectRest\",\"forOf\",\"forIn\",\"forUpdate\",\"closure\",\"swap\",\"shadowed\",\"inExpression\"]) {\n  (lib as any)[step]();\n  show(step, [d, x, lib.default]);\n}\n"
+      },
+      "expected": {
+        "esModuleInterop": "start = [0, 0]\nassign = [1, 1, 1]\ncompound = [11, 11, 11]\npostfixStatement = [12, 12, 12]\npostfixValue = [13, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [13, 13, 13]\nlogicalOr = [5, 5, 5]\nlogicalAnd = [6, 6, 6]\nnullish = [7, 7, 7]\narrayPattern = [8, 8, 8]\nobjectShorthand = [9, 9, 9]\nobjectRenamed = [10, 10, 10]\narrayDefault = [11, 11, 11]\nobjectDefault = [12, 12, 12]\nnested = [13, 13, 13]\narrayRest = [[14], [14], [14]]\nobjectRest = [{r: 15}, {r: 15}, {r: 15}]\nforOf = [17, 17, 17]\nforIn = [\"18\", \"18\", \"18\"]\nforUpdate = [3, 3, 3]\nclosure = [19, 19, 19]\nswap = [20, 20, 20]\nshadowed = [20, 20, 20]\ninExpression = [21, 21, 21]\n",
+        "noEsModuleInterop": "start = [0, 0]\nassign = [1, 1, 1]\ncompound = [11, 11, 11]\npostfixStatement = [12, 12, 12]\npostfixValue = [13, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [13, 13, 13]\nlogicalOr = [5, 5, 5]\nlogicalAnd = [6, 6, 6]\nnullish = [7, 7, 7]\narrayPattern = [8, 8, 8]\nobjectShorthand = [9, 9, 9]\nobjectRenamed = [10, 10, 10]\narrayDefault = [11, 11, 11]\nobjectDefault = [12, 12, 12]\nnested = [13, 13, 13]\narrayRest = [[14], [14], [14]]\nobjectRest = [{r: 15}, {r: 15}, {r: 15}]\nforOf = [17, 17, 17]\nforIn = [\"18\", \"18\", \"18\"]\nforUpdate = [3, 3, 3]\nclosure = [19, 19, 19]\nswap = [20, 20, 20]\nshadowed = [20, 20, 20]\ninExpression = [21, 21, 21]\n"
+      }
+    },
+    {
+      "name": "reassigned exported function and class",
+      "files": {
+        "lib.ts": "export function f() { return 1; }\nexport class C { static id = \"C\"; }\nexport function swap() {\n  // @ts-ignore\n  f = function g() { return 2; };\n  // @ts-ignore\n  C = class D { static id = \"D\"; };\n}\n",
+        "main.ts": "import { f, C, swap } from \"./lib\";\nimport * as lib from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"before\", [f(), f.name, C.id]);\nswap();\nshow(\"after\", [f(), f.name, C.id, lib.f.name, lib.C.id]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "before = [1, \"f\", \"C\"]\nafter = [2, \"g\", \"D\", \"g\", \"D\"]\n",
+        "noEsModuleInterop": "before = [1, \"f\", \"C\"]\nafter = [2, \"g\", \"D\", \"g\", \"D\"]\n"
+      }
+    },
+    {
+      "name": "default exports",
+      "files": {
+        "d1.ts": "export default function named() { return \"named\"; }\n",
+        "d2.ts": "export default function () { return \"anonymous\"; }\n",
+        "d3.ts": "export default class Named { static id = \"Named\"; }\n",
+        "d4.ts": "export default class { static id = \"anonymous\"; }\n",
+        "d5.ts": "let value = 1;\nexport default value;\nexport function bump() { value++; }\n",
+        "d6.ts": "let value = 1;\nexport { value as default };\nexport function bump() { value++; }\n",
+        "d7.ts": "export default () => \"arrow\";\n",
+        "d8.ts": "export default 40 + 2;\n",
+        "d9.ts": "const obj = { a: 1 };\nexport default obj;\n",
+        "main.ts": "import d1 from \"./d1\";\nimport d2 from \"./d2\";\nimport d3 from \"./d3\";\nimport d4 from \"./d4\";\nimport d5, { bump as bump5 } from \"./d5\";\nimport d6, { bump as bump6 } from \"./d6\";\nimport d7 from \"./d7\";\nimport d8 from \"./d8\";\nimport d9 from \"./d9\";\nimport * as ns2 from \"./d2\";\nconst show = require(\"./show.cjs\");\nshow(\"functions\", [d1, d1(), d2, d2(), d7, d7()]);\nshow(\"classes\", [d3, d3.id, d4, d4.id]);\nshow(\"values\", [d8, d9]);\nshow(\"namespace\", ns2);\nbump5();\nbump6();\nshow(\"snapshot and live\", [d5, d6]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "functions = [[function named], \"named\", [function default_1], \"anonymous\", [function anonymous], \"arrow\"]\nclasses = [[function Named]{id: \"Named\"}, \"Named\", [function default_1]{id: \"anonymous\"}, \"anonymous\"]\nvalues = [42, {a: 1}]\nnamespace = {(__esModule), default: [function default_1]}\nsnapshot and live = [1, 2]\n",
+        "noEsModuleInterop": "functions = [[function named], \"named\", [function default_1], \"anonymous\", [function anonymous], \"arrow\"]\nclasses = [[function Named]{id: \"Named\"}, \"Named\", [function default_1]{id: \"anonymous\"}, \"anonymous\"]\nvalues = [42, {a: 1}]\nnamespace = {(__esModule), default: [function default_1]}\nsnapshot and live = [1, 2]\n"
+      }
+    },
+    {
+      "name": "enums and namespaces",
+      "files": {
+        "lib.ts": "export enum Color { Red, Green = \"g\" }\nexport namespace NS { export const inner = \"inner\"; export function fn() { return inner; } }\nexport declare const ambient: number;\nexport type T = number;\nexport interface I { a: 1 }\nenum Local { A }\nexport { Local };\nnamespace Merged { export const a = 1; }\nnamespace Merged { export const b = 2; }\nexport { Merged };\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { Color, NS } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"keys\", Object.keys(lib));\nshow(\"Color\", [Color, Color.Red, Color[0]]);\nshow(\"NS\", [NS, NS.fn()]);\nshow(\"Local\", lib.Local);\nshow(\"Merged\", lib.Merged);\n"
+      },
+      "expected": {
+        "esModuleInterop": "keys = [\"Color\", \"NS\", \"Local\", \"Merged\"]\nColor = [{0: \"Red\", Red: 0, Green: \"g\"}, 0, \"Red\"]\nNS = [{inner: \"inner\", fn: [function fn]}, \"inner\"]\nLocal = {0: \"A\", A: 0}\nMerged = {a: 1, b: 2}\n",
+        "noEsModuleInterop": "keys = [\"Color\", \"NS\", \"Local\", \"Merged\"]\nColor = [{0: \"Red\", Red: 0, Green: \"g\"}, 0, \"Red\"]\nNS = [{inner: \"inner\", fn: [function fn]}, \"inner\"]\nLocal = {0: \"A\", A: 0}\nMerged = {a: 1, b: 2}\n"
+      }
+    },
+    {
+      "name": "destructuring export declarations",
+      "files": {
+        "lib.ts": "const source = { a: 1, b: [2, 3, 4], c: { d: 5 } };\nexport const { a, b: [first, ...restB], c: { d } } = source;\nexport let { a: mutable } = source;\nexport const [p = \"p default\", q] = [undefined, \"q\"];\nexport function change() { mutable = 99; [mutable] = [100]; }\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport { mutable, change } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"lib\", lib);\nchange();\nshow(\"after change\", [mutable, lib.mutable]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "lib = {(__esModule), a: 1, first: 2, restB: [3, 4], d: 5, mutable: 1, p: \"p default\", q: \"q\", change: [function change]}\nafter change = [100, 100]\n",
+        "noEsModuleInterop": "lib = {(__esModule), a: 1, first: 2, restB: [3, 4], d: 5, mutable: 1, p: \"p default\", q: \"q\", change: [function change]}\nafter change = [100, 100]\n"
+      }
+    },
+    {
+      "name": "export star",
+      "files": {
+        "a.ts": "export const shared = \"from a\";\nexport const onlyA = \"onlyA\";\nexport let counter = 0;\nexport function inc() { counter++; }\nexport default \"a default\";\n",
+        "b.cjs": "exports.shared = \"from b\";\nexports.onlyB = \"onlyB\";\nexports.default = \"b default\";\n",
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "lib.ts": "export * from \"./a\";\nexport * from \"./b.cjs\";\nexport * from \"./fn.cjs\";\nexport const shared = \"local\";\n",
+        "main.ts": "import * as lib from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"lib\", lib);\nlib.inc();\nshow(\"counter through star\", lib.counter);\n"
+      },
+      "expected": {
+        "esModuleInterop": "lib = {(__esModule), shared: \"local\", onlyA: \"onlyA\", counter: 0, inc: [function inc], onlyB: \"onlyB\", extra: \"extra\", self: [function anonymous]}\ncounter through star = 1\n",
+        "noEsModuleInterop": "lib = {(__esModule), shared: \"local\", onlyA: \"onlyA\", counter: 0, inc: [function inc], onlyB: \"onlyB\", extra: \"extra\", self: [function anonymous]}\ncounter through star = 1\n"
+      }
+    },
+    {
+      "name": "named re-exports from a module",
+      "files": {
+        "a.ts": "export let value = 1;\nexport function inc() { value++; }\nexport default \"a default\";\n",
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "lib.ts": "export { value, inc, value as renamed } from \"./a\";\nexport { default } from \"./fn.cjs\";\nexport { default as aDefault } from \"./a\";\nexport { value as valueAgain } from \"./a\";\nexport * as ns from \"./a\";\nexport * as fnNs from \"./fn.cjs\";\n",
+        "main.ts": "import * as lib from \"./lib\";\nimport d from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"keys\", Object.keys(lib));\nshow(\"default\", d);\nshow(\"values\", [lib.value, lib.renamed, lib.valueAgain, lib.aDefault]);\nshow(\"ns\", lib.ns);\nshow(\"fnNs\", lib.fnNs);\nlib.inc();\nshow(\"after inc\", [lib.value, lib.renamed, lib.valueAgain, lib.ns.value]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "keys = [\"value\", \"inc\", \"renamed\", \"default\", \"aDefault\", \"valueAgain\", \"ns\", \"fnNs\"]\ndefault = [function fn]{extra: \"extra\", self: [function anonymous]}\nvalues = [1, 1, 1, \"a default\"]\nns = {(__esModule), value: 1, inc: [function inc], default: \"a default\"}\nfnNs = {length: 0, name: \"fn\", prototype: {}, extra: \"extra\", self: [function anonymous], default: [function fn]{extra: \"extra\", self: [function anonymous]}}\nafter inc = [2, 2, 2, 2]\n",
+        "noEsModuleInterop": "keys = [\"value\", \"inc\", \"renamed\", \"default\", \"aDefault\", \"valueAgain\", \"ns\", \"fnNs\"]\ndefault = undefined\nvalues = [1, 1, 1, \"a default\"]\nns = {(__esModule), value: 1, inc: [function inc], default: \"a default\"}\nfnNs = [function fn]{extra: \"extra\", self: [function anonymous]}\nafter inc = [2, 2, 2, 2]\n"
+      }
+    },
+    {
+      "name": "re-exported imports",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "dep.cjs": "Object.defineProperty(exports, \"__esModule\", { value: true });\nexports.default = \"the default\";\nexports.named = \"named\";\nexports.count = 0;\nexports.bump = function () { exports.count++; };\n",
+        "before.ts": "export { fn, ns, named, renamedNamed as alias, fn as fnAgain, count };\nimport fn from \"./fn.cjs\";\nimport * as ns from \"./fn.cjs\";\nimport { named, named as renamedNamed, count } from \"./dep.cjs\";\n",
+        "after.ts": "import fn from \"./fn.cjs\";\nimport * as ns from \"./fn.cjs\";\nimport d, { count } from \"./dep.cjs\";\nexport { fn, ns, d, count };\n",
+        "main.ts": "import * as before from \"./before\";\nimport * as after from \"./after\";\nimport { bump } from \"./dep.cjs\";\nconst show = require(\"./show.cjs\");\nshow(\"before\", before);\nshow(\"after\", after);\nbump();\nshow(\"count after bump\", [before.count, after.count]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "before = {(__esModule), fn: [function fn]{extra: \"extra\", self: [function anonymous]}, ns: {length: 0, name: \"fn\", prototype: {...}, extra: \"extra\", self: [function anonymous], default: [function fn]{...}}, named: \"named\", alias: \"named\", fnAgain: [function fn]{extra: \"extra\", self: [function anonymous]}, count: 0}\nafter = {(__esModule), fn: [function fn]{extra: \"extra\", self: [function anonymous]}, ns: {length: 0, name: \"fn\", prototype: {...}, extra: \"extra\", self: [function anonymous], default: [function fn]{...}}, d: \"the default\", count: 0}\ncount after bump = [1, 1]\n",
+        "noEsModuleInterop": "before = {(__esModule), fn: undefined, ns: [function fn]{extra: \"extra\", self: [function anonymous]}, named: \"named\", alias: \"named\", fnAgain: undefined, count: 0}\nafter = {(__esModule), fn: undefined, ns: [function fn]{extra: \"extra\", self: [function anonymous]}, d: \"the default\", count: 0}\ncount after bump = [1, 1]\n"
+      }
+    },
+    {
+      "name": "circular imports",
+      "files": {
+        "a.ts": "import { seen } from \"./b\";\nexport const constA = \"constA\";\nexport function fnA() { return \"fnA\"; }\nexport default function defA() { return \"defA\"; }\nexport class ClassA {}\nexport let letA = \"letA\";\nconst show = require(\"./show.cjs\");\nshow(\"b saw\", seen);\n",
+        "b.ts": "import * as a from \"./a\";\nimport defA, { fnA } from \"./a\";\nexport const seen = {\n  keys: Object.keys(a),\n  constA: typeof a.constA,\n  fnA: typeof fnA,\n  defA: typeof defA,\n  ClassA: typeof a.ClassA,\n  letA: typeof a.letA,\n};\n",
+        "main.ts": "import { constA } from \"./a\";\nconsole.log(\"main\", constA);\n"
+      },
+      "expected": {
+        "esModuleInterop": "b saw = {keys: [\"constA\", \"ClassA\", \"letA\", \"fnA\", \"default\"], constA: \"undefined\", fnA: \"function\", defA: \"function\", ClassA: \"undefined\", letA: \"undefined\"}\nmain constA\n",
+        "noEsModuleInterop": "b saw = {keys: [\"constA\", \"ClassA\", \"letA\", \"fnA\", \"default\"], constA: \"undefined\", fnA: \"function\", defA: \"function\", ClassA: \"undefined\", letA: \"undefined\"}\nmain constA\n"
+      }
+    },
+    {
+      "name": "top-level this",
+      "files": {
+        "dep.cjs": "exports.x = \"x\";\n",
+        "main.ts": "import { x } from \"./dep.cjs\";\nconst show = require(\"./show.cjs\");\nshow(\"typeof this\", typeof this);\nconst arrowThis = () => this;\nshow(\"arrow this\", typeof arrowThis());\nfunction inner(this: any) { return this; }\nshow(\"function this\", typeof inner());\nshow(\"x\", x);\n"
+      },
+      "expected": {
+        "esModuleInterop": "typeof this = \"object\"\narrow this = \"object\"\nfunction this = \"undefined\"\nx = \"x\"\n",
+        "noEsModuleInterop": "typeof this = \"object\"\narrow this = \"object\"\nfunction this = \"undefined\"\nx = \"x\"\n"
+      }
+    },
+    {
+      "name": "references in every position",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "lib.ts": "export let x = \"x\";\nexport function setX() { x = \"x2\"; }\n",
+        "main.ts": "import fn, { extra } from \"./fn.cjs\";\nimport { x, setX } from \"./lib\";\nexport const exported = \"e\";\nexport let mutable = \"m\";\nconst show = require(\"./show.cjs\");\nshow(\"shorthand\", { fn, extra, x, exported, mutable });\nshow(\"template\", `${extra} ${x}`);\nshow(\"typeof\", [typeof fn, typeof extra, typeof x]);\nclass K { m() { return extra; } static s = extra; [extra] = 1; }\nshow(\"class\", [new K().m(), K.s, Object.keys(new K())]);\nfunction param(extra: string) { return extra; }\nshow(\"parameter shadows\", param(\"param\"));\nshow(\"default parameter\", ((a = extra) => a)());\nconst getX = () => x;\nsetX();\nshow(\"live in closure\", [getX(), { x }]);\nmutable = \"m2\";\nshow(\"export let shorthand after write\", { mutable });\n"
+      },
+      "expected": {
+        "esModuleInterop": "shorthand = {fn: [function fn]{extra: \"extra\", self: [function anonymous]}, extra: \"extra\", x: \"x\", exported: \"e\", mutable: \"m\"}\ntemplate = \"extra x\"\ntypeof = [\"function\", \"string\", \"string\"]\nclass = [\"extra\", \"extra\", [\"extra\"]]\nparameter shadows = \"param\"\ndefault parameter = \"extra\"\nlive in closure = [\"x2\", {x: \"x2\"}]\nexport let shorthand after write = {mutable: \"m2\"}\n",
+        "noEsModuleInterop": "shorthand = {fn: undefined, extra: \"extra\", x: \"x\", exported: \"e\", mutable: \"m\"}\ntemplate = \"extra x\"\ntypeof = [\"undefined\", \"string\", \"string\"]\nclass = [\"extra\", \"extra\", [\"extra\"]]\nparameter shadows = \"param\"\ndefault parameter = \"extra\"\nlive in closure = [\"x2\", {x: \"x2\"}]\nexport let shorthand after write = {mutable: \"m2\"}\n"
+      }
+    },
+    {
+      "name": "module object shape",
+      "files": {
+        "a.ts": "export const fromA = \"fromA\";\n",
+        "lib.ts": "export const c = 1;\nexport let l = 2;\nexport function f() {}\nexport class K {}\nexport default \"d\";\nexport { fromA } from \"./a\";\nexport * from \"./a\";\nlet local = 3;\nexport { local, local as alias };\n",
+        "main.ts": "const lib = require(\"./lib\");\nconst show = require(\"./show.cjs\");\nshow(\"keys\", Object.keys(lib));\nshow(\"__esModule\", lib.__esModule);\nshow(\"kinds\", Object.keys(lib).map((k: string) => k + \":\" + (\"get\" in Object.getOwnPropertyDescriptor(lib, k)! ? \"get\" : \"value\")));\nimport \"./lib\";\n"
+      },
+      "expected": {
+        "esModuleInterop": "keys = [\"c\", \"l\", \"K\", \"fromA\", \"local\", \"alias\", \"f\", \"default\"]\n__esModule = true\nkinds = [\"c:value\", \"l:value\", \"K:value\", \"fromA:get\", \"local:value\", \"alias:value\", \"f:value\", \"default:value\"]\n",
+        "noEsModuleInterop": "keys = [\"c\", \"l\", \"K\", \"fromA\", \"local\", \"alias\", \"f\", \"default\"]\n__esModule = true\nkinds = [\"c:value\", \"l:value\", \"K:value\", \"fromA:get\", \"local:value\", \"alias:value\", \"f:value\", \"default:value\"]\n"
+      }
+    },
+    {
+      "name": "empty export list",
+      "files": {
+        "lib.ts": "export {};\nconsole.log(\"lib runs\");\n",
+        "main.ts": "import * as lib from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"lib\", lib);\nshow(\"__esModule\", (lib as any).__esModule);\n"
+      },
+      "expected": {
+        "esModuleInterop": "lib runs\nlib = {(__esModule)}\n__esModule = true\n",
+        "noEsModuleInterop": "lib runs\nlib = {(__esModule)}\n__esModule = true\n"
+      }
+    },
+    {
+      "name": "string export names",
+      "files": {
+        "lib.ts": "const value = 1;\nlet live = \"before\";\nexport function change() { live = \"after\"; }\nexport { value as \"a-b\", live as \"with space\" };\n",
+        "main.ts": "import { \"a-b\" as ab, \"with space\" as spaced, change } from \"./lib\";\nimport * as lib from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"named\", [ab, spaced]);\nchange();\nshow(\"after change\", [spaced, lib[\"with space\"]]);\nshow(\"lib\", lib);\n"
+      },
+      "expected": {
+        "esModuleInterop": "named = [1, \"before\"]\nafter change = [\"after\", \"after\"]\nlib = {(__esModule), a-b: 1, with space: \"after\", change: [function change]}\n",
+        "noEsModuleInterop": "named = [1, \"before\"]\nafter change = [\"after\", \"after\"]\nlib = {(__esModule), a-b: 1, with space: \"after\", change: [function change]}\n"
+      }
+    },
+    {
+      "name": "helper name collisions",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "b.cjs": "exports.fromB = \"fromB\";\n",
+        "main.ts": "import fn from \"./fn.cjs\";\nimport fn2, { extra } from \"./fn.cjs\";\nimport * as ns from \"./fn.cjs\";\nexport * from \"./b.cjs\";\nconst __importDefault = \"user importDefault\";\nfunction __importStar() { return \"user importStar\"; }\nlet __createBinding = \"user createBinding\", __setModuleDefault = \"user setModuleDefault\";\nvar __exportStar = \"user exportStar\";\nconst __importDynamic = \"user importDynamic\";\nconst show = require(\"./show.cjs\");\nshow(\"imports\", [fn, fn2, extra, typeof ns]);\nshow(\"user bindings\", [__importDefault, __importStar(), __createBinding, __setModuleDefault, __exportStar, __importDynamic]);\nshow(\"export star\", require(\"./main\").fromB);\nimport(\"./fn.cjs\").then((m) => show(\"dynamic\", typeof m.default));\n"
+      },
+      "expected": {
+        "esModuleInterop": "imports = [[function fn]{extra: \"extra\", self: [function anonymous]}, [function fn]{extra: \"extra\", self: [function anonymous]}, \"extra\", \"object\"]\nuser bindings = [\"user importDefault\", \"user importStar\", \"user createBinding\", \"user setModuleDefault\", \"user exportStar\", \"user importDynamic\"]\nexport star = \"fromB\"\ndynamic = \"function\"\n",
+        "noEsModuleInterop": "imports = [undefined, undefined, \"extra\", \"function\"]\nuser bindings = [\"user importDefault\", \"user importStar\", \"user createBinding\", \"user setModuleDefault\", \"user exportStar\", \"user importDynamic\"]\nexport star = \"fromB\"\ndynamic = \"undefined\"\n"
+      }
+    },
+    {
+      "name": "generated name collisions",
+      "files": {
+        "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
+        "lib.ts": "const _a = \"user _a\";\nconst default_1 = \"user default_1\";\nexport let count = 0;\nexport function next() { return [count++, _a, default_1]; }\nexport default function () { return \"anonymous\"; }\n",
+        "main.ts": "import fn from \"./fn.cjs\";\nimport d, { next, count } from \"./lib\";\nconst fn_cjs_1 = \"user fn_cjs_1\";\nconst lib_1 = \"user lib_1\";\nconst show = require(\"./show.cjs\");\nshow(\"imports\", [fn, d, d()]);\nshow(\"next\", next());\nshow(\"count\", count);\nshow(\"user bindings\", [fn_cjs_1, lib_1]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "imports = [[function fn]{extra: \"extra\", self: [function anonymous]}, [function default_2], \"anonymous\"]\nnext = [0, \"user _a\", \"user default_1\"]\ncount = 1\nuser bindings = [\"user fn_cjs_1\", \"user lib_1\"]\n",
+        "noEsModuleInterop": "imports = [undefined, [function default_2], \"anonymous\"]\nnext = [0, \"user _a\", \"user default_1\"]\ncount = 1\nuser bindings = [\"user fn_cjs_1\", \"user lib_1\"]\n"
+      }
+    }
+  ]
+}

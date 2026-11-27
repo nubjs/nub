@@ -435,6 +435,16 @@ function safeRequireResolve(specifier) {
 // distinct helpers (#795).
 const vendoredResolutions = new Map();
 
+function vendoredUrl(specifier) {
+  let url = vendoredResolutions.get(specifier);
+  if (url === undefined) {
+    const resolved = safeRequireResolve(specifier);
+    url = resolved ? pathToFileURL(resolved).href : null;
+    vendoredResolutions.set(specifier, url);
+  }
+  return url;
+}
+
 export function barePkg(specifier) {
   return specifier.startsWith("@")
     ? specifier.split("/").slice(0, 2).join("/")
@@ -560,12 +570,7 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
   // 1. Vendored packages (e.g. @oxc-project/runtime).
   const bare = barePkg(specifier);
   if (VENDORED_PACKAGES.has(bare)) {
-    let url = vendoredResolutions.get(specifier);
-    if (url === undefined) {
-      const resolved = safeRequireResolve(specifier);
-      url = resolved ? pathToFileURL(resolved).href : null;
-      vendoredResolutions.set(specifier, url);
-    }
+    const url = vendoredUrl(specifier);
     if (url) return { url, shortCircuit: true };
   }
 
@@ -696,10 +701,10 @@ export async function resolveRedirectAsync(redirect, context, next) {
 
 // CommonJS `require()` resolution for the compat-tier Module._resolveFilename
 // patch. Returns an absolute file path for a require specifier nub should
-// redirect (tsconfig `paths`, extensionless `.ts`, `.js`→`.ts` swap), or null to
-// defer to Node's resolver. Mirrors resolveSpec step 3 but returns a path (not
-// a URL) and never handles clobber/vendored/builtin — those are import-only, and
-// a clobber's data: URL can't be a require target. `parentPath` is the requiring
+// redirect (tsconfig `paths`, extensionless `.ts`, `.js`→`.ts` swap, Nub's
+// vendored helpers), or null to defer to Node's resolver. Mirrors resolveSpec
+// steps 1 and 3 but returns a path (not a URL) and never handles clobber/builtin
+// — those are import-only, and a clobber's data: URL can't be a require target. `parentPath` is the requiring
 // file's absolute path (from the CJS parent Module), or null for the entry.
 // A `{ packages, otherwise }` object is the native `paths` redirect: the caller asks
 // Node for each package's self-reference from inside it (see `resolveRedirect`).
@@ -708,9 +713,22 @@ export function resolveCjsPath(request, parentPath) {
       module.isBuiltin(request)) {
     return null;
   }
+  // Nub's own transpile helpers, which a file compiled to CommonJS `require()`s:
+  // from Nub's distribution, as `resolveSpec` does for `import`, since the
+  // standalone runner puts nothing on NODE_PATH. A dependency's own `require()`
+  // of the package keeps the copy it would get on plain Node.
+  // Nub's own `require.resolve` of it comes back through here with a parent
+  // inside the runtime dir, which Node's resolver answers.
+  if (VENDORED_PACKAGES.has(barePkg(request)) && parentPath) {
+    const parentURL = pathToFileURL(parentPath).href;
+    if (!isNubInternalParent(parentURL) && !isDependency(parentURL)) {
+      const url = vendoredUrl(request);
+      if (url) return fileURLToPath(url);
+    }
+  }
   // The SAME native additive resolver as resolveSpec, returning an absolute path
-  // (not a URL). Vendored/clobber/builtin are import-only and never reach here. A
-  // null result (node_modules / `exports` / a plain bare package) falls through to
+  // (not a URL). Clobber/builtin are import-only and never reach here. A null
+  // result (node_modules / `exports` / a plain bare package) falls through to
   // Node's CJS resolver — the compat boundary.
   return resolveTs(request, parentPath || "");
 }

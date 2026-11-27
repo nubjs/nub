@@ -1415,6 +1415,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // no handler for falls back to `.js` via `findLongestRegisteredExtension`, so this
   // reproduces plain Node's own error instead of inventing one nub would have to own.
   const nativeJs = module_._extensions[".js"];
+  const COMPILE_AS_COMMONJS = /^v20\.1[78]\./.test(process.version) ? false : "commonjs";
   const transpileExtension = (mod, filename) => {
     if (core.isDependency(pathToFileURL(filename).href)) {
       return ReflectApply(nativeJs, module_._extensions, [mod, filename]);
@@ -1425,8 +1426,9 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     // 22.12–22.14 run their own ES-module syntax detection on a `.ts` it has no rule
     // for, and load `export` in a `"type": "commonjs"` package as an ES module —
     // where every other tier, and Node's own type stripping, follows the package
-    // type and throws. Node versions without the parameter ignore it.
-    mod._compile(source, filename, "commonjs");
+    // type and throws. Node versions without the parameter ignore it, and 20.17–20.18
+    // take a `loadAsESM` boolean there, which the string would set.
+    mod._compile(source, filename, COMPILE_AS_COMMONJS);
   };
   // Serve a data document the way the ESM load hook's `dataExtsFor` branch does.
   // Without any handler Node has none for `.yaml`/`.toml`/`.json5`/`.jsonc`/
@@ -2393,9 +2395,10 @@ function fireEntryLoad(entry) {
 // port that worker announces the entry's load on, or nothing. Created only when the
 // pass will have to wait for that announcement, because the port is a handle the
 // process carries until the entry loads and an ordinary run should carry nothing.
-function loaderWorkerOptions() {
+// `data` is merged into what the worker's `initialize` receives.
+function loaderWorkerOptions(data) {
   const entry = serveEntry;
-  if (entry === null || !entry.mayFollow) return undefined;
+  if (entry === null || !entry.mayFollow) return data ? { data } : undefined;
   const { MessageChannel } = getBuiltin("node:worker_threads");
   const channel = new MessageChannel();
   // The worker keeps the main-resolve note itself and announces only a load after
@@ -2409,7 +2412,7 @@ function loaderWorkerOptions() {
   channel.port1.unref();
   entry.channel = channel;
   return {
-    data: { entryLoad: { port: channel.port2, urls: [...entry.urls] } },
+    data: { ...data, entryLoad: { port: channel.port2, urls: [...entry.urls] } },
     transferList: [channel.port2],
   };
 }

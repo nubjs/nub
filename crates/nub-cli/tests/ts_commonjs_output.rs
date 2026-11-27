@@ -118,7 +118,16 @@ fn module_commonjs_compiles_imports_to_require() {
         "side.ts",
         "const before: number = 1;\n\n\n\nimport \"./boom\";\n",
     );
-    write(&root, "boom.ts", "throw new Error(\"boom\");\n");
+    write(
+        &root,
+        "boom.ts",
+        "Error.stackTraceLimit = 50;\nthrow new Error(\"boom\");\n",
+    );
+    write(
+        &root,
+        "using.ts",
+        "import { sep } from \"node:path\";\nusing r = { [Symbol.dispose]() { console.log(\"disposed\"); } };\nconsole.log(typeof sep);\n",
+    );
 
     // `bump()` returns the old count, and the import reads the new one live.
     let first = "app function true fn default named 0 1";
@@ -138,6 +147,63 @@ fn module_commonjs_compiles_imports_to_require() {
         let out = run(&root, Some(&node_dir), false, "side.ts");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("side.ts:5:1)"), "{key}: {stderr}");
+        // The `require()` of Nub's `using` helper resolves from Nub's runtime, which
+        // the standalone loader keeps out of the project's reach.
+        if cfg!(unix) {
+            let out = stdout(&run(&root, Some(&node_dir), true, "using.ts"), key);
+            assert_eq!(out, "string\ndisposed", "{key}");
+        }
+    }
+}
+
+/// A CommonJS `.ts` entry on the compat tier (22.13) `require()`s an ES-module-only
+/// package, compiled from `import` and written as `require` alike. Node runs the entry
+/// with the loader's source through a wrapper whose `require()` of an ES module fails
+/// on 20.19-22.14, so the entry has to reach Node's own CommonJS loader.
+#[test]
+fn a_commonjs_entry_requires_an_es_module_on_the_compat_tier() {
+    let Some(node_dir) = std::env::var_os("TEST_NODE_BIN_22_13_0").map(PathBuf::from) else {
+        eprintln!("skipping: TEST_NODE_BIN_22_13_0 is not set");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", "{}");
+    write(
+        root,
+        "tsconfig.json",
+        r#"{"compilerOptions":{"module":"commonjs","esModuleInterop":true}}"#,
+    );
+    write(
+        root,
+        "node_modules/esm-only/package.json",
+        r#"{"type":"module","exports":"./index.js"}"#,
+    );
+    write(
+        root,
+        "node_modules/esm-only/index.js",
+        "export const named = 'named';\nexport default 'default';\n",
+    );
+    write(
+        root,
+        "imports.ts",
+        "import esm, { named } from \"esm-only\";\nconsole.log(named, esm, require.main === module);\n",
+    );
+    write(
+        root,
+        "requires.ts",
+        "const esm = require(\"esm-only\");\nconsole.log(esm.named, esm.default, require.main === module);\n",
+    );
+    let mut legs = vec![false];
+    if cfg!(unix) {
+        legs.push(true);
+    }
+    for entry in ["imports.ts", "requires.ts"] {
+        for &standalone in &legs {
+            let out = run(root, Some(&node_dir), standalone, entry);
+            let what = format!("{entry}, standalone: {standalone}");
+            assert_eq!(stdout(&out, &what), "named default true", "{what}");
+        }
     }
 }
 
