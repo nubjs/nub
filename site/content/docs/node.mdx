@@ -153,7 +153,7 @@ Make `node` itself resolve through Nub, so a machine with no Node installed can 
 ```console
 $ nub node shim
 node shim in /Users/you/.local/share/nub/node-shim (created)
-  `node` now resolves through nub (version management only — no
+  the shimmed `node` runs through nub (version management only — no
   augmentation; run `nub` for that)
   added /Users/you/.local/share/nub/node-shim to PATH in /Users/you/.zshrc
   restart your shell, or run: source /Users/you/.zshrc
@@ -161,7 +161,7 @@ node shim in /Users/you/.local/share/nub/node-shim (created)
 
 The shimmed `node` resolves and provisions the version by the [precedence above](#version-precedence) and adds nothing else. So `node app.ts` type-strips as stock Node does, while `nub app.ts` transpiles it.
 
-The link lives in `$XDG_DATA_HOME/nub/node-shim`, or `~/.local/share/nub/node-shim` when that variable is unset. That directory goes first on your PATH, so a Node you install later is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade`.
+The link lives in `$XDG_DATA_HOME/nub/node-shim`, or `~/.local/share/nub/node-shim` when that variable is unset. That directory goes first on your PATH, so a Node you install later is shadowed until you unshim. Re-run `nub node shim` after `nub upgrade`. Pass `--no-modify-path` to leave your shell config file alone, and `--modify-path` to edit it again. Nub remembers the choice across re-runs.
 
 ```console
 $ nub node unshim

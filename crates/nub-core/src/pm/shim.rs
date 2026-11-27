@@ -190,8 +190,29 @@ pub fn route_installs_enabled(shim_dir: &Path) -> bool {
 
 /// Write or remove the [`ROUTE_INSTALLS_MARKER`]. Idempotent either way.
 pub fn set_route_installs(shim_dir: &Path, on: bool) -> Result<()> {
-    let marker = shim_dir.join(ROUTE_INSTALLS_MARKER);
-    if on {
+    set_marker(shim_dir, ROUTE_INSTALLS_MARKER, on)
+}
+
+/// Marker for `--no-modify-path`: the shim install leaves shell config files
+/// alone. Same reasoning as [`ROUTE_INSTALLS_MARKER`]: it lives in the shim dir,
+/// so a re-run after `nub upgrade` keeps the choice without the flag, and an
+/// unshim forgets it. Shared by the PM shims and the `node` shim, each in its
+/// own dir.
+pub const NO_MODIFY_PATH_MARKER: &str = ".no-modify-path";
+
+/// Whether the shim install in `shim_dir` edits shell config files.
+pub fn modify_path_enabled(shim_dir: &Path) -> bool {
+    !shim_dir.join(NO_MODIFY_PATH_MARKER).is_file()
+}
+
+/// Record `--modify-path` (`on`) or `--no-modify-path` for `shim_dir`.
+pub fn set_modify_path(shim_dir: &Path, on: bool) -> Result<()> {
+    set_marker(shim_dir, NO_MODIFY_PATH_MARKER, !on)
+}
+
+fn set_marker(shim_dir: &Path, name: &str, present: bool) -> Result<()> {
+    let marker = shim_dir.join(name);
+    if present {
         std::fs::create_dir_all(shim_dir)
             .with_context(|| format!("creating shim dir {}", shim_dir.display()))?;
         std::fs::write(&marker, "").with_context(|| format!("writing {}", marker.display()))?;
@@ -1271,17 +1292,8 @@ pub struct ShimBlockSpec {
 /// A profile is never given a second copy of this block.
 pub fn add_global_bin_path_block(dir: &Path) -> Result<ProfileOutcome> {
     let home = dirs_next::home_dir().context("cannot locate the home directory")?;
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let shell = Path::new(&shell)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "bash".to_string());
-    let xdg = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from);
     let spec = global_bin_block(dir, &home);
-    add_path_block_for(&shell, &home, xdg.as_deref(), &spec.inner)
+    add_path_block_current_shell(&spec.inner)
 }
 
 /// Outcome of [`add_path_block`], for the CLI's "what changed" report.
@@ -1300,6 +1312,43 @@ pub enum ProfileOutcome {
     /// No known profile exists / is writable for this shell — the CLI prints
     /// `line` as "add this to your shell config yourself" and exits 0.
     Manual { line: String },
+}
+
+/// `$SHELL`'s basename, or `bash` when it is unset or empty (install.sh parity:
+/// the CI/container default, not a Manual bailout).
+fn current_shell() -> String {
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    Path::new(&shell)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "bash".to_string())
+}
+
+/// `block`'s PATH line in the current shell's dialect, for the CLI to print
+/// when it was told not to write one.
+pub(crate) fn path_line_for_current_shell(block: &ShimBlock) -> String {
+    if current_shell() == "fish" {
+        block.fish_line.to_string()
+    } else {
+        block.posix_line.to_string()
+    }
+}
+
+/// The PM shims' PATH line, printed in place of the profile edit under
+/// `nub pm shim --no-modify-path`.
+pub fn path_line() -> String {
+    path_line_for_current_shell(&PM_SHIM_BLOCK)
+}
+
+/// Wire `block` into the profiles of the shell in `$SHELL`.
+pub(crate) fn add_path_block_current_shell(block: &ShimBlock) -> Result<ProfileOutcome> {
+    let shell = current_shell();
+    let home = dirs_next::home_dir().context("cannot locate the home directory")?;
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    add_path_block_for(&shell, &home, xdg.as_deref(), block)
 }
 
 /// Append the marked PATH block to ALL of the current shell's profile files —
@@ -1321,19 +1370,7 @@ pub enum ProfileOutcome {
 ///     fish invocation — no interactive/login split), created if missing.
 ///   - anything else → Manual.
 pub fn add_path_block() -> Result<ProfileOutcome> {
-    let home = dirs_next::home_dir().context("cannot locate the home directory")?;
-    let shell = std::env::var("SHELL").unwrap_or_default();
-    let shell = Path::new(&shell)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .filter(|s| !s.is_empty())
-        // install.sh parity: an unset/empty $SHELL is treated as bash (the
-        // CI/container default), not a Manual bailout.
-        .unwrap_or_else(|| "bash".to_string());
-    let xdg = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from);
-    add_path_block_for(&shell, &home, xdg.as_deref(), &PM_SHIM_BLOCK)
+    add_path_block_current_shell(&PM_SHIM_BLOCK)
 }
 
 /// [`add_path_block`] with the environment made explicit (the testable body).

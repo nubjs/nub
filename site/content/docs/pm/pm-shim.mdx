@@ -19,6 +19,13 @@ The shims live in the first of these directories:
 
 The shims do not choose the manager; the `packageManager` pin in `package.json` does. Set it with [`nub pm use`](/docs/pm#nub-pm-use), which never touches your PATH.
 
+Installing the shims also writes a line into your shell config file, such as `~/.zshrc`, that adds their directory to PATH. Pass `--no-modify-path` to skip that edit and print the line instead:
+
+```sh
+nub pm shim --no-modify-path   # remembered for later re-runs
+nub pm shim --modify-path      # edit the file again
+```
+
 ## Strict by default
 
 In a pinned project, a shim refuses to run a different package manager, which would write a competing lockfile and `node_modules`. The error names the command to run instead:
