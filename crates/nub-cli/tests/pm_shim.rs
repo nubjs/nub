@@ -734,6 +734,66 @@ fn pm_shim_and_unshim_round_trip_against_a_temp_home() {
     assert_eq!(code4, 0, "a second unshim is a clean no-op");
 }
 
+#[test]
+fn no_modify_path_is_remembered_until_modify_path_turns_it_back_on() {
+    let home = tmp("home-no-modify");
+    let zshrc = home.join(".zshrc");
+    let original = "# mine\nexport PATH=\"$HOME/my/shims:$PATH\"\n";
+    std::fs::write(&zshrc, original).unwrap();
+    let env = [("HOME", home.to_str().unwrap()), ("SHELL", "/bin/zsh")];
+
+    let (stdout, stderr, code) = run(
+        &nub_binary(),
+        &["pm", "shim", "--no-modify-path"],
+        &home,
+        &env,
+    );
+    assert_eq!(code, 0, "nub pm shim must succeed; stderr:\n{stderr}");
+    assert!(
+        home.join(".local/share/nub/shims/pnpm").is_file(),
+        "the shims still land; stdout:\n{stdout}"
+    );
+    assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), original);
+    assert!(
+        !home.join(".zshenv").exists(),
+        ".zshenv must not be created"
+    );
+    assert!(
+        stdout.contains("--no-modify-path") && stdout.contains("/nub/shims:$PATH"),
+        "the report prints the line to add by hand, got:\n{stdout}"
+    );
+
+    // A plain re-run, as after `nub upgrade`, keeps the choice.
+    let (_, stderr, code) = run(&nub_binary(), &["pm", "shim"], &home, &env);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), original);
+    assert!(!home.join(".zshenv").exists());
+
+    let (_, stderr, code) = run(&nub_binary(), &["pm", "shim", "--modify-path"], &home, &env);
+    assert_eq!(code, 0, "stderr:\n{stderr}");
+    assert!(
+        std::fs::read_to_string(&zshrc)
+            .unwrap()
+            .contains("# nub shims"),
+        "--modify-path writes the block again"
+    );
+
+    let (_, stderr, code) = run(
+        &nub_binary(),
+        &["node", "shim", "--no-modify-path"],
+        &home,
+        &env,
+    );
+    assert_eq!(code, 0, "nub node shim must succeed; stderr:\n{stderr}");
+    assert!(home.join(".local/share/nub/node-shim/node").is_file());
+    assert!(
+        !std::fs::read_to_string(&zshrc)
+            .unwrap()
+            .contains("# nub node shim"),
+        "the node shim block must not be written"
+    );
+}
+
 /// A project whose lockfile is npm's, with one `file:` dependency and no
 /// registry package, so the engine installs it with the registry dead.
 fn npm_link_only_project(work: &Path) -> PathBuf {

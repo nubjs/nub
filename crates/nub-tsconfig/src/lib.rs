@@ -120,6 +120,8 @@ struct Loaded {
     content_mappers: Vec<ContentMapper>,
     /// This config's own project `references`, resolved to config file paths.
     references: Vec<String>,
+    /// `outDir` and its source root, see [`emit_dirs`].
+    emit_dirs: Option<EmitDirs>,
     /// Problems found while parsing this config, already rendered for a user.
     /// Empty on a clean parse. A config that reaches here with entries still
     /// carries whatever options DID resolve — see [`build_loaded`].
@@ -212,6 +214,44 @@ pub fn load_tsconfig(dir: &str, explicit: Option<&str>) -> TsconfigResult {
 /// coerced — a malformed value should narrow resolution, never invent a condition.
 pub fn custom_conditions(dir: &str, explicit: Option<&str>) -> Vec<String> {
     load_for_dir(dir, explicit).custom_conditions.clone()
+}
+
+/// Where one tsconfig emits JavaScript, and the source directory that output mirrors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmitDirs {
+    /// The merged `outDir`, absolute.
+    pub out_dir: String,
+    /// The merged `rootDir`, absolute. Without one it is the config's own directory,
+    /// which is `tsc`'s default from TypeScript 6.0 on and what its resolver assumes
+    /// when it maps an output path back to source (`tryLoadInputFileForPath`).
+    /// TypeScript 5.x inferred the common directory of the input files instead, and
+    /// 6.0 made that layout an error unless `rootDir` names it.
+    pub root_dir: String,
+}
+
+/// The emit directories of the config file at `config_path` (not the one governing a
+/// directory), with `extends` followed. `None` when it sets no `outDir` or will not
+/// parse. An inherited `outDir` or `rootDir` resolves against the config that
+/// declares it, as in `tsc`.
+pub fn emit_dirs(config_path: &str) -> Option<EmitDirs> {
+    load_for_dir(&parent_dir(config_path), Some(config_path))
+        .emit_dirs
+        .clone()
+}
+
+fn read_emit_dirs(co: &Map<String, Value>, config_path: &str) -> Option<EmitDirs> {
+    let dir = parent_dir(config_path);
+    // Both are relative to `dir` by now: `parse_tsconfig` and the `extends` merge
+    // rewrite them that way, `${configDir}` included.
+    let out_dir = co.get("outDir").and_then(Value::as_str)?;
+    let root_dir = co.get("rootDir").and_then(Value::as_str).map_or_else(
+        || normalize_lexical(Path::new(&dir)),
+        |r| path_resolve(&dir, r),
+    );
+    Some(EmitDirs {
+        out_dir: path_resolve(&dir, out_dir),
+        root_dir,
+    })
 }
 
 /// The effective `contentMappers` of the tsconfig governing `dir`, in declaration
@@ -456,6 +496,7 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
             custom_conditions: Vec::new(),
             content_mappers: Vec::new(),
             references: Vec::new(),
+            emit_dirs: None,
             diagnostics: Vec::new(),
         };
     };
@@ -478,6 +519,7 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
                 custom_conditions: Vec::new(),
                 content_mappers: Vec::new(),
                 references: Vec::new(),
+                emit_dirs: None,
                 diagnostics,
             };
         }
@@ -510,6 +552,9 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
 
     let content_mappers = parse_content_mappers(&parsed);
     let references = project_references(&parsed, &config_path);
+    let emit_dirs = co
+        .as_ref()
+        .and_then(|map| read_emit_dirs(map, &config_path));
 
     Loaded {
         path: Some(slash(&config_path)),
@@ -519,6 +564,7 @@ fn build_loaded(dir: &str, explicit: Option<&str>, report: Report) -> Loaded {
         custom_conditions,
         content_mappers,
         references,
+        emit_dirs,
         diagnostics,
     }
 }
@@ -1700,6 +1746,62 @@ mod tests {
             !super::lists(&spell("a/tsconfig.json"), &spell("b/tsconfig.json")),
             "file symlinks in different directories are different configs"
         );
+    }
+
+    /// `outDir` and `rootDir` resolve against the config that declares them, as in
+    /// `tsc`: an inherited `outDir` names the BASE's directory, a `${configDir}` one
+    /// names the consuming package's, and a missing `rootDir` is the config's own
+    /// directory (TypeScript 6+).
+    #[test]
+    fn emit_dirs_resolve_against_the_declaring_config() {
+        let dir = project(&[
+            ("tsconfig.json", r#"{"compilerOptions":{"outDir":"build"}}"#),
+            (
+                "base.json",
+                r#"{"compilerOptions":{"outDir":"${configDir}/dist","rootDir":"${configDir}/src"}}"#,
+            ),
+            (
+                "inherits/tsconfig.json",
+                r#"{"extends":"../tsconfig.json","compilerOptions":{"rootDir":"src"}}"#,
+            ),
+            (
+                "interpolated/tsconfig.json",
+                r#"{"extends":"../base.json"}"#,
+            ),
+            (
+                "plain/tsconfig.json",
+                r#"{"compilerOptions":{"outDir":"./out"}}"#,
+            ),
+            (
+                "none/tsconfig.json",
+                r#"{"compilerOptions":{"strict":true}}"#,
+            ),
+        ]);
+        let root = dir.path().to_string_lossy().into_owned();
+        let at = |rel: &str| super::path_resolve(&root, rel);
+        let dirs = |rel: &str| super::emit_dirs(&at(&format!("{rel}/tsconfig.json")));
+
+        let inherits = dirs("inherits").expect("an inherited outDir");
+        assert_eq!(
+            inherits.out_dir,
+            at("build"),
+            "inherited outDir is the base's"
+        );
+        assert_eq!(inherits.root_dir, at("inherits/src"));
+
+        let interpolated = dirs("interpolated").expect("a ${configDir} outDir");
+        assert_eq!(interpolated.out_dir, at("interpolated/dist"));
+        assert_eq!(interpolated.root_dir, at("interpolated/src"));
+
+        let plain = dirs("plain").expect("an outDir without rootDir");
+        assert_eq!(plain.out_dir, at("plain/out"));
+        assert_eq!(
+            plain.root_dir,
+            at("plain"),
+            "rootDir defaults to the config's dir"
+        );
+
+        assert_eq!(dirs("none"), None, "no outDir, nothing to map");
     }
 
     /// The memo is keyed by DIRECTORY, so it is unbounded by construction — and it

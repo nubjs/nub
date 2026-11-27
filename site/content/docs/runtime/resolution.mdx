@@ -1,6 +1,6 @@
 ---
 title: Module resolution
-description: The TypeScript-aware resolution Nub layers on top of Node, covering tsconfig path aliases and base URL, extends chains, extensionless imports, and the JavaScript-to-TypeScript extension swap.
+description: The TypeScript-aware resolution Nub layers on top of Node, covering tsconfig path aliases and base URL, extends chains, extensionless imports, the JavaScript-to-TypeScript extension swap, and workspace packages that haven't been built.
 ---
 
 If your editor's Go-to-Definition follows an import and `tsc` accepts it, Nub resolves it the same way at runtime. No `tsconfig-paths` package, no build step.
@@ -16,7 +16,7 @@ import { config } from "./config";
 import { handler } from "./handler.js";
 ```
 
-Everything else goes to Node's own resolver unchanged: package names, `exports` and `imports` maps, export conditions, and every subpath into a dependency that declares `exports`.
+Everything else goes to Node's own resolver: package names, `exports` and `imports` maps, export conditions, and every subpath into a dependency that declares `exports`.
 
 ## Settings from `tsconfig.json`
 
@@ -127,6 +127,43 @@ The probe order is fixed for subpaths:
 JavaScript comes first because Nub does not transpile inside `node_modules`, where a published package's `.ts` files are unshipped source. A symlinked workspace package ships no `.js`, so the probe reaches its TypeScript.
 
 <Callout>A dependency that declares `exports` is never probed. Its map alone decides what is reachable, as on Node.</Callout>
+
+## Unbuilt workspace packages
+
+A workspace package usually points `main`, `exports` or `imports` into its tsconfig's `outDir`. Until that output is built, Nub runs the source `tsc` builds it from.
+
+```json title="packages/lib/package.json"
+{
+  "name": "@repo/lib",
+  "main": "./dist/index.js",
+  "imports": { "#utils/*": "./dist/utils/*" }
+}
+```
+
+With `"rootDir": "src"` and `"outDir": "dist"` in the package's `tsconfig.json`, each path maps from `dist` to `src`:
+
+```ts
+// packages/lib/src/index.ts
+import { createPrompt } from "@repo/lib";
+
+// inside the package: packages/lib/src/utils/format.ts
+import { format } from "#utils/format.js";
+```
+
+Only a missing file maps, so once the package is built, Node loads its output. The entry file maps too: `nub dist/index.js` runs `src/index.ts`. Extensions map as `tsc` maps them, `.js` to `.ts` or `.tsx`, `.mjs` to `.mts` and `.cjs` to `.cts`.
+
+The package's own `tsconfig.json` decides, with `extends` followed. Paths in an extended config stay relative to that config, so a base shared by every package writes them with `${configDir}`:
+
+```json title="tsconfig.base.json"
+{
+  "compilerOptions": {
+    "rootDir": "${configDir}/src",
+    "outDir": "${configDir}/dist"
+  }
+}
+```
+
+Without `rootDir`, the source root is the directory holding `tsconfig.json`, as in `tsc`. A package installed into `node_modules` never maps, while a workspace package linked there does.
 
 ## Export conditions
 
