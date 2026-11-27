@@ -142,8 +142,8 @@ export async function resolve(specifier, context, nextResolve) {
     const parent = context.parentURL;
     const parentPath = typeof parent === "string" && parent.startsWith("file:") ? fileURLToPath(parent) : "";
     const url = outDirSourceURL(err, specifier, parentPath, parent === undefined);
-    if (url) return { url, shortCircuit: true };
-    throw err;
+    if (!url) throw err;
+    try { return await nextResolve(url, nextContext); } catch { throw err; }
   }
 }
 

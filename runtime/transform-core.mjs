@@ -383,7 +383,10 @@ export function extname(url) {
   // once, and — unlike a "does this look like a scheme" test — cannot mistake a
   // Windows drive letter for one.
   if (!isFileUrl(url)) return "";
-  const path = url.includes("?") ? url.slice(0, url.indexOf("?")) : url;
+  // A literal `?` or `#` in a file URL starts the query or fragment: the path
+  // spells them `%3F` and `%23`.
+  const cut = url.search(/[?#]/);
+  const path = cut < 0 ? url : url.slice(0, cut);
   const dot = path.lastIndexOf(".");
   return dot === -1 ? "" : path.slice(dot);
 }
@@ -456,16 +459,49 @@ export function barePkg(specifier) {
 // Node's `--preserve-symlinks` decides whether a resolved module is keyed by its
 // real path or the path it was reached through, and the native resolver has to hand
 // back whichever one Node itself would — otherwise a symlinked workspace package
-// reached two ways instantiates twice. The flag arrives by argv OR `NODE_OPTIONS`,
-// and only one of those shows up in `execArgv`, so both are checked. The word
-// boundary matters: `--preserve-symlinks-main` is a DIFFERENT flag that governs only
-// the entry point.
-const PRESERVE_SYMLINKS =
-  process.execArgv.includes("--preserve-symlinks") ||
-  /(^|\s)--preserve-symlinks(\s|$)/.test(process.env.NODE_OPTIONS || "");
-const PRESERVE_SYMLINKS_MAIN =
-  process.execArgv.includes("--preserve-symlinks-main") ||
-  /(^|\s)--preserve-symlinks-main(\s|$)/.test(process.env.NODE_OPTIONS || "");
+// reached two ways instantiates twice. Node reads it as `NODE_PRESERVE_SYMLINKS=1`
+// for the default, then `NODE_OPTIONS`, then argv, the last `--preserve-symlinks` or
+// `--no-preserve-symlinks` winning; only argv shows up in `execArgv`.
+// `--preserve-symlinks-main` is a different flag that governs only the entry point.
+const PRESERVE_SYMLINKS = nodeOptionValue("preserve-symlinks",
+  process.env.NODE_PRESERVE_SYMLINKS === "1");
+
+function nodeOptionValue(name, initial) {
+  let value = initial;
+  const args = [...nodeOptionsArgs(process.env.NODE_OPTIONS || ""), ...process.execArgv];
+  for (const arg of args) {
+    if (!arg.startsWith("--")) continue;
+    const flag = arg.replace(/_/g, "-");
+    if (flag === `--${name}`) value = true;
+    else if (flag === `--no-${name}`) value = false;
+  }
+  return value;
+}
+
+// `NODE_OPTIONS` split as Node splits it: on spaces, with double quotes grouping and
+// a backslash escaping the next character inside them.
+function nodeOptionsArgs(text) {
+  const args = [];
+  let arg = null;
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    let c = text[i];
+    if (c === "\\" && quoted && i + 1 < text.length) {
+      c = text[++i];
+    } else if (c === '"') {
+      quoted = !quoted;
+      if (arg === null) arg = "";
+      continue;
+    } else if (c === " " && !quoted) {
+      if (arg !== null) args.push(arg);
+      arg = null;
+      continue;
+    }
+    arg = (arg ?? "") + c;
+  }
+  if (arg !== null) args.push(arg);
+  return args;
+}
 
 function resolveTs(specifier, parentPath) {
   if (!nubNative) return null;
@@ -750,8 +786,9 @@ export function outDirSource(err, specifier, parentPath, isEntry, lookupPaths) {
   return found && found.path;
 }
 
-// The ESM form: a URL that keeps the query and fragment of the target Node chose,
-// since they are part of the module's identity.
+// The ESM form: a URL carrying the target's query and fragment exactly as Node wrote
+// them, an empty `?` or `#` included. The caller hands it back to Node's resolver,
+// which then keys the module as it would the built file.
 export function outDirSourceURL(err, specifier, parentPath, isEntry) {
   const found = outDirTarget(err, specifier, parentPath, isEntry, null);
   return found && pathToFileURL(found.path).href + found.suffix;
@@ -772,11 +809,9 @@ function outDirTarget(err, specifier, parentPath, isEntry, lookupPaths) {
   let probe = !!isEntry;
   if (code === "ERR_MODULE_NOT_FOUND" && typeof err.url === "string") {
     if (!err.url.startsWith("file:")) return null;
-    try {
-      const url = new URL(err.url);
-      suffix = url.search + url.hash;
-      missing = fileURLToPath(url);
-    } catch { return null; }
+    const cut = err.url.search(/[?#]/);
+    if (cut >= 0) suffix = err.url.slice(cut);
+    try { missing = fileURLToPath(cut < 0 ? err.url : err.url.slice(0, cut)); } catch { return null; }
   } else if (code === "MODULE_NOT_FOUND" && (typeof err.path === "string" || isEntry)) {
     const m = CJS_NOT_FOUND.exec(String(err.message).split("\n", 1)[0]);
     if (!m || !isAbsolute(m[1])) return null;
@@ -795,7 +830,7 @@ function outDirTarget(err, specifier, parentPath, isEntry, lookupPaths) {
   }
   try {
     const path = nubNative.resolveOutDirSource(missing, specifier, parentPath || "", probe,
-      RUNTIME_TSCONFIG, isEntry ? PRESERVE_SYMLINKS_MAIN : PRESERVE_SYMLINKS, paths);
+      RUNTIME_TSCONFIG, paths);
     return path ? { path, suffix } : null;
   } catch {
     return null;

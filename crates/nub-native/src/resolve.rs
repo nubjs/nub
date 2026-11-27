@@ -320,7 +320,9 @@ fn resolve_bare_subpath(
 /// the entry, where `build` means `build.js` or `build/index.js`. An `exports` or
 /// `imports` target is exact.
 ///
-/// Returns the source file, or `None` to keep Node's error.
+/// Returns the source file spelled through any symlinked directory Node reached the
+/// target through, or `None` to keep Node's error. The caller hands it back to Node's
+/// resolver, whose realpath step then applies Node's own symlink settings.
 #[napi(catch_unwind)]
 pub fn resolve_out_dir_source(
     missing: Option<String>,
@@ -328,43 +330,76 @@ pub fn resolve_out_dir_source(
     parent_path: String,
     probe: Option<bool>,
     tsconfig_path: Option<String>,
-    preserve_symlinks: Option<bool>,
     lookup_paths: Option<Vec<String>>,
 ) -> Option<String> {
-    let preserve_symlinks = preserve_symlinks.unwrap_or(false);
     let tsconfig_path = tsconfig_path.as_deref();
     match missing {
-        Some(missing) => source_for_output(
-            &missing,
-            probe.unwrap_or(false),
-            tsconfig_path,
-            preserve_symlinks,
-        ),
+        Some(missing) => source_for_output(&missing, probe.unwrap_or(false), tsconfig_path),
         None => {
             let parent_dir = if parent_path.is_empty() {
                 std::env::current_dir().ok()?.to_string_lossy().into_owned()
             } else {
                 dirname(&parent_path)
             };
-            let path = package_path(&specifier, &parent_dir, lookup_paths.as_deref())?;
-            source_for_output(&path, true, tsconfig_path, preserve_symlinks)
+            package_paths(&specifier, &parent_dir, lookup_paths.as_deref())
+                .iter()
+                .find_map(|path| source_for_output(path, true, tsconfig_path))
         }
     }
 }
 
-/// The path a bare specifier names inside a package with no `exports`, found as
-/// Node finds the package: the first of `lookup_paths` holding `<name>`, or with
-/// none given the nearest `node_modules/<name>` directory up from the importer. A
-/// bare name means its legacy `main`; a subpath is joined on. Node's
+/// The paths a bare specifier names inside packages with no `exports`, in the order
+/// Node tries them. With `lookup_paths`, every one holding `<name>`, since CommonJS
+/// moves on to the next directory when a subpath is missing and stops only at a
+/// package with `exports`. Without, the nearest `node_modules/<name>` up from the
+/// importer, as ESM stops at the first package it finds. A bare name means its
+/// legacy `main`; a subpath is joined on. Node's
 /// error carries the exact path for an `exports` or `imports` target, so this covers
 /// only the two shapes it does not: ESM's failed legacy `main` (reported without the
 /// path on every version, and on Node 18 as an internal assertion), and a CommonJS
 /// subpath (`Cannot find module 'pkg/dist/x'`).
-fn package_path(
+fn package_paths(
     specifier: &str,
     parent_dir: &str,
     lookup_paths: Option<&[String]>,
-) -> Option<String> {
+) -> Vec<String> {
+    let Some((name, subpath)) = split_package_specifier(specifier) else {
+        return Vec::new();
+    };
+    let pkg_dirs: Vec<String> = match lookup_paths {
+        Some(dirs) => dirs
+            .iter()
+            .map(|dir| Path::new(dir).join(&name))
+            .filter(|pkg| pkg.is_dir())
+            .map(|pkg| pkg.to_string_lossy().into_owned())
+            .collect(),
+        None => tsconfig::find_up_dir(parent_dir, &format!("node_modules/{name}"))
+            .into_iter()
+            .collect(),
+    };
+    let mut paths = Vec::new();
+    for pkg_dir in pkg_dirs {
+        let manifest = std::fs::read_to_string(Path::new(&pkg_dir).join("package.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .unwrap_or(serde_json::Value::Null);
+        if manifest.get("exports").is_some() {
+            break;
+        }
+        if !subpath.is_empty() {
+            paths.push(path_join_resolve(&pkg_dir, &subpath));
+        } else if let Some(main) = manifest.get("main").and_then(|m| m.as_str()) {
+            if !main.trim().is_empty() {
+                paths.push(path_join_resolve(&pkg_dir, main));
+            }
+        }
+    }
+    paths
+}
+
+/// `(name, subpath)` of a bare package specifier, or `None` for anything Node does
+/// not look up in `node_modules`.
+fn split_package_specifier(specifier: &str) -> Option<(String, String)> {
     if specifier.starts_with('#') || specifier.starts_with('.') {
         return None;
     }
@@ -385,26 +420,7 @@ fn package_path(
     {
         return None;
     }
-    let pkg_dir = match lookup_paths {
-        Some(dirs) => dirs.iter().find_map(|dir| {
-            let pkg = Path::new(dir).join(&name);
-            pkg.is_dir().then(|| pkg.to_string_lossy().into_owned())
-        })?,
-        None => tsconfig::find_up_dir(parent_dir, &format!("node_modules/{name}"))?,
-    };
-    let text = std::fs::read_to_string(Path::new(&pkg_dir).join("package.json")).ok()?;
-    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
-    if manifest.get("exports").is_some() {
-        return None;
-    }
-    if !subpath.is_empty() {
-        return Some(path_join_resolve(&pkg_dir, &subpath));
-    }
-    let main = manifest.get("main")?.as_str()?;
-    if main.trim().is_empty() {
-        return None;
-    }
-    Some(path_join_resolve(&pkg_dir, main))
+    Some((name, subpath))
 }
 
 /// tsc's output-to-source mapping (`tryLoadInputFileForPath`), run only where Node
@@ -421,12 +437,7 @@ fn package_path(
 ///
 /// A path inside `node_modules` once symlinks are resolved never maps, so a workspace
 /// package linked into `node_modules` qualifies and a published dependency does not.
-fn source_for_output(
-    missing: &str,
-    probe: bool,
-    tsconfig_path: Option<&str>,
-    preserve_symlinks: bool,
-) -> Option<String> {
+fn source_for_output(missing: &str, probe: bool, tsconfig_path: Option<&str>) -> Option<String> {
     if is_file(missing) {
         return None;
     }
@@ -494,14 +505,12 @@ fn source_for_output(
             .find_map(|output| map_output_to_source(output, &dirs))
     })?;
 
-    // Node keys a module by its real path, so a symlinked source is canonicalized as
-    // Node's own realpath step would. Under `--preserve-symlinks` every module of a
-    // linked package is keyed by its path through the link instead, so the answer is
-    // spelled that way. Either way, the same file loads once.
-    if !preserve_symlinks {
-        let source = real_path(&source);
-        return (!is_node_modules(&source)).then_some(source);
+    // A source that is itself a link into `node_modules` is dependency code.
+    if is_node_modules(&real_path(&source)) {
+        return None;
     }
+    // Spelled through the link Node took, which is the key Node gives the module
+    // under `--preserve-symlinks`; by default Node's realpath step canonicalizes it.
     let (mut lexical, mut real_base) = (lexical, real_base);
     loop {
         if let Ok(tail) = Path::new(&source).strip_prefix(&real_base) {

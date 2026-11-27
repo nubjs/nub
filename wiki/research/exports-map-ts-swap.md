@@ -127,7 +127,7 @@ This is the workspace case from above, answered the way the compiler answers it 
 - **Fallback only.** Node resolves first and a built file always loads, so stale output wins over source, as it does at type-check time once built.
 - **Never inside `node_modules`.** The target's real path decides, so a symlinked workspace package qualifies and a published dependency keeps its declared shape. Objections 2 and 4 above do not arise.
 - **Node still evaluates the map.** The missing path comes from Node's own error: `url` on ESM's `ERR_MODULE_NOT_FOUND`, the message of a CommonJS `MODULE_NOT_FOUND` that carries `path`. Two shapes carry neither and are re-derived from `package.json`: ESM's legacy `main` failure and a CommonJS subpath. A changed error shape stops the mapping and leaves Node's error, rather than resolving something else.
-- **The source keeps Node's module identity.** A CommonJS subpath is looked up in the directories Node searched, a `require.resolve` `paths` option included. A target's query and fragment carry over to the source URL. A symlinked source is keyed by its real path, or by its path through the link under `--preserve-symlinks`.
+- **Node keys the source as it would the built file.** A CommonJS subpath is looked up in the directories Node searched, root by root, a `require.resolve` `paths` option included. The source then goes back through Node's own resolver, with the target's query and fragment as written, so Node's realpath step and its symlink settings decide the module's identity.
 
 ## What to ship instead
 

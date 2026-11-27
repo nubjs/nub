@@ -85,6 +85,10 @@ fn unbuilt_main_runs_the_source_under_import_and_require() {
     assert_eq!(stdout, "import:src/index.ts", "stderr: {stderr}");
     let (stdout, stderr) = run(&dir, "app.cts");
     assert_eq!(stdout, "require:src/index.ts", "stderr: {stderr}");
+    // Kept on its path through the link, the source is still the workspace's, not a
+    // dependency's.
+    let (stdout, stderr) = run_with(&dir, "app.cts", &[("NODE_PRESERVE_SYMLINKS", "1")]);
+    assert_eq!(stdout, "require:src/index.ts", "stderr: {stderr}");
 }
 
 /// Node still evaluates `exports` and its conditions: each condition's target maps
@@ -237,17 +241,24 @@ fn dependency_in_node_modules_never_maps() {
     );
 }
 
-/// `require.resolve` with `paths` looks only where Node looked: another project's
-/// own link wins over the caller's, and a project with no link keeps Node's error.
+/// `require.resolve` with `paths` looks where Node looked, root by root: another
+/// project's own link wins over the caller's, a `lib` without the source passes to
+/// the next root, and a project with no link keeps Node's error.
 #[cfg(unix)]
 #[test]
 fn require_resolve_paths_searches_only_the_given_roots() {
     let root = work_dir("paths");
-    for (pkg, from) in [("lib-a", "caller"), ("lib-b", "other")] {
+    for (pkg, from, source) in [
+        ("lib-a", "caller", true),
+        ("lib-b", "other", true),
+        ("lib-c", "first", false),
+    ] {
         let dir = root.join("packages").join(pkg);
         write(&dir.join("package.json"), r#"{"name":"lib"}"#);
         write(&dir.join("tsconfig.json"), OWN_DIRS);
-        write(&dir.join("src/missing.ts"), "exports.x = 1;");
+        if source {
+            write(&dir.join("src/missing.ts"), "exports.x = 1;");
+        }
         let link = root.join(from).join("node_modules/lib");
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&dir, link).unwrap();
@@ -255,22 +266,28 @@ fn require_resolve_paths_searches_only_the_given_roots() {
     write(&root.join("empty/package.json"), "{}");
     write(
         &root.join("caller/app.cts"),
-        r#"const at = (p: string) => {
-  try { return require.resolve("lib/dist/missing", { paths: [p] }).split("packages/")[1]; }
+        r#"// A `require` from `createRequire`: on the compat tier the entry's own `require` is
+// the ESM translator's, whose `resolve` takes no options.
+const { resolve } = require("node:module").createRequire(__filename);
+const at = (...roots: string[]) => {
+  const paths = roots.map((r) => __dirname + "/../" + r);
+  try { return resolve("lib/dist/missing", { paths }).split("packages/")[1]; }
   catch (e: any) { return e.code; }
 };
-console.log(at(__dirname + "/../other") + "|" + at(__dirname + "/../empty"));
+console.log([at("other"), at("empty"), at("first", "other")].join("|"));
 "#,
     );
     let (stdout, stderr) = run(&root.join("caller"), "app.cts");
     assert_eq!(
-        stdout, "lib-b/src/missing.ts|MODULE_NOT_FOUND",
+        stdout, "lib-b/src/missing.ts|MODULE_NOT_FOUND|lib-b/src/missing.ts",
         "stderr: {stderr}"
     );
 }
 
 /// A query or fragment on the target Node selected stays on the source URL, so the
-/// two spellings stay two module instances, as they are once built.
+/// two spellings stay two module instances, as they are once built. The `enum` needs
+/// Nub's transpiler, which Node's own type stripping refuses, so each URL must still
+/// read as `.mts`.
 #[test]
 fn target_query_and_fragment_survive_the_mapping() {
     let dir = work_dir("suffix");
@@ -281,7 +298,7 @@ fn target_query_and_fragment_survive_the_mapping() {
     write(&dir.join("tsconfig.json"), OWN_DIRS);
     write(
         &dir.join("src/item.mts"),
-        "export const url: string = import.meta.url;",
+        "enum Kind { A } export const url: string = import.meta.url + Kind.A;",
     );
     write(
         &dir.join("main.mts"),
@@ -291,12 +308,51 @@ console.log([one.url, two.url].map((u) => u.split("/").pop()).join("|") + "|" + 
 "##,
     );
     let (stdout, stderr) = run(&dir, "main.mts");
-    assert_eq!(stdout, "item.mts?one|item.mts#two|true", "stderr: {stderr}");
+    assert_eq!(
+        stdout, "item.mts?one0|item.mts#two0|true",
+        "stderr: {stderr}"
+    );
+}
+
+/// An empty `?` or `#` keys the module as Node keys the built file: one module by
+/// default, where Node's realpath step rebuilds the URL, and three under
+/// `--preserve-symlinks`, where it keeps the URL as written.
+#[test]
+fn empty_query_and_fragment_key_the_module_as_node_does() {
+    let dir = work_dir("empty-suffix");
+    write(
+        &dir.join("package.json"),
+        r##"{"type":"module","imports":{"#a":"./dist/item.mjs","#b":"./dist/item.mjs?","#c":"./dist/item.mjs#"}}"##,
+    );
+    write(&dir.join("tsconfig.json"), OWN_DIRS);
+    write(
+        &dir.join("src/item.mts"),
+        "export const url: string = import.meta.url;",
+    );
+    write(
+        &dir.join("main.mts"),
+        r##"import * as a from "#a";
+import * as b from "#b";
+import * as c from "#c";
+console.log([a, b, c].map((m) => m.url.split("/").pop()).join(" "), a === b && b === c);
+"##,
+    );
+    let (stdout, stderr) = run(&dir, "main.mts");
+    assert_eq!(
+        stdout, "item.mts item.mts item.mts true",
+        "stderr: {stderr}"
+    );
+    let (stdout, stderr) = run_with(&dir, "main.mts", &[("NODE_OPTIONS", "--preserve-symlinks")]);
+    assert_eq!(
+        stdout, "item.mts item.mts? item.mts# false",
+        "stderr: {stderr}"
+    );
 }
 
 /// A symlinked source is keyed by its real path, as Node keys every module, so the
-/// fallback and a direct import share one instance. `--preserve-symlinks` keeps the
-/// path through the link, as Node does.
+/// fallback and a direct import share one instance. Node's own symlink settings keep
+/// the path through the link: `--preserve-symlinks` in any spelling Node accepts,
+/// and for the entry `--preserve-symlinks-main` unless a later flag turns it off.
 #[cfg(unix)]
 #[test]
 fn symlinked_source_is_one_module() {
@@ -330,6 +386,29 @@ console.log(viaMap === direct, viaMap.url.split("/").slice(-2).join("/"));
     assert_eq!(stdout, "true real/item.ts", "stderr: {stderr}");
     let (stdout, stderr) = run(&dir, "main.cts");
     assert_eq!(stdout, "true", "stderr: {stderr}");
-    let (stdout, stderr) = run_with(&dir, "main.ts", &[("NODE_OPTIONS", "--preserve-symlinks")]);
-    assert_eq!(stdout, "false src/item.ts", "stderr: {stderr}");
+    for preserve in [
+        ("NODE_OPTIONS", "--preserve-symlinks"),
+        ("NODE_OPTIONS", r#""--preserve-symlinks""#),
+        ("NODE_PRESERVE_SYMLINKS", "1"),
+    ] {
+        let (stdout, stderr) = run_with(&dir, "main.ts", &[preserve]);
+        assert_eq!(stdout, "false src/item.ts", "{preserve:?} stderr: {stderr}");
+    }
+
+    write(
+        &dir.join("real/index.ts"),
+        r#"console.log(import.meta.url.split("/").slice(-2).join("/"));"#,
+    );
+    std::os::unix::fs::symlink("../real/index.ts", dir.join("src/index.ts")).unwrap();
+    for (options, entry) in [
+        ("", "real/index.ts"),
+        ("--preserve-symlinks-main", "src/index.ts"),
+        (
+            "--preserve-symlinks-main --no-preserve-symlinks-main",
+            "real/index.ts",
+        ),
+    ] {
+        let (stdout, stderr) = run_with(&dir, "dist/index.js", &[("NODE_OPTIONS", options)]);
+        assert_eq!(stdout, entry, "NODE_OPTIONS={options:?} stderr: {stderr}");
+    }
 }

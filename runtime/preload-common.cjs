@@ -876,9 +876,14 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
         if (fallback) return fallback;
       }
-      const url = core.outDirSourceURL(err, specifier, filePathOf(context.parentURL),
-        context.parentURL === undefined);
-      if (url) return { url, shortCircuit: true };
+      // Node resolves the source itself, so its realpath step and symlink settings
+      // key the module exactly as they would the built file. A `require()` has had
+      // this from the `_resolveFilename` patch inside Node's CommonJS step already.
+      const url = !fromRequire && core.outDirSourceURL(err, specifier,
+        filePathOf(context.parentURL), context.parentURL === undefined);
+      if (url) {
+        try { return nextResolve(url, nextContext); } catch { throw err; }
+      }
       if (err && err.code === "ERR_MODULE_NOT_FOUND") {
         const hint = phantomDepHint(specifier, context.parentURL);
         if (hint) annotateError(err, hint);
@@ -1421,7 +1426,11 @@ function installCjsRequireHooks(core, withClassicTranspile) {
         const fromPath = parent && typeof parent.filename === "string" ? parent.filename : null;
         const source = core.outDirSource(e, request, fromPath, !!isMain,
           () => cjsLookupPaths(request, parent, options));
-        if (source) return checkedTsTarget(source);
+        if (source) {
+          let byNode;
+          try { byNode = ReflectApply(origResolveFilename, this, [source, parent, isMain, options]); } catch { throw e; }
+          return checkedTsTarget(byNode);
+        }
         const hint = phantomDepHint(request, fromPath);
         if (hint) annotateError(e, hint);
       }
