@@ -29,12 +29,13 @@
 import "./floor-builtin.mjs";
 import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, CLOBBER_MAP, dataExtsFor,
-  extname, isFileUrl, resolveSpec, nextResolveContext, resolveRedirectAsync, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
+  extname, isFileUrl, resolveSpec, nextResolveContext, resolveRedirectAsync, outDirSourceURL, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
   noteRuntimeV8FlagSource, outerHookOwnsFormat, explainMappedExtension,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { pnpResolveEsm } from "./pnp-util.cjs";
 
 // Yarn PnP handle for this loader worker. The worker runs in its own thread where
@@ -131,11 +132,19 @@ export async function resolve(specifier, context, nextResolve) {
       if (res) return res;
     } catch { /* fall through to Node's resolver */ }
   }
-  if (r) {
-    const hit = await resolveRedirectAsync(r.redirect, nextContext, nextResolve);
-    if (hit) return hit;
+  try {
+    if (r) {
+      const hit = await resolveRedirectAsync(r.redirect, nextContext, nextResolve);
+      if (hit) return hit;
+    }
+    return await nextResolve(specifier, nextContext);
+  } catch (err) {
+    const parent = context.parentURL;
+    const parentPath = typeof parent === "string" && parent.startsWith("file:") ? fileURLToPath(parent) : "";
+    const url = outDirSourceURL(err, specifier, parentPath, parent === undefined);
+    if (!url) throw err;
+    try { return await nextResolve(url, nextContext); } catch { throw err; }
   }
-  return nextResolve(specifier, nextContext);
 }
 
 // ── Load hook ───────────────────────────────────────────────────────

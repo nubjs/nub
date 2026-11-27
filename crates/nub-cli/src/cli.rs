@@ -10192,7 +10192,8 @@ fn run_node(args: &[String]) -> Result<i32> {
          \x20 ls                       list versions in nub's cache\n\
          \x20 uninstall <version>      remove a version from nub's cache\n\
          \x20 pin <version>            write the project's Node pin\n\
-         \x20 shim                     make `node` on PATH resolve through nub (re-run after `nub upgrade`)\n\
+         \x20 shim                     make `node` on PATH resolve through nub (re-run after `nub upgrade`);\n\
+         \x20                          --no-modify-path leaves shell config files alone (--modify-path undoes it)\n\
          \x20 unshim                   remove the `node` shim and its PATH block";
 
     // A help request — `help` at argv[0], or `--help`/`-h` at any position,
@@ -10290,7 +10291,7 @@ fn run_node(args: &[String]) -> Result<i32> {
             println!("pinned Node {} → {}", result.spec, result.path.display());
             Ok(0)
         }
-        "shim" => run_node_shim_install(),
+        "shim" => run_node_shim_install(&args[1..]),
         "unshim" => run_node_unshim(),
         // `nub node <file>` (or any non-verb positional) is an error, NOT a
         // passthrough — the exact wording is locked by the spec
@@ -10461,7 +10462,8 @@ fn run_pm(args: &[String]) -> Result<i32> {
              \x20 cache [clear]      list cached package managers (or clear the cache)\n\
              \x20 shim               link npm/pnpm/yarn shims onto PATH (re-run after `nub upgrade`);\n\
              \x20                    --route-installs runs `npm ci` / `npm install` on nub's engine\n\
-             \x20                    (--no-route-installs turns that back off)\n\
+             \x20                    (--no-route-installs turns that back off);\n\
+             \x20                    --no-modify-path leaves shell config files alone (--modify-path undoes it)\n\
              \x20 unshim             remove the shims and their PATH block"
         );
         return Ok(0);
@@ -11467,13 +11469,18 @@ fn run_pm_shim_install(args: &[String]) -> Result<i32> {
     // `--route-installs` / `--no-route-installs` set or clear the marker; a
     // re-run without either leaves the current choice alone, so re-linking
     // after `nub upgrade` never silently switches routing off.
+    // `--no-modify-path` / `--modify-path` remember the same way.
     let mut route_installs: Option<bool> = None;
+    let mut modify_path: Option<bool> = None;
     for arg in args {
         match arg.as_str() {
             "--route-installs" => route_installs = Some(true),
             "--no-route-installs" => route_installs = Some(false),
+            "--modify-path" => modify_path = Some(true),
+            "--no-modify-path" => modify_path = Some(false),
             other => bail!(
-                "nub pm shim: unexpected argument {other:?} (accepted: --route-installs, --no-route-installs)"
+                "nub pm shim: unexpected argument {other:?} (accepted: --route-installs, \
+                 --no-route-installs, --modify-path, --no-modify-path)"
             ),
         }
     }
@@ -11482,6 +11489,7 @@ fn run_pm_shim_install(args: &[String]) -> Result<i32> {
     // same posture as every other `current_nub_binary` call site).
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::shim_dir()?;
+    let edit_profiles = modify_path.unwrap_or_else(|| shim::modify_path_enabled(&dir));
 
     // The shim dir moved out of `~/.nub`. Clear a pre-move install FIRST, along
     // with its PATH block, or the profile ends up carrying two blocks and the
@@ -11491,13 +11499,16 @@ fn run_pm_shim_install(args: &[String]) -> Result<i32> {
         .map(|home| shim::migrate_legacy_shim_dir(&home, shim::SHIMS_LEAF_PUBLIC))
         .transpose()?
         .flatten();
-    if migrated.is_some() {
+    if migrated.is_some() && edit_profiles {
         shim::remove_path_block()?;
     }
 
     let report = shim::install_shims(&nub_binary)?;
     if let Some(on) = route_installs {
         shim::set_route_installs(&dir, on)?;
+    }
+    if let Some(on) = modify_path {
+        shim::set_modify_path(&dir, on)?;
     }
 
     let count = |action: ShimAction| report.iter().filter(|s| s.action == action).count();
@@ -11563,39 +11574,47 @@ fn run_pm_shim_install(args: &[String]) -> Result<i32> {
         );
         return Ok(0);
     }
-    match shim::add_path_block()? {
-        ProfileOutcome::Added(profile) => println!(
-            "  added {} to PATH in {}\n  \
-             restart your shell, or run: source {}\n  \
-             (login/non-interactive profiles are wired automatically too, so\n  \
-             IDE- and GUI-spawned package managers see the shims)",
-            dir.display(),
-            profile.display(),
-            profile.display()
-        ),
-        ProfileOutcome::AlreadyPresent(profile) => {
-            println!("  PATH: already present in {}", profile.display())
+    if !edit_profiles {
+        println!(
+            "  no shell config file was edited (--no-modify-path)\n  \
+             Add this line to yours to put it on PATH:\n    {}",
+            shim::path_line()
+        );
+    } else {
+        match shim::add_path_block()? {
+            ProfileOutcome::Added(profile) => println!(
+                "  added {} to PATH in {}\n  \
+                 restart your shell, or run: source {}\n  \
+                 (login/non-interactive profiles are wired automatically too, so\n  \
+                 IDE- and GUI-spawned package managers see the shims)",
+                dir.display(),
+                profile.display(),
+                profile.display()
+            ),
+            ProfileOutcome::AlreadyPresent(profile) => {
+                println!("  PATH: already present in {}", profile.display())
+            }
+            // Reached on upgrade. The directory is a compile-time constant within
+            // one build, but the CONSTANT ITSELF moved under XDG in #752, so a
+            // profile written by an older nub still names `$HOME/.nub/shims` beneath
+            // this marker and the line is rewritten in place. Only when that legacy
+            // directory is already GONE — the migration above strips the block
+            // outright while it still exists — so the live shell carries a
+            // directory on PATH that holds no shims, which is why the re-source
+            // hint matters more here than on a fresh add.
+            ProfileOutcome::Rewritten(profile) => println!(
+                "  PATH: updated the entry in {} to point at {}\n  \
+                 restart your shell, or run: source {}",
+                profile.display(),
+                dir.display(),
+                profile.display()
+            ),
+            // No writable profile for this shell: print the line and exit 0 (the
+            // spec's manual fallback — the shims themselves are installed).
+            ProfileOutcome::Manual { line } => println!(
+                "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
+            ),
         }
-        // Reached on upgrade. The directory is a compile-time constant within
-        // one build, but the CONSTANT ITSELF moved under XDG in #752, so a
-        // profile written by an older nub still names `$HOME/.nub/shims` beneath
-        // this marker and the line is rewritten in place. Only when that legacy
-        // directory is already GONE — the migration above strips the block
-        // outright while it still exists — so the live shell carries a
-        // directory on PATH that holds no shims, which is why the re-source
-        // hint matters more here than on a fresh add.
-        ProfileOutcome::Rewritten(profile) => println!(
-            "  PATH: updated the entry in {} to point at {}\n  \
-             restart your shell, or run: source {}",
-            profile.display(),
-            dir.display(),
-            profile.display()
-        ),
-        // No writable profile for this shell: print the line and exit 0 (the
-        // spec's manual fallback — the shims themselves are installed).
-        ProfileOutcome::Manual { line } => println!(
-            "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
-        ),
     }
 
     // Reachability (Volta's check_shim_reachable idea): meaningful only once
@@ -11670,12 +11689,26 @@ fn run_pm_unshim() -> Result<i32> {
 /// resolves through nub. Idempotent; re-run to refresh after `nub upgrade`.
 /// Mirrors [`run_pm_shim_install`] for the single `node` entry; the shim runs
 /// the resolved Node VANILLA (version management only — augmentation is `nub`).
-fn run_node_shim_install() -> Result<i32> {
+fn run_node_shim_install(args: &[String]) -> Result<i32> {
     use nub_core::node::shim;
     use nub_core::pm::shim::{ProfileOutcome, ShimAction};
 
+    // Remembered in the shim dir, as `nub pm shim` does.
+    let mut modify_path: Option<bool> = None;
+    for arg in args {
+        match arg.as_str() {
+            "--modify-path" => modify_path = Some(true),
+            "--no-modify-path" => modify_path = Some(false),
+            other => bail!(
+                "nub node shim: unexpected argument {other:?} (accepted: --modify-path, --no-modify-path)"
+            ),
+        }
+    }
+
     let nub_binary = nub_core::node::spawn::current_nub_binary()?;
     let dir = shim::node_shim_dir()?;
+    let edit_profiles =
+        modify_path.unwrap_or_else(|| nub_core::pm::shim::modify_path_enabled(&dir));
 
     // Same migration as the PM shims: clear the pre-move `~/.nub/node-shim` and
     // its PATH block, or a stale `node` keeps shadowing from earlier in PATH.
@@ -11683,11 +11716,14 @@ fn run_node_shim_install() -> Result<i32> {
         .map(|home| nub_core::pm::shim::migrate_legacy_shim_dir(&home, shim::NODE_SHIM_LEAF_PUBLIC))
         .transpose()?
         .flatten();
-    if migrated.is_some() {
+    if migrated.is_some() && edit_profiles {
         shim::remove_node_path_block()?;
     }
 
     let entry = shim::install_node_shim(&nub_binary)?;
+    if let Some(on) = modify_path {
+        nub_core::pm::shim::set_modify_path(&dir, on)?;
+    }
     if let Some(old) = &migrated {
         println!("moved the node shim out of {}", old.display());
     }
@@ -11708,7 +11744,7 @@ fn run_node_shim_install() -> Result<i32> {
     // The shim runs the resolved Node VANILLA — state it so nobody expects
     // TypeScript / `.env` loading from a bare `node`; that's what `nub` is for.
     println!(
-        "  `node` now resolves through nub (version management only — no augmentation; run `nub` for that)"
+        "  the shimmed `node` runs through nub (version management only — no augmentation; run `nub` for that)"
     );
 
     if shim::check_node_shim_noexec(&dir) {
@@ -11728,34 +11764,42 @@ fn run_node_shim_install() -> Result<i32> {
         );
         return Ok(0);
     }
-    match shim::add_node_path_block()? {
-        ProfileOutcome::Added(profile) => println!(
-            "  added {} to PATH in {}\n  restart your shell, or run: source {}",
-            dir.display(),
-            profile.display(),
-            profile.display()
-        ),
-        ProfileOutcome::AlreadyPresent(profile) => {
-            println!("  PATH: already present in {}", profile.display())
+    if !edit_profiles {
+        println!(
+            "  no shell config file was edited (--no-modify-path)\n  \
+             Add this line to yours to put it on PATH:\n    {}",
+            shim::node_path_line()
+        );
+    } else {
+        match shim::add_node_path_block()? {
+            ProfileOutcome::Added(profile) => println!(
+                "  added {} to PATH in {}\n  restart your shell, or run: source {}",
+                dir.display(),
+                profile.display(),
+                profile.display()
+            ),
+            ProfileOutcome::AlreadyPresent(profile) => {
+                println!("  PATH: already present in {}", profile.display())
+            }
+            // Reached on upgrade. The directory is a compile-time constant within
+            // one build, but the CONSTANT ITSELF moved under XDG in #752, so a
+            // profile written by an older nub still names `$HOME/.nub/node-shim` beneath
+            // this marker and the line is rewritten in place. Only when that legacy
+            // directory is already GONE — the migration above strips the block
+            // outright while it still exists — so the live shell carries a
+            // directory on PATH that holds no shims, which is why the re-source
+            // hint matters more here than on a fresh add.
+            ProfileOutcome::Rewritten(profile) => println!(
+                "  PATH: updated the entry in {} to point at {}\n  \
+                 restart your shell, or run: source {}",
+                profile.display(),
+                dir.display(),
+                profile.display()
+            ),
+            ProfileOutcome::Manual { line } => println!(
+                "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
+            ),
         }
-        // Reached on upgrade. The directory is a compile-time constant within
-        // one build, but the CONSTANT ITSELF moved under XDG in #752, so a
-        // profile written by an older nub still names `$HOME/.nub/node-shim` beneath
-        // this marker and the line is rewritten in place. Only when that legacy
-        // directory is already GONE — the migration above strips the block
-        // outright while it still exists — so the live shell carries a
-        // directory on PATH that holds no shims, which is why the re-source
-        // hint matters more here than on a fresh add.
-        ProfileOutcome::Rewritten(profile) => println!(
-            "  PATH: updated the entry in {} to point at {}\n  \
-             restart your shell, or run: source {}",
-            profile.display(),
-            dir.display(),
-            profile.display()
-        ),
-        ProfileOutcome::Manual { line } => println!(
-            "  PATH: no known shell profile to edit — add this line to your shell config:\n    {line}"
-        ),
     }
 
     // Reachability check is meaningful only once the dir is on THIS process's
