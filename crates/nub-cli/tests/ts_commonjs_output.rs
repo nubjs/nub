@@ -14,6 +14,17 @@ fn write(root: &Path, rel: &str, body: &str) {
 /// `nub` with `node_dir` first on `PATH` (Nub runs the first Node it finds there), or
 /// the standalone loader on that Node when `standalone` is set.
 fn run(root: &Path, node_dir: Option<&Path>, standalone: bool, entry: &str) -> Output {
+    run_with(root, node_dir, standalone, entry, None)
+}
+
+/// `run`, with `NODE_OPTIONS` set to `node_options`.
+fn run_with(
+    root: &Path,
+    node_dir: Option<&Path>,
+    standalone: bool,
+    entry: &str,
+    node_options: Option<&str>,
+) -> Output {
     let mut command = if standalone {
         let node = node_dir.map_or(PathBuf::from("node"), |dir| dir.join("node"));
         let mut command = Command::new(node);
@@ -39,9 +50,11 @@ fn run(root: &Path, node_dir: Option<&Path>, standalone: bool, entry: &str) -> O
         .env_remove("NODE_COMPAT")
         .env_remove("NODE_OPTIONS")
         .env_remove("__NUB_RUNTIME_CONFIG")
-        .env_remove("__NUB_TSCONFIG_REPORTED")
-        .output()
-        .unwrap()
+        .env_remove("__NUB_TSCONFIG_REPORTED");
+    if let Some(options) = node_options {
+        command.env("NODE_OPTIONS", options);
+    }
+    command.output().unwrap()
 }
 
 fn stdout(output: &Output, what: &str) -> String {
@@ -156,10 +169,17 @@ fn module_commonjs_compiles_imports_to_require() {
     }
 }
 
-/// A CommonJS `.ts` entry on the compat tier (22.13) `require()`s an ES-module-only
-/// package, compiled from `import` and written as `require` alike. Node runs the entry
-/// with the loader's source through a wrapper whose `require()` of an ES module fails
-/// on 20.19-22.14, so the entry has to reach Node's own CommonJS loader.
+/// A CommonJS entry on the compat tier (22.13) `require()`s an ES-module-only package:
+/// a `.ts` file compiled from `import`, one written with `require`, and a plain `.cjs`.
+/// Node runs a `.ts` entry with the loader's source through a wrapper whose `require()`
+/// of an ES module fails on 20.19-22.14, so the entry has to reach Node's own CommonJS
+/// loader.
+///
+/// Each runs again behind a resolve hook that holds Node's resolve of the entry back,
+/// so Nub's fetch-handler pass imports the entry while Node's own import is still in
+/// flight. Answered first, that import made the entry a module that is not the main:
+/// `require.main` was undefined, or the `.ts` entry kept the loader's source. A CI
+/// runner lost that race without the hook.
 #[test]
 fn a_commonjs_entry_requires_an_es_module_on_the_compat_tier() {
     let Some(node_dir) = std::env::var_os("TEST_NODE_BIN_22_13_0").map(PathBuf::from) else {
@@ -194,14 +214,30 @@ fn a_commonjs_entry_requires_an_es_module_on_the_compat_tier() {
         "requires.ts",
         "const esm = require(\"esm-only\");\nconsole.log(esm.named, esm.default, require.main === module);\n",
     );
-    let mut legs = vec![false];
+    write(
+        root,
+        "plain.cjs",
+        "const esm = require(\"esm-only\");\nconsole.log(esm.named, esm.default, require.main === module);\n",
+    );
+    write(
+        root,
+        "slow-resolve.cjs",
+        r#"require("node:module").register(
+  "data:text/javascript," +
+    encodeURIComponent(
+      "export async function resolve(s, c, next) { if (c.parentURL === undefined) await new Promise((r) => setTimeout(r, 50)); return next(s, c); }",
+    ),
+);
+"#,
+    );
+    let mut legs = vec![(false, None), (false, Some("--require=./slow-resolve.cjs"))];
     if cfg!(unix) {
-        legs.push(true);
+        legs.push((true, None));
     }
-    for entry in ["imports.ts", "requires.ts"] {
-        for &standalone in &legs {
-            let out = run(root, Some(&node_dir), standalone, entry);
-            let what = format!("{entry}, standalone: {standalone}");
+    for entry in ["imports.ts", "requires.ts", "plain.cjs"] {
+        for &(standalone, node_options) in &legs {
+            let out = run_with(root, Some(&node_dir), standalone, entry, node_options);
+            let what = format!("{entry}, standalone: {standalone}, NODE_OPTIONS: {node_options:?}");
             assert_eq!(stdout(&out, &what), "named default true", "{what}");
         }
     }

@@ -2436,9 +2436,17 @@ function fireEntryLoad(entry) {
 // pass will have to wait for that announcement, because the port is a handle the
 // process carries until the entry loads and an ordinary run should carry nothing.
 // `data` is merged into what the worker's `initialize` receives.
+//
+// The entry's URLs go along either way. The first pass's `import()` of the entry can
+// reach the worker while Node's own import of it is still being resolved, and the
+// module job goes to whichever resolve is answered first: answered first, the pass's
+// would make the entry a module that is not the main, with no `require.main` for a
+// CommonJS one. The worker answers it only after Node's (preload-async-hooks.mjs).
 function loaderWorkerOptions(data) {
   const entry = serveEntry;
-  if (entry === null || !entry.mayFollow) return data ? { data } : undefined;
+  if (entry === null) return data ? { data } : undefined;
+  data = { ...data, entryUrls: [...entry.urls] };
+  if (!entry.mayFollow) return { data };
   const { MessageChannel } = getBuiltin("node:worker_threads");
   const channel = new MessageChannel();
   // The worker keeps the main-resolve note itself and announces only a load after

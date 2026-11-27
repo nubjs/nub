@@ -93,12 +93,27 @@ let utilRateShimsEnabled = true;
 // `mainEntryUrl` is undefined until Node resolves the entry, then null once handled.
 let cjsEntryHandoff = false;
 let mainEntryUrl;
+
+// `{ entryUrls }` names the program entry whenever the main thread's fetch-handler
+// pass may `import()` it. That import can reach this worker while Node's own,
+// parentless resolve of the entry is still in flight, and Node hands the module job
+// to whichever resolve it hears back from first: the pass's would load the entry as
+// a module that is not the main, so a CommonJS entry would have no `require.main`.
+// Until Node's resolve is answered, a resolve of the entry from a parent waits for
+// it and then a turn more, so its answer leaves after Node's.
+let entryUrls = null;
+let entryResolved = null;
 const { resolveUtilRateFacade } = createRequire(import.meta.url)("./util/rate.cjs");
 
 export async function initialize(data) {
   if (data && data.standaloneLoader) CLOBBER_MAP.clear();
   if (data && data.standaloneLoader) utilRateShimsEnabled = false;
   if (data && data.classicCjs) cjsEntryHandoff = true;
+  if (data && data.entryUrls) {
+    entryUrls = new Set(data.entryUrls);
+    let release;
+    entryResolved = { promise: new Promise((r) => { release = r; }), release };
+  }
   if (data && data.entryLoad) {
     entryLoad = {
       port: data.entryLoad.port,
@@ -119,8 +134,21 @@ function withoutQuery(url) {
 
 // ── Resolve hook ────────────────────────────────────────────────────
 export async function resolve(specifier, context, nextResolve) {
-  const result = await resolveInner(specifier, context, nextResolve);
-  if (cjsEntryHandoff && mainEntryUrl === undefined && context.parentURL === undefined) {
+  const parentless = context.parentURL === undefined;
+  if (!parentless && entryResolved !== null && entryUrls.has(withoutQuery(String(specifier)))) {
+    await entryResolved.promise;
+    await new Promise((r) => setImmediate(r));
+  }
+  let result;
+  try {
+    result = await resolveInner(specifier, context, nextResolve);
+  } finally {
+    if (parentless && entryResolved !== null) {
+      entryResolved.release();
+      entryResolved = null;
+    }
+  }
+  if (cjsEntryHandoff && mainEntryUrl === undefined && parentless) {
     mainEntryUrl = result?.url ?? null;
   }
   return result;
