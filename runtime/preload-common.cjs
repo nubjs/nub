@@ -54,7 +54,7 @@ const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
 const module_ = getBuiltin("node:module");
 const { readdirSync, existsSync } = getBuiltin("node:fs");
 const { fileURLToPath, pathToFileURL } = getBuiltin("node:url");
-const { join, dirname, extname: pathExtname, resolve: pathResolve } = getBuiltin("node:path");
+const { join, dirname, basename, extname: pathExtname, resolve: pathResolve } = getBuiltin("node:path");
 
 // Hide nub's ARGV-only V8 flags from `process.execArgv`, FIRST — before any user
 // code, and before anything here can hand the array out.
@@ -672,6 +672,28 @@ function resolveViaParentRequire(specifier, parentURL) {
   }
 }
 
+// Nub's additive answer for a CommonJS request, from where Node looks. A bare subpath
+// is probed in Node's own lookup directories, so an edited `module.paths` or a parent
+// with no filename resolves where Node resolves it. With a `paths` option (one root
+// by now), the importer stands in that root, as Node resolves a relative request
+// against it and a bare one from its `node_modules`. A caller inside `node_modules`
+// gets Node's answer alone, as it does without the option.
+function cjsAdditiveResolve(core, request, parent, parentPath, roots) {
+  if (roots === null) {
+    const lookup = core.isBareSubpath(request)
+      ? module_._resolveLookupPaths(request, parent) || []
+      : undefined;
+    return core.resolveCjsPath(request, parentPath, lookup);
+  }
+  if (roots.length === 0 || (parentPath !== null && core.isNodeModules(parentPath))) return null;
+  const root = pathResolve(String(roots[0]));
+  const anchor = join(root, parentPath === null ? "index.js" : basename(parentPath));
+  const lookup = core.isBareSubpath(request)
+    ? module_._resolveLookupPaths(request, { paths: module_._nodeModulePaths(root) }) || []
+    : undefined;
+  return core.resolveCjsPath(request, anchor, lookup);
+}
+
 // Phantom-dependency remediation for nub's isolated layout. The isolated layout
 // (the post-flip default for npm/yarn/bun incumbents, and the standing default
 // for pnpm/fresh projects) exposes only DECLARED packages at the importer's
@@ -822,7 +844,11 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // and leaves it undefined for `require()` and `createRequire()`. The conditions
     // cannot tell the two apart: a user may add "require" as a custom condition.
     const fromRequire = context.importAttributes === undefined;
-    const r = core.resolveSpec(specifier, context.parentURL, fromRequire);
+    // A `require()` gets Nub's additive answer from the `_resolveFilename` patch inside
+    // Node's default step, with the parent module and any `require.resolve` options;
+    // this hook sees only the parent's URL. Under PnP the hook keeps it, as before.
+    const r = core.resolveSpec(specifier, context.parentURL, fromRequire,
+      fromRequire && !process.versions.pnp);
     if (r && !r.redirect) return r;
     const nextContext = core.nextResolveContext(context);
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
@@ -1283,12 +1309,26 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     nubOwnsExt(pathExtname(filename)) &&
     core.isDependency(pathToFileURL(filename).href);
 
-  module_._resolveFilename = function (request, parent, isMain, options) {
+  const resolveFilename = function (request, parent, isMain, options) {
     let resolved = null;
-    try {
-      const parentPath = parent && typeof parent.filename === "string" ? parent.filename : null;
-      resolved = core.resolveCjsPath(request, parentPath);
-    } catch { /* fall through to Node */ }
+    const roots = options != null && ArrayIsArray(options.paths) ? options.paths : null;
+    if (roots !== null && roots.length > 1) {
+      // Node searches the roots of a `paths` option in turn. One root at a time
+      // through this function keeps Nub's answer and Node's in that order for each.
+      for (let i = 0; i < roots.length; i++) {
+        try {
+          return ReflectApply(resolveFilename, this,
+            [request, parent, isMain, { ...options, paths: [roots[i]] }]);
+        } catch (err) {
+          if (!err || err.code !== "MODULE_NOT_FOUND") throw err;
+        }
+      }
+    } else {
+      try {
+        const parentPath = parent && typeof parent.filename === "string" ? parent.filename : null;
+        resolved = cjsAdditiveResolve(core, request, parent, parentPath, roots);
+      } catch { /* fall through to Node */ }
+    }
     if (resolved !== null && typeof resolved === "object") {
       // A `paths` redirect (see transform-core `resolveRedirect`). Node's CommonJS
       // resolver tries a self-reference from the parent's own package first, so a
@@ -1397,6 +1437,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       throw e;
     }
   };
+  module_._resolveFilename = resolveFilename;
 
   if (!withClassicTranspile) return;
 

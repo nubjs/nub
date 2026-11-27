@@ -36,12 +36,15 @@ const TS_PARENT_EXTS: [&str; 4] = [".ts", ".tsx", ".mts", ".cts"];
 /// `preserve_symlinks` mirrors Node's flag of the same name. The caller passes it
 /// because the flag reaches a process two ways — argv and `NODE_OPTIONS` — and only
 /// the JS side sees both.
+/// `lookup_paths` are the `node_modules` directories CommonJS searches for a bare
+/// subpath, in order, when the caller has them (see [`resolve_bare_subpath`]).
 #[napi(catch_unwind)]
 pub fn resolve_ts(
     specifier: String,
     parent_path: String,
     tsconfig_path: Option<String>,
     preserve_symlinks: Option<bool>,
+    lookup_paths: Option<Vec<String>>,
 ) -> Option<Either<String, PackageRedirect>> {
     let preserve_symlinks = preserve_symlinks.unwrap_or(false);
     // Classify and DISCOVER from where the importer really lives. Under
@@ -87,7 +90,12 @@ pub fn resolve_ts(
         // No alias matched. A bare package NAME still belongs entirely to Node
         // (`main`/`exports`); only a SUBPATH into an `exports`-less dependency is
         // ours to probe.
-        let rest = resolve_bare_subpath(&specifier, &parent_dir, preserve_symlinks);
+        let rest = resolve_bare_subpath(
+            &specifier,
+            &parent_dir,
+            preserve_symlinks,
+            lookup_paths.as_deref(),
+        );
         return redirect_or_file(packages, rest);
     }
 
@@ -208,10 +216,16 @@ fn package_target(candidate: &str) -> Option<PackageTarget> {
 /// Not gated on a TS importer: a `checkJs`/`allowJs` project's `.js` files sit in
 /// the same graph as its `.ts` files and import the same package subpaths, so
 /// gating would split resolution down the middle of one project.
+///
+/// The package is the first `<dir>/<pkg>` among `lookup_paths` when the caller
+/// passes them: CommonJS searches `module.paths`, or the roots of a
+/// `require.resolve` `paths` option, which need not lie above the importer. Without
+/// them, the nearest `node_modules/<pkg>` up from the importer, as ESM searches.
 fn resolve_bare_subpath(
     specifier: &str,
     parent_dir: &str,
     preserve_symlinks: bool,
+    lookup_paths: Option<&[String]>,
 ) -> Option<String> {
     // `#foo` is an `imports` specifier — the package's own private map, Node's.
     if specifier.starts_with('#') {
@@ -247,7 +261,15 @@ fn resolve_bare_subpath(
         return None;
     }
 
-    let pkg_dir = tsconfig::find_up_dir(parent_dir, &format!("node_modules/{pkg}"))?;
+    let pkg_dir = match lookup_paths {
+        Some(dirs) => dirs.iter().find_map(|dir| {
+            let candidate = Path::new(dir).join(&pkg);
+            candidate
+                .is_dir()
+                .then(|| candidate.to_string_lossy().into_owned())
+        })?,
+        None => tsconfig::find_up_dir(parent_dir, &format!("node_modules/{pkg}"))?,
+    };
     let pkg_json = Path::new(&pkg_dir).join("package.json");
     let text = std::fs::read_to_string(&pkg_json).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;

@@ -464,10 +464,11 @@ const PRESERVE_SYMLINKS =
   process.execArgv.includes("--preserve-symlinks") ||
   /(^|\s)--preserve-symlinks(\s|$)/.test(process.env.NODE_OPTIONS || "");
 
-function resolveTs(specifier, parentPath) {
+function resolveTs(specifier, parentPath, lookupPaths) {
   if (!nubNative) return null;
   try {
-    return nubNative.resolveTs(specifier, parentPath || "", RUNTIME_TSCONFIG, PRESERVE_SYMLINKS);
+    return nubNative.resolveTs(specifier, parentPath || "", RUNTIME_TSCONFIG, PRESERVE_SYMLINKS,
+      lookupPaths ?? undefined);
   } catch {
     return null;
   }
@@ -512,7 +513,10 @@ let resolvingInternal = false;
 // `{ redirect }` for Node to answer from installed packages (see `resolveRedirect`).
 // `parentURL` is the importer (a file: URL string), or "" for the entry.
 // `fromRequire` is true when the fast tier's hook is resolving a `require()`.
-export function resolveSpec(specifier, parentURL, fromRequire = false) {
+// `skipAdditive` leaves step 3 to the caller: a `require()` gets it from the
+// `_resolveFilename` patch, which sees the parent module and any `require.resolve`
+// options where a module hook sees only the parent's URL.
+export function resolveSpec(specifier, parentURL, fromRequire = false, skipAdditive = false) {
   // nub's own internal graph (importer inside nub's runtime dir): resolve natively
   // and SHORT-CIRCUIT so nextResolve (the user's loader chain) never observes nub's
   // internals. This MUST run before the node:/data:/builtin early-returns below,
@@ -586,6 +590,7 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
   // additive hit nub owns; null falls through to Node's resolver (the compat
   // boundary — node_modules, `exports`, bare/scoped specifiers stay Node's).
   const parentPath = parent.startsWith("file:") ? fileURLToPath(parent) : "";
+  if (skipAdditive) return null;
   const resolved = resolveTs(specifier, parentPath);
   if (typeof resolved === "string") return { url: pathToFileURL(resolved).href, shortCircuit: true };
   // `paths` targets inside installed packages that declare `exports`, for Node to
@@ -703,7 +708,7 @@ export async function resolveRedirectAsync(redirect, context, next) {
 // file's absolute path (from the CJS parent Module), or null for the entry.
 // A `{ packages, otherwise }` object is the native `paths` redirect: the caller asks
 // Node for each package's self-reference from inside it (see `resolveRedirect`).
-export function resolveCjsPath(request, parentPath) {
+export function resolveCjsPath(request, parentPath, lookupPaths) {
   if (request.startsWith("node:") || request.startsWith("data:") ||
       module.isBuiltin(request)) {
     return null;
@@ -712,7 +717,20 @@ export function resolveCjsPath(request, parentPath) {
   // (not a URL). Vendored/clobber/builtin are import-only and never reach here. A
   // null result (node_modules / `exports` / a plain bare package) falls through to
   // Node's CJS resolver — the compat boundary.
-  return resolveTs(request, parentPath || "");
+  return resolveTs(request, parentPath || "", lookupPaths);
+}
+
+// A bare specifier with a subpath (`pkg/sub`, `@scope/pkg/sub`): the one shape whose
+// native answer depends on which `node_modules` directories are searched.
+export function isBareSubpath(specifier) {
+  const c = specifier[0];
+  // A `:` is a URL scheme or a Windows drive.
+  if (c === "." || c === "/" || c === "\\" || c === "#" || specifier.includes(":")) {
+    return false;
+  }
+  const slash = specifier.indexOf("/");
+  if (slash < 0) return false;
+  return c !== "@" || specifier.indexOf("/", slash + 1) > slash + 1;
 }
 
 // Would `require()`-ing this resolved TS file need Node's require(esm)? An
