@@ -20,7 +20,7 @@ This doc nails down:
 2. How candidate probing should work, with dynamic ordering keyed on the parent file's extension.
 3. **Where the remaining cost sits**: resolution itself is cache-bound; Node startup and the prelude dominate the cold path.
 
-tsconfig path-aliases are a sibling concern with its own surface and have moved to [[research/tsconfig-paths]]. The extensions-swap-style "let unbuilt packages import each other's TS sources" trick from tsx is *out of scope* — Bun doesn't fully do it either; see [Non-goals](#non-goals).
+tsconfig path-aliases are a sibling concern with its own surface and have moved to [[research/tsconfig-paths]]. The extensions-swap-style "let unbuilt packages import each other's TS sources" trick from tsx is *out of scope* — Bun doesn't fully do it either; see [Non-goals](#non-goals). Unbuilt workspace packages are covered the way tsc covers them instead, by mapping `outDir` back to `rootDir` ([[research/exports-map-ts-swap]]).
 
 ## Current state of Node TS support (mid-2026)
 
@@ -134,6 +134,8 @@ What *is* the constraint is per-import fs latency. With dynamic ordering, averag
   1. **Bun doesn't fully do it either.** Bun's resolver applies a `.js → .ts` rewrite for relative-path file probes (`src/resolver/resolver.rs:5686–5739`) but **not** for exact exports-map hits — that branch returns `ModuleNotFound` without retry, and there's an explicit `DISABLE_AUTO_JS_TO_TS_IN_NODE_MODULES` flag for some cases. So the "unbuilt-package-import" behavior is a tsx-specific affordance, not a general TS-runtime expectation. Matching Bun here is the predictable choice.
   2. **It's invasive.** It requires intercepting Node's resolver errors and reinterpreting them, which makes the package author's `exports` declaration not authoritative. Packages would behave differently under Nub than under Node-with-a-compiled-package, which violates the reversibility filter.
   3. **Real-world dependence is unclear.** No high-profile packages are known to require this. The intended workflow for ship-TS-source packages is to author `"exports": ".": "./src/index.ts"` honestly.
+
+  What does ship is tsc's own mapping of a missing target inside the owning package's `outDir` to its source under `rootDir`, outside `node_modules` only. [[research/exports-map-ts-swap]] has the scope.
 - **Extensionless imports inside `node_modules`.** We don't probe for extensions in third-party dependencies; their published shape is whatever they shipped.
 - **Caching resolution results across processes (v1).** Per-process cache lands first; persistent on-disk cache is a follow-on once cold-cache measurements justify it.
 - **swc's own resolver.** swc ships `swc_ecma_loader`; not tracked against Node's resolver and has its own quirks. Don't reuse it.

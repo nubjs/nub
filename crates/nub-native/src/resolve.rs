@@ -306,6 +306,222 @@ fn resolve_bare_subpath(
     })
 }
 
+/// The TypeScript source behind a missing build output, for the unbuilt workspace
+/// package. Called only after Node has failed to resolve, so a built file always
+/// wins. `missing` is the absolute path Node could not find: what a package's
+/// `main`, `exports` or `imports` named, or the entry file. When Node's error does not
+/// carry that path, `missing` is absent and `specifier` is a bare package specifier
+/// whose path is re-derived (see [`package_path`]), from `parent_path` (the importer,
+/// empty for the entry).
+///
+/// `probe` is for a path Node itself probes: a legacy `main`, a CommonJS subpath or
+/// the entry, where `build` means `build.js` or `build/index.js`. An `exports` or
+/// `imports` target is exact.
+///
+/// Returns the source file, or `None` to keep Node's error.
+#[napi(catch_unwind)]
+pub fn resolve_out_dir_source(
+    missing: Option<String>,
+    specifier: String,
+    parent_path: String,
+    probe: Option<bool>,
+    tsconfig_path: Option<String>,
+    preserve_symlinks: Option<bool>,
+) -> Option<String> {
+    let preserve_symlinks = preserve_symlinks.unwrap_or(false);
+    let tsconfig_path = tsconfig_path.as_deref();
+    match missing {
+        Some(missing) => source_for_output(
+            &missing,
+            probe.unwrap_or(false),
+            tsconfig_path,
+            preserve_symlinks,
+        ),
+        None => {
+            let parent_dir = if parent_path.is_empty() {
+                std::env::current_dir().ok()?.to_string_lossy().into_owned()
+            } else {
+                dirname(&parent_path)
+            };
+            let path = package_path(&specifier, &parent_dir)?;
+            source_for_output(&path, true, tsconfig_path, preserve_symlinks)
+        }
+    }
+}
+
+/// The path a bare specifier names inside a package with no `exports`, found as
+/// Node finds the package: the nearest `node_modules/<name>` directory up from the
+/// importer. A bare name means its legacy `main`; a subpath is joined on. Node's
+/// error carries the exact path for an `exports` or `imports` target, so this covers
+/// only the two shapes it does not: ESM's failed legacy `main` (reported without the
+/// path on every version, and on Node 18 as an internal assertion), and a CommonJS
+/// subpath (`Cannot find module 'pkg/dist/x'`).
+fn package_path(specifier: &str, parent_dir: &str) -> Option<String> {
+    if specifier.starts_with('#') || specifier.starts_with('.') {
+        return None;
+    }
+    let mut segs = specifier.split('/');
+    let first = segs.next()?;
+    let name = if first.starts_with('@') {
+        format!("{first}/{}", segs.next()?)
+    } else {
+        first.to_string()
+    };
+    let subpath = segs.collect::<Vec<_>>().join("/");
+    // The same guard as [`resolve_bare_subpath`]: a dot or empty segment is a path
+    // Node normalizes differently, or one that leaves the package.
+    if !subpath.is_empty()
+        && subpath
+            .split(['/', '\\'])
+            .any(|s| s.is_empty() || s == "." || s == "..")
+    {
+        return None;
+    }
+    let pkg_dir = tsconfig::find_up_dir(parent_dir, &format!("node_modules/{name}"))?;
+    let text = std::fs::read_to_string(Path::new(&pkg_dir).join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if manifest.get("exports").is_some() {
+        return None;
+    }
+    if !subpath.is_empty() {
+        return Some(path_join_resolve(&pkg_dir, &subpath));
+    }
+    let main = manifest.get("main")?.as_str()?;
+    if main.trim().is_empty() {
+        return None;
+    }
+    Some(path_join_resolve(&pkg_dir, main))
+}
+
+/// tsc's output-to-source mapping (`tryLoadInputFileForPath`), run only where Node
+/// came up empty. A path inside the `outDir` of the tsconfig that owns it maps to the
+/// same path under `rootDir`, `.js` becoming `.ts`/`.tsx`, `.mjs` `.mts` and `.cjs`
+/// `.cts`. The built file always wins: this is reached only once it is missing.
+///
+/// The owning tsconfig is the target package's, never the importer's, and `extends`
+/// is followed with `tsc`'s path semantics, so an `outDir` inherited from a monorepo
+/// root names the root's directory, not the package's. A config qualifies only from
+/// inside the package (the nearest `package.json` above the target), which is also
+/// `tsc`'s condition. The project's configured tsconfig is tried first, then the
+/// nearest `tsconfig.json`.
+///
+/// A path inside `node_modules` once symlinks are resolved never maps, so a workspace
+/// package linked into `node_modules` qualifies and a published dependency does not.
+fn source_for_output(
+    missing: &str,
+    probe: bool,
+    tsconfig_path: Option<&str>,
+    preserve_symlinks: bool,
+) -> Option<String> {
+    if is_file(missing) {
+        return None;
+    }
+    // The output directory usually does not exist, so the symlink hop is resolved on
+    // the deepest ancestor that does.
+    let mut lexical = PathBuf::from(missing);
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while std::fs::metadata(&lexical).is_err() {
+        rest.push(lexical.file_name()?.to_os_string());
+        lexical = lexical.parent()?.to_path_buf();
+    }
+    let real_base = PathBuf::from(real_path(&lexical.to_string_lossy()));
+    let mut real = real_base.clone();
+    for part in rest.iter().rev() {
+        real.push(part);
+    }
+    let real = real.to_string_lossy().into_owned();
+    if is_node_modules(&real) {
+        return None;
+    }
+
+    let pkg_root = Path::new(&real)
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("package.json").is_file())?
+        .to_path_buf();
+    let mut configs: Vec<String> = Vec::new();
+    if let Some(explicit) = tsconfig_path {
+        let explicit = real_path(explicit);
+        if Path::new(&explicit).starts_with(&pkg_root) {
+            configs.push(explicit);
+        }
+    }
+    let nearest = Path::new(&real)
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(&pkg_root))
+        .map(|dir| dir.join("tsconfig.json"))
+        .find(|config| config.is_file());
+    if let Some(config) = nearest {
+        let config = config.to_string_lossy().into_owned();
+        if !configs.contains(&config) {
+            configs.push(config);
+        }
+    }
+
+    let mut outputs = Vec::new();
+    if !probe || !extname(&real).is_empty() {
+        outputs.push(real.clone());
+    }
+    if probe {
+        outputs.push(format!("{real}.js"));
+        outputs.push(
+            Path::new(&real)
+                .join("index.js")
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+
+    let source = configs.iter().find_map(|config| {
+        let dirs = tsconfig::emit_dirs(config)?;
+        outputs
+            .iter()
+            .find_map(|output| map_output_to_source(output, &dirs))
+    })?;
+
+    // Under `--preserve-symlinks` every other module of a linked package is keyed by
+    // its path through the link, so the answer has to be spelled that way too, or
+    // the same file would instantiate twice.
+    if !preserve_symlinks {
+        return Some(source);
+    }
+    let (mut lexical, mut real_base) = (lexical, real_base);
+    loop {
+        if let Ok(tail) = Path::new(&source).strip_prefix(&real_base) {
+            return Some(lexical.join(tail).to_string_lossy().into_owned());
+        }
+        if lexical.file_name().is_none() || lexical.file_name() != real_base.file_name() {
+            return Some(source);
+        }
+        lexical = lexical.parent()?.to_path_buf();
+        real_base = real_base.parent()?.to_path_buf();
+    }
+}
+
+fn map_output_to_source(output: &str, dirs: &tsconfig::EmitDirs) -> Option<String> {
+    let tail = Path::new(output).strip_prefix(&dirs.out_dir).ok()?;
+    if tail.as_os_str().is_empty() {
+        return None;
+    }
+    let ext = extname(output);
+    let source_exts: &[&str] = match ext.as_str() {
+        ".js" => &[".ts", ".tsx"],
+        ".mjs" => &[".mts"],
+        ".cjs" => &[".cts"],
+        _ => return None,
+    };
+    let mapped = Path::new(&dirs.root_dir)
+        .join(tail)
+        .to_string_lossy()
+        .into_owned();
+    let stem = mapped.strip_suffix(ext.as_str())?;
+    source_exts
+        .iter()
+        .map(|source_ext| format!("{stem}{source_ext}"))
+        .find(|candidate| is_file(candidate) && !is_node_modules(candidate))
+}
+
 /// Does this specifier NAME A DIRECTORY rather than a file — a trailing separator
 /// (`./sub/`) or a trailing `.` (`./sub/.`)?
 ///

@@ -1,6 +1,6 @@
 # The `.js → .ts` exports-map swap controversy
 
-- **Status:** v1, 2026-05-18. Bottom line: **not shipped.**
+- **Status:** v1, 2026-05-18, amended 2026-11-27. Bottom line: the swap is **not shipped**. tsc's own `outDir` → `rootDir` mapping, applied when a workspace package's build output is missing, **is** (see *The outDir mapping* below).
 - **Scope:** the "tsx trick" — silently rewriting `.js` to `.ts` when the `.js` does not exist, including inside a package's `exports` map. Distinct from the candidate-list probing in [[research/ts-extension-precedence]].
 - **Builds on:** [[research/module-resolution]], which already declares this a non-goal (this doc is the longer justification), and tsx's resolve hook, where its exports-map swap lives in source.
 
@@ -97,7 +97,7 @@ No public Bun design doc spells out the rationale, but the code, the feature fla
 
 ## Does Nub ship Layer 2?
 
-**No.** The reasons compound.
+**No.** The reasons compound. They are aimed at the same-directory swap; the narrower `outDir` mapping that does ship is the next section.
 
 **Compatibility.** The reversibility filter is the load-bearing principle for every Nub resolution decision, and Layer 2 violates it directly: a package behaves differently under Nub than under Node, in a way the package author can neither opt into nor out of. That is the Nub-only ecosystem fork the filter exists to prevent.
 
@@ -115,12 +115,25 @@ What Layer 2 uniquely solves is **monorepo packages whose authors declared `dist
 
 **The permissive reading holds.** When a `.js` file resolves — it exists on disk and the exports map points to it — run it. Second-guessing the author's declared shape needs a reason there is not.
 
+## The outDir mapping
+
+tsc's resolver maps an `exports` or `imports` target inside `outDir` back to the input file under `rootDir` (`tryLoadInputFileForPath`). Nub applies that mapping once Node has failed to resolve.
+
+This is the workspace case from above, answered the way the compiler answers it rather than by guessing a sibling file. The implementation is [[crates/nub-native/src/resolve.rs#resolve_out_dir_source]].
+
+- **The rule is tsc's.** A path inside `outDir` maps to the same path under `rootDir`: `.js` to `.ts` or `.tsx`, `.mjs` to `.mts`, `.cjs` to `.cts`. Without `rootDir`, the root is the tsconfig's directory, which is tsc's default from 6.0 and what both its resolvers assume.
+- **The target package's tsconfig decides.** tsc requires the program's own config to sit inside the package; Nub takes the config of the package that owns the target, so one workspace package importing another maps too. It also covers `main`, a subpath into an `exports`-less package, and the entry file.
+- **Paths follow `extends` as tsc reads them.** An `outDir` inherited from a monorepo root names the root's directory, where tsc emits that package. A package whose `main` names its own `build/` then has nothing to map, as under tsc.
+- **Fallback only.** Node resolves first and a built file always loads, so stale output wins over source, as it does at type-check time once built.
+- **Never inside `node_modules`.** The target's real path decides, so a symlinked workspace package qualifies and a published dependency keeps its declared shape. Objections 2 and 4 above do not arise.
+- **Node still evaluates the map.** The missing path comes from Node's own error: `url` on ESM's `ERR_MODULE_NOT_FOUND`, the message of a CommonJS `MODULE_NOT_FOUND` that carries `path`. Two shapes carry neither and are re-derived from `package.json`: ESM's legacy `main` failure and a CommonJS subpath. A changed error shape stops the mapping and leaves Node's error, rather than resolving something else.
+
 ## What to ship instead
 
-Layer 1 only, with `exports` maps passed through to Node untouched, source-consuming monorepos told to declare `.ts` in `exports`, and the divergence from tsx documented.
+Layer 1, the `outDir` mapping above, source-consuming monorepos free to declare `.ts` in `exports`, and the divergence from tsx documented.
 
 1. **Layer 1 (relative `.js → .ts`) inside TS-family parents.** When the user wrote `import "./foo.js"`, `./foo.js` is missing and `./foo.ts` exists, resolve to `./foo.ts`. This is the `allowImportingTsExtensions + rewriteRelativeImportExtensions` workflow, runs identically on plain Node post-build, and is already in the [[research/module-resolution]] candidate list.
-2. **Pass-through for `exports` maps.** Use whatever Node's resolver returns; when the file is missing, surface the error Node would.
+2. **Pass-through for `exports` maps.** Use whatever Node's resolver returns. When the file is missing, map it through the owning package's `outDir` as above, or surface the error Node would.
 3. **Honest exports for `.ts` source.** A Nub-using monorepo that wants to consume a sibling's `.ts` has the sibling declare `"exports": "./src/index.ts"`, which Nub resolves and transpiles like any other `.ts`.
 
 ## Cross-references
@@ -148,3 +161,4 @@ Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Initial publication.
 - 2026-08-28 — Trimmed to the measured findings and current behavior.
+- 2026-11-27 — **REVERSAL (partial):** the `outDir` → `rootDir` mapping tsc's resolver performs now ships as a fallback for workspace packages, scoped as described in *The outDir mapping*. The same-directory swap stays unshipped.

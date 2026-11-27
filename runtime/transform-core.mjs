@@ -113,7 +113,7 @@ function __getBuiltin(id) {
 // `let` (not `const`) because on the floor they are filled on first hook use rather
 // than at module eval — see the lazy-vs-eager note above.
 let createRequire, __require, module, readFileSync, writeFileSync, mkdirSync, statSync, realpathSync;
-let fileURLToPath, pathToFileURL, join, dirname;
+let fileURLToPath, pathToFileURL, join, dirname, isAbsolute;
 // Nub's N-API addon — the in-process TS/JSX transpiler (`transform`,
 // `transformCached`, `detectModuleInfo`), the tsconfig reader + additive
 // TS-resolver (`loadTsconfig`, `resolveTs`), AND the data-format parsers
@@ -141,7 +141,7 @@ function __ensureBuiltins() {
   module = __getBuiltin("node:module");
   ({ readFileSync, writeFileSync, mkdirSync, statSync, realpathSync } = __getBuiltin("node:fs"));
   ({ fileURLToPath, pathToFileURL } = __getBuiltin("node:url"));
-  ({ join, dirname } = __getBuiltin("node:path"));
+  ({ join, dirname, isAbsolute } = __getBuiltin("node:path"));
   for (const rel of ["./addons/nub-native.node", "../runtime/addons/nub-native.node"]) {
     try { nubNative = __require(fileURLToPath(new URL(rel, import.meta.url))); break; } catch {}
   }
@@ -713,6 +713,67 @@ export function resolveCjsPath(request, parentPath) {
   // null result (node_modules / `exports` / a plain bare package) falls through to
   // Node's CJS resolver — the compat boundary.
   return resolveTs(request, parentPath || "");
+}
+
+// The first line of the not-found error Node's CommonJS resolver raises for a
+// package target (`main`, `exports`, `imports`) and for the entry. The `main` form
+// carries the suffix. Greedy, because the path may itself contain a quote.
+const CJS_NOT_FOUND = /^Cannot find module '(.*)'(\. Please verify that the package\.json has a valid "main" entry)?$/;
+
+// When Node cannot find a module a package named — its `main`, an `exports` or
+// `imports` target, a subpath into it — or the entry file, and that path lies in the
+// owning package's tsconfig `outDir`, answer with the matching source under
+// `rootDir`, as tsc does. This is the unbuilt workspace package: `main` points at
+// `dist/index.js` and nothing has been built. Returns an absolute path, or null to
+// keep Node's error. It runs only after Node has failed, so a built file always wins
+// and a successful resolve pays nothing; the mapping itself is native
+// (`resolveOutDirSource`).
+//
+// The missing path comes from Node's own error, so Node stays the one evaluating
+// `exports`/`imports` and conditions: ESM's `ERR_MODULE_NOT_FOUND` carries it as
+// `url`, and CommonJS names it in the message, with `path` set to the package. Two
+// shapes carry neither, and native re-derives the path from the package's manifest:
+// ESM's failed legacy `main` (`Cannot find package …`, raised on Node 18 as an
+// internal assertion), and a CommonJS subpath into an `exports`-less package.
+//
+// A relative or absolute specifier is a path the author wrote and gets no mapping,
+// as in tsc. The entry is the exception: `node dist/index.js` is the `start`
+// script a workspace package runs from its build.
+export function outDirSource(err, specifier, parentPath, isEntry) {
+  if (!nubNative || typeof nubNative.resolveOutDirSource !== "function") return null;
+  if (typeof specifier !== "string" || !err) return null;
+  if (specifier.startsWith("./") || specifier.startsWith("../") || specifier === "." || specifier === "..") {
+    return null;
+  }
+  const isPath = specifier.startsWith("file:") || isAbsolute(specifier);
+  if (isPath && !isEntry) return null;
+  const code = err.code;
+  let missing = null;
+  let probe = !!isEntry;
+  if (code === "ERR_MODULE_NOT_FOUND" && typeof err.url === "string") {
+    if (!err.url.startsWith("file:")) return null;
+    try { missing = fileURLToPath(err.url); } catch { return null; }
+  } else if (code === "MODULE_NOT_FOUND" && (typeof err.path === "string" || isEntry)) {
+    const m = CJS_NOT_FOUND.exec(String(err.message).split("\n", 1)[0]);
+    if (!m || !isAbsolute(m[1])) return null;
+    missing = m[1];
+    if (m[2]) probe = true;
+  } else if (code === "MODULE_NOT_FOUND") {
+    // A subpath into an `exports`-less package (`pkg/dist/x`), named by specifier only.
+    if (isPath || specifier.startsWith("#")) return null;
+    probe = true;
+  } else if (code === "ERR_MODULE_NOT_FOUND" ||
+             (code === "ERR_INTERNAL_ASSERTION" && String(err.message).includes("ERR_MODULE_NOT_FOUND"))) {
+    if (isPath || specifier.startsWith("#")) return null;
+  } else {
+    return null;
+  }
+  try {
+    return nubNative.resolveOutDirSource(missing, specifier, parentPath || "", probe,
+      RUNTIME_TSCONFIG, PRESERVE_SYMLINKS) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // Would `require()`-ing this resolved TS file need Node's require(esm)? An

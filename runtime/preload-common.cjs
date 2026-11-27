@@ -806,6 +806,11 @@ function restoreSchemeOnlyBuiltinURL(result) {
   }
 }
 
+// The filesystem path of a `file:` importer URL, or "" for any other parent.
+function filePathOf(parentURL) {
+  return typeof parentURL === "string" && parentURL.startsWith("file:") ? fileURLToPath(parentURL) : "";
+}
+
 function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsyncLoaderFlagPresent()) {
   installUserHookDetector();
   installUserAsyncLoaderDetector();
@@ -853,6 +858,9 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
         if (fallback) return fallback;
       }
+      const source = core.outDirSource(err, specifier, filePathOf(context.parentURL),
+        context.parentURL === undefined);
+      if (source) return { url: pathToFileURL(source).href, shortCircuit: true };
       if (err && err.code === "ERR_MODULE_NOT_FOUND") {
         const hint = phantomDepHint(specifier, context.parentURL);
         if (hint) annotateError(err, hint);
@@ -1283,6 +1291,27 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     nubOwnsExt(pathExtname(filename)) &&
     core.isDependency(pathToFileURL(filename).href);
 
+  const checkedTsTarget = (resolved) => {
+    // This pre-check stays at RESOLVE time even though `_resolveFilename` also
+    // answers `require.resolve()`, for which a path lookup is not a load. Below the
+    // Node #60380 fix, `require()` of a transpiled ES module dies inside the
+    // loader-worker translator with an opaque `cjsCache.get(...)` TypeError, and
+    // that happens before any load hook of ours can run — so a load-time refusal
+    // never gets its turn and Node's own crash is what the user sees.
+    //
+    // The cost is that `require.resolve()` of an ESM-syntax TS target throws here
+    // instead of returning the path. Telling the two callers apart is not reliable
+    // across the band this is live on: Node passes 3 arguments from `Module._load`
+    // and 4 from `require.resolve` up to 22.14, but 22.15 and 22.16 pass 4 for both
+    // while still lacking native TS — and the translator crash is present on
+    // exactly those versions. A clean error beats an opaque crash, so this stays.
+    if (withClassicTranspile && nubOwnsExt(pathExtname(resolved)) &&
+        core.requireTargetIsEsm(resolved, pathExtname(resolved))) {
+      throw requireEsmError(resolved);
+    }
+    return resolved;
+  };
+
   module_._resolveFilename = function (request, parent, isMain, options) {
     let resolved = null;
     try {
@@ -1320,26 +1349,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
         }
       }
     }
-    if (resolved) {
-      // This pre-check stays at RESOLVE time even though `_resolveFilename` also
-      // answers `require.resolve()`, for which a path lookup is not a load. Below the
-      // Node #60380 fix, `require()` of a transpiled ES module dies inside the
-      // loader-worker translator with an opaque `cjsCache.get(...)` TypeError, and
-      // that happens before any load hook of ours can run — so a load-time refusal
-      // never gets its turn and Node's own crash is what the user sees.
-      //
-      // The cost is that `require.resolve()` of an ESM-syntax TS target throws here
-      // instead of returning the path. Telling the two callers apart is not reliable
-      // across the band this is live on: Node passes 3 arguments from `Module._load`
-      // and 4 from `require.resolve` up to 22.14, but 22.15 and 22.16 pass 4 for both
-      // while still lacking native TS — and the translator crash is present on
-      // exactly those versions. A clean error beats an opaque crash, so this stays.
-      if (withClassicTranspile && nubOwnsExt(pathExtname(resolved)) &&
-          core.requireTargetIsEsm(resolved, pathExtname(resolved))) {
-        throw requireEsmError(resolved);
-      }
-      return resolved;
-    }
+    if (resolved) return checkedTsTarget(resolved);
     // Yarn PnP (CJS): `.pnp.cjs` already patched THIS function (origResolveFilename)
     // to resolve from PnP's manifest, including zip-stored deps — so we just delegate
     // to it. The one snag is that a registered customization hook makes Node thread a
@@ -1391,6 +1401,8 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       }
       if (e && e.code === "MODULE_NOT_FOUND") {
         const fromPath = parent && typeof parent.filename === "string" ? parent.filename : null;
+        const source = core.outDirSource(e, request, fromPath, !!isMain);
+        if (source) return checkedTsTarget(source);
         const hint = phantomDepHint(request, fromPath);
         if (hint) annotateError(e, hint);
       }
