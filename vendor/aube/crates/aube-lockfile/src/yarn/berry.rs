@@ -44,12 +44,12 @@ pub(super) fn parse_berry_str(
     // `LockedPackage` keyed by canonical `name@version` and recording
     // every header-spec → dep_path mapping for the second pass.
     let mut spec_to_dep_path: BTreeMap<String, String> = BTreeMap::new();
-    // A local block's header carries a `::locator=…` qualifier that the
-    // manifest range lacks (`is-odd@file:./local.tgz::locator=app%40workspace%3A.`
-    // for `is-odd: file:./local.tgz`). The unqualified descriptor is
-    // registered after the first pass, only when it names one package:
-    // two workspaces can each depend on their own `file:./x.tgz`.
-    let mut unqualified_local: BTreeMap<String, Option<String>> = BTreeMap::new();
+    // A local block's header carries a `::locator=…` qualifier naming the
+    // workspace that declared it (`is-odd@file:./local.tgz::locator=app%40workspace%3A.`
+    // for `is-odd: file:./local.tgz` in the root). Keyed here by the
+    // unqualified descriptor and that workspace's directory, since two
+    // workspaces can each depend on their own `file:./x.tgz`.
+    let mut local_by_workspace: BTreeMap<(String, String), String> = BTreeMap::new();
     let mut packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
     let mut patched_dependencies: BTreeMap<String, String> = BTreeMap::new();
     // Under `strict_unsupported_source` (nub), a block whose protocol the
@@ -224,6 +224,18 @@ pub(super) fn parse_berry_str(
         // Berry always pairs registry and local deps by `name@version`
         // at the graph layer, so duplicate names with the same version
         // but different protocols collapse — same as the classic writer.
+        // Yarn reads a `file:` path relative to the declaring workspace;
+        // aube reads it from the project root, so rebase a member's.
+        let workspace_dir = specs.iter().find_map(|spec| spec_workspace_dir(spec));
+        let local_source = match (local_source, workspace_dir.as_deref()) {
+            (Some(LocalSource::Tarball(p)), Some(dir)) if res_protocol == "file" => {
+                Some(LocalSource::Tarball(rebase_on_workspace(dir, &p)))
+            }
+            (Some(LocalSource::Directory(p)), Some(dir)) if res_protocol == "file" => {
+                Some(LocalSource::Directory(rebase_on_workspace(dir, &p)))
+            }
+            (other, _) => other,
+        };
         let dep_path = match &local_source {
             Some(src) => src.dep_path(res_name),
             None => format!("{res_name}@{version}"),
@@ -245,15 +257,10 @@ pub(super) fn parse_berry_str(
             if let Some((stripped, _)) = spec.split_once("::") {
                 if stripped.contains("@patch:") {
                     spec_to_dep_path.insert(stripped.to_string(), dep_path.clone());
-                } else if local_source.is_some() {
-                    unqualified_local
-                        .entry(stripped.to_string())
-                        .and_modify(|seen| {
-                            if seen.as_ref() != Some(&dep_path) {
-                                *seen = None;
-                            }
-                        })
-                        .or_insert_with(|| Some(dep_path.clone()));
+                } else if local_source.is_some()
+                    && let Some(dir) = spec_workspace_dir(spec)
+                {
+                    local_by_workspace.insert((stripped.to_string(), dir), dep_path.clone());
                 }
             }
         }
@@ -341,11 +348,6 @@ pub(super) fn parse_berry_str(
     // bare-name (`@types/node`) and descriptor-keyed (`lru-cache@^10.0.1`)
     // resolution keys.
     let resolution_rules = crate::override_match::compile(&manifest.overrides_map());
-    for (spec, dep_path) in unqualified_local {
-        if let Some(dep_path) = dep_path {
-            spec_to_dep_path.entry(spec).or_insert(dep_path);
-        }
-    }
 
     // Second pass: resolve raw header specs on each package's
     // `dependencies` / `optional_dependencies` map to canonical dep_paths.
@@ -505,6 +507,17 @@ pub(super) fn parse_berry_str(
                        skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<(), Error> {
         let resolved = crate::override_match::apply(&resolution_rules, name, range);
+        if let Some(dep_path) =
+            local_by_workspace.get(&(format!("{name}@{range}"), importer.replace('\\', "/")))
+        {
+            into.push(DirectDep {
+                name: name.to_string(),
+                dep_path: dep_path.clone(),
+                dep_type,
+                specifier: None,
+            });
+            return Ok(());
+        }
         let candidates = berry_spec_candidates(name, range, resolved);
         let optional = matches!(dep_type, DepType::Optional);
         for candidate in &candidates {
@@ -847,6 +860,44 @@ fn collect_peer_meta(block: &yaml_serde::Mapping) -> BTreeMap<String, crate::Pee
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The directory of the workspace named by a header spec's `::locator=…`
+/// qualifier (`app%40workspace%3Apackages%2Fapp` gives `packages/app`).
+fn spec_workspace_dir(spec: &str) -> Option<String> {
+    let (_, qualifiers) = spec.split_once("::")?;
+    let locator = qualifiers
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("locator="))?;
+    let locator = percent_decode(locator)?;
+    let (_, dir) = locator.rsplit_once("@workspace:")?;
+    Some(dir.to_string())
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `path` as written in workspace `dir`, relative to the project root.
+fn rebase_on_workspace(dir: &str, path: &std::path::Path) -> PathBuf {
+    if dir == "." || path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let rel = path.strip_prefix(".").unwrap_or(path);
+    PathBuf::from(format!("./{dir}")).join(rel)
 }
 
 /// Resolve a `file:`-protocol body like `./vendor/foo` or

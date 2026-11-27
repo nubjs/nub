@@ -761,9 +761,87 @@ fn berry_reads_root_file_and_alias_dependencies_beside_each_other() {
         Some(LocalSource::Tarball(PathBuf::from("./local.tgz")))
     );
     // The direct alias gets its own alias-keyed package to install under.
-    let choice = graph.importers["."].iter().find(|d| d.name == "choice").unwrap();
+    let choice = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "choice")
+        .unwrap();
     assert_eq!(choice.dep_path, "choice@1.0.0");
     assert_eq!(graph.packages["choice@1.0.0"].registry_name(), "is-odd");
+}
+
+#[test]
+fn berry_keeps_each_workspaces_own_file_dependency() {
+    // Yarn 4.9.2's lockfile for a root and `packages/app` that each depend
+    // on their own `file:./dep.tgz`: yarn reads each path from its workspace.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"wsroot","private":true,"workspaces":["packages/*"],"dependencies":{"test-file":"file:./dep.tgz"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("packages/app")).unwrap();
+    std::fs::write(
+        root.join("packages/app/package.json"),
+        r#"{"name":"app","version":"1.0.0","dependencies":{"test-file":"file:./dep.tgz"}}"#,
+    )
+    .unwrap();
+    let lock_path = root.join("yarn.lock");
+    std::fs::write(
+        &lock_path,
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"app@workspace:packages/app":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:packages/app"
+  dependencies:
+    test-file: "file:./dep.tgz"
+  languageName: unknown
+  linkType: soft
+
+"test-file@file:./dep.tgz::locator=app%40workspace%3Apackages%2Fapp":
+  version: 1.0.0
+  resolution: "test-file@file:./dep.tgz#./dep.tgz::hash=674ba4&locator=app%40workspace%3Apackages%2Fapp"
+  languageName: node
+  linkType: hard
+
+"test-file@file:./dep.tgz::locator=wsroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "test-file@file:./dep.tgz#./dep.tgz::hash=717e91&locator=wsroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"wsroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "wsroot@workspace:."
+  dependencies:
+    test-file: "file:./dep.tgz"
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    let graph = parse(&lock_path, &manifest).unwrap();
+    let tarball = |importer: &str| {
+        let dep = graph.importers[importer]
+            .iter()
+            .find(|d| d.name == "test-file")
+            .unwrap_or_else(|| panic!("{importer} must depend on test-file: {graph:#?}"));
+        graph.packages[&dep.dep_path].local_source.clone()
+    };
+    assert_eq!(
+        tarball("."),
+        Some(LocalSource::Tarball(PathBuf::from("./dep.tgz")))
+    );
+    assert_eq!(
+        tarball("packages/app"),
+        Some(LocalSource::Tarball(PathBuf::from(
+            "./packages/app/dep.tgz"
+        )))
+    );
 }
 
 #[test]
