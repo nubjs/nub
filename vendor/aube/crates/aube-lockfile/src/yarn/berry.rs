@@ -960,13 +960,14 @@ pub(super) fn yarn_resolution(
         }
     };
     // `Configuration#normalizeLocator`: a bare semver range or tag takes the
-    // default `npm:` protocol; anything else keeps its own.
+    // default `npm:` protocol; anything else keeps its own (`validRange`
+    // rejects any `:` before parsing).
     let bare = |r: &str| {
         let tag = !r.starts_with('v')
             && !r.is_empty()
             && r.chars()
                 .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
-        if tag || aube_semver::parse_range(r).is_ok() {
+        if tag || (!r.contains(':') && aube_semver::parse_range(r).is_ok()) {
             format!("npm:{r}")
         } else {
             r.to_string()

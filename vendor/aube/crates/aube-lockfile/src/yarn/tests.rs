@@ -1209,6 +1209,15 @@ fn berry_yarn_resolution_takes_the_first_rule_that_applies_to_the_declarer() {
         Some("4.17.21")
     );
     assert_eq!(get(None, "lodash", "^3.0.0"), None);
+    // An explicit `npm:` range is compared whole, comparators and all.
+    let rules = vec![(
+        "rroot/leaf@>=1.0.0 <2.0.0".to_string(),
+        "file:./direct".to_string(),
+    )];
+    assert_eq!(
+        yarn_resolution(&rules, root, "leaf", "npm:>=1.0.0 <2.0.0").as_deref(),
+        Some("file:./direct")
+    );
 }
 
 #[test]
