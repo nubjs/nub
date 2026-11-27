@@ -845,6 +845,93 @@ fn berry_keeps_each_workspaces_own_file_dependency() {
 }
 
 #[test]
+fn berry_reads_a_file_resolution_for_root_member_and_transitive_edges() {
+    // Yarn 4.9.2's lockfile for root `resolutions` that redirect `leaf` and
+    // `is-number` to `file:./replacement`: both blocks carry the root's
+    // locator, but a member and `is-odd` reach them too.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"wsroot","private":true,"workspaces":["packages/*"],"dependencies":{"leaf":"^1.0.0","is-odd":"3.0.1"},"resolutions":{"leaf":"file:./replacement","is-number":"file:./replacement"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("packages/app")).unwrap();
+    std::fs::write(
+        root.join("packages/app/package.json"),
+        r#"{"name":"app","version":"1.0.0","dependencies":{"leaf":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    let lock_path = root.join("yarn.lock");
+    std::fs::write(
+        &lock_path,
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"app@workspace:packages/app":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:packages/app"
+  dependencies:
+    leaf: "npm:^1.0.0"
+  languageName: unknown
+  linkType: soft
+
+"is-number@file:./replacement::locator=wsroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "is-number@file:./replacement#./replacement::hash=38d0df&locator=wsroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"is-odd@npm:3.0.1":
+  version: 3.0.1
+  resolution: "is-odd@npm:3.0.1"
+  dependencies:
+    is-number: "npm:^6.0.0"
+  languageName: node
+  linkType: hard
+
+"leaf@file:./replacement::locator=wsroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./replacement#./replacement::hash=eb2872&locator=wsroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"wsroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "wsroot@workspace:."
+  dependencies:
+    is-odd: "npm:3.0.1"
+    leaf: "npm:^1.0.0"
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    let graph = parse(&lock_path, &manifest).unwrap();
+    let replacement = Some(LocalSource::Directory(PathBuf::from("./replacement")));
+    for importer in [".", "packages/app"] {
+        let dep = graph.importers[importer]
+            .iter()
+            .find(|d| d.name == "leaf")
+            .unwrap_or_else(|| panic!("{importer} must depend on leaf: {graph:#?}"));
+        assert_eq!(
+            graph.packages[&dep.dep_path].local_source, replacement,
+            "{importer}"
+        );
+    }
+    let is_odd = &graph.packages["is-odd@3.0.1"];
+    let edge = is_odd
+        .dependencies
+        .get("is-number")
+        .unwrap_or_else(|| panic!("is-odd must keep its is-number edge: {is_odd:#?}"));
+    let target = crate::resolve_dep_edge("is-number", edge, |k| graph.packages.contains_key(k))
+        .unwrap_or_else(|| panic!("is-number edge {edge} must name a package"));
+    assert_eq!(graph.packages[&target].local_source, replacement);
+}
+
+#[test]
 fn berry_writer_keeps_an_alias_apart_from_a_same_version_local_package() {
     // A fresh resolve of `choice: npm:is-odd@1.0.0` beside `is-odd:
     // file:./local.tgz`, both 1.0.0: the alias must keep its own registry

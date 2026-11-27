@@ -45,11 +45,15 @@ pub(super) fn parse_berry_str(
     // every header-spec → dep_path mapping for the second pass.
     let mut spec_to_dep_path: BTreeMap<String, String> = BTreeMap::new();
     // A local block's header carries a `::locator=…` qualifier naming the
-    // workspace that declared it (`is-odd@file:./local.tgz::locator=app%40workspace%3A.`
-    // for `is-odd: file:./local.tgz` in the root). Keyed here by the
-    // unqualified descriptor and that workspace's directory, since two
-    // workspaces can each depend on their own `file:./x.tgz`.
+    // workspace or package that declared it (`is-odd@file:./local.tgz::locator=app%40workspace%3A.`
+    // for `is-odd: file:./local.tgz` in the root), which the range in a
+    // manifest, a `resolutions` entry or a dependency edge lacks. Keyed by
+    // the unqualified descriptor and the declaring workspace's directory, since
+    // two workspaces can each depend on their own `file:./x.tgz`; the
+    // unqualified descriptor alone is registered too, after the first pass,
+    // when it names a single package.
     let mut local_by_workspace: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut unqualified_local: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
     let mut patched_dependencies: BTreeMap<String, String> = BTreeMap::new();
     // Under `strict_unsupported_source` (nub), a block whose protocol the
@@ -257,10 +261,18 @@ pub(super) fn parse_berry_str(
             if let Some((stripped, _)) = spec.split_once("::") {
                 if stripped.contains("@patch:") {
                     spec_to_dep_path.insert(stripped.to_string(), dep_path.clone());
-                } else if local_source.is_some()
-                    && let Some(dir) = spec_workspace_dir(spec)
-                {
-                    local_by_workspace.insert((stripped.to_string(), dir), dep_path.clone());
+                } else if local_source.is_some() {
+                    if let Some(dir) = spec_workspace_dir(spec) {
+                        local_by_workspace.insert((stripped.to_string(), dir), dep_path.clone());
+                    }
+                    unqualified_local
+                        .entry(stripped.to_string())
+                        .and_modify(|seen| {
+                            if seen.as_ref() != Some(&dep_path) {
+                                *seen = None;
+                            }
+                        })
+                        .or_insert_with(|| Some(dep_path.clone()));
                 }
             }
         }
@@ -348,6 +360,11 @@ pub(super) fn parse_berry_str(
     // bare-name (`@types/node`) and descriptor-keyed (`lru-cache@^10.0.1`)
     // resolution keys.
     let resolution_rules = crate::override_match::compile(&manifest.overrides_map());
+    for (spec, dep_path) in unqualified_local {
+        if let Some(dep_path) = dep_path {
+            spec_to_dep_path.entry(spec).or_insert(dep_path);
+        }
+    }
 
     // Second pass: resolve raw header specs on each package's
     // `dependencies` / `optional_dependencies` map to canonical dep_paths.
