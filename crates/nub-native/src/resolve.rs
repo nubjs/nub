@@ -511,10 +511,18 @@ fn source_for_output(missing: &str, probe: bool, tsconfig_path: Option<&str>) ->
     }
     // Spelled through the link Node took, which is the key Node gives the module
     // under `--preserve-symlinks`; by default Node's realpath step canonicalizes it.
+    // A spelling that names a different file (a linked `dist/` whose parents share
+    // names) is dropped for the mapped source.
     let (mut lexical, mut real_base) = (lexical, real_base);
+    let real_source = real_path(&source);
     loop {
         if let Ok(tail) = Path::new(&source).strip_prefix(&real_base) {
-            return Some(lexical.join(tail).to_string_lossy().into_owned());
+            let spelled = lexical.join(tail).to_string_lossy().into_owned();
+            return Some(if real_path(&spelled) == real_source {
+                spelled
+            } else {
+                source
+            });
         }
         if lexical.file_name().is_none() || lexical.file_name() != real_base.file_name() {
             return Some(source);

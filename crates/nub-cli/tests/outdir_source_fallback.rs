@@ -118,6 +118,44 @@ console.log(which + "|" + createRequire(import.meta.url)("lib").which);
     );
     let (stdout, stderr) = run(&dir, "app.mts");
     assert_eq!(stdout, "index.mts|index.cts", "stderr: {stderr}");
+    // Node takes `--preserve-symlinks=<anything>` as the bare flag, and the sources
+    // reached through the link must still compile.
+    let (stdout, stderr) = run_with(
+        &dir,
+        "app.mts",
+        &[("NODE_OPTIONS", "--preserve-symlinks=true")],
+    );
+    assert_eq!(stdout, "index.mts|index.cts", "stderr: {stderr}");
+}
+
+/// A symlinked `outDir` belongs to the package it points into: its source answers,
+/// as its build would, not a same-named file beside the link.
+#[cfg(unix)]
+#[test]
+fn symlinked_out_dir_maps_in_the_package_it_points_into() {
+    let dir = work_dir("linked-dist");
+    for (pkg, imports) in [
+        ("a", r##","imports":{"#x":"./dist/index.mjs"}"##),
+        ("b", ""),
+    ] {
+        write(
+            &dir.join(pkg).join("package.json"),
+            &format!(r#"{{"name":"{pkg}","type":"module"{imports}}}"#),
+        );
+        write(&dir.join(pkg).join("tsconfig.json"), OWN_DIRS);
+        write(
+            &dir.join(pkg).join("src/index.mts"),
+            &format!(r#"export default "{pkg}/src/index.mts" as string;"#),
+        );
+    }
+    std::fs::create_dir_all(dir.join("b/dist")).unwrap();
+    std::os::unix::fs::symlink("../b/dist", dir.join("a/dist")).unwrap();
+    write(
+        &dir.join("a/main.mts"),
+        r##"import x from "#x"; console.log(x);"##,
+    );
+    let (stdout, stderr) = run(&dir.join("a"), "main.mts");
+    assert_eq!(stdout, "b/src/index.mts", "stderr: {stderr}");
 }
 
 /// The package's own `imports` map pointing into `outDir` (`"#~/*": "./dist/*"`).

@@ -471,7 +471,9 @@ function nodeOptionValue(name, initial) {
   const args = [...nodeOptionsArgs(process.env.NODE_OPTIONS || ""), ...process.execArgv];
   for (const arg of args) {
     if (!arg.startsWith("--")) continue;
-    const flag = arg.replace(/_/g, "-");
+    // Node reads `--preserve-symlinks=<anything>` as the bare switch.
+    const eq = arg.indexOf("=");
+    const flag = (eq < 0 ? arg : arg.slice(0, eq)).replace(/_/g, "-");
     if (flag === `--${name}`) value = true;
     else if (flag === `--no-${name}`) value = false;
   }
