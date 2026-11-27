@@ -44,6 +44,12 @@ pub(super) fn parse_berry_str(
     // `LockedPackage` keyed by canonical `name@version` and recording
     // every header-spec → dep_path mapping for the second pass.
     let mut spec_to_dep_path: BTreeMap<String, String> = BTreeMap::new();
+    // A local block's header carries a `::locator=…` qualifier that the
+    // manifest range lacks (`is-odd@file:./local.tgz::locator=app%40workspace%3A.`
+    // for `is-odd: file:./local.tgz`). The unqualified descriptor is
+    // registered after the first pass, only when it names one package:
+    // two workspaces can each depend on their own `file:./x.tgz`.
+    let mut unqualified_local: BTreeMap<String, Option<String>> = BTreeMap::new();
     let mut packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
     let mut patched_dependencies: BTreeMap<String, String> = BTreeMap::new();
     // Under `strict_unsupported_source` (nub), a block whose protocol the
@@ -236,10 +242,19 @@ pub(super) fn parse_berry_str(
             // The base encoding (`npm%3A` vs bare) is preserved verbatim from
             // the resolution value into the header, so a plain prefix strip
             // matches without any URL-decoding.
-            if let Some((stripped, _)) = spec.split_once("::")
-                && stripped.contains("@patch:")
-            {
-                spec_to_dep_path.insert(stripped.to_string(), dep_path.clone());
+            if let Some((stripped, _)) = spec.split_once("::") {
+                if stripped.contains("@patch:") {
+                    spec_to_dep_path.insert(stripped.to_string(), dep_path.clone());
+                } else if local_source.is_some() {
+                    unqualified_local
+                        .entry(stripped.to_string())
+                        .and_modify(|seen| {
+                            if seen.as_ref() != Some(&dep_path) {
+                                *seen = None;
+                            }
+                        })
+                        .or_insert_with(|| Some(dep_path.clone()));
+                }
             }
         }
 
@@ -326,6 +341,11 @@ pub(super) fn parse_berry_str(
     // bare-name (`@types/node`) and descriptor-keyed (`lru-cache@^10.0.1`)
     // resolution keys.
     let resolution_rules = crate::override_match::compile(&manifest.overrides_map());
+    for (spec, dep_path) in unqualified_local {
+        if let Some(dep_path) = dep_path {
+            spec_to_dep_path.entry(spec).or_insert(dep_path);
+        }
+    }
 
     // Second pass: resolve raw header specs on each package's
     // `dependencies` / `optional_dependencies` map to canonical dep_paths.
@@ -565,6 +585,33 @@ pub(super) fn parse_berry_str(
     for (member_dir, member_pj) in &member_manifests {
         let member_direct = build_importer(member_dir, member_pj, &mut skipped_optional)?;
         importers.insert(member_dir.clone(), member_direct);
+    }
+
+    // A direct npm alias (`choice: npm:is-odd@1.0.0`) resolves to the real
+    // package's block as well; point it at an alias-keyed package, as the
+    // transitive edges above are, so the linker installs it under its alias.
+    for deps in importers.values_mut() {
+        for dep in deps.iter_mut() {
+            let Some(real) = packages.get(&dep.dep_path) else {
+                continue;
+            };
+            if real.local_source.is_some() || real.name == dep.name {
+                continue;
+            }
+            let key = format!("{}@{}", dep.name, real.version);
+            match packages.get(&key) {
+                Some(existing) if existing.registry_name() != real.registry_name() => continue,
+                Some(_) => {}
+                None => {
+                    let mut alias = real.clone();
+                    alias.alias_of = Some(alias.registry_name().to_string());
+                    alias.name = dep.name.clone();
+                    alias.dep_path = key.clone();
+                    packages.insert(key.clone(), alias);
+                }
+            }
+            dep.dep_path = key;
+        }
     }
 
     Ok(LockfileGraph {
@@ -1028,9 +1075,12 @@ pub fn write_berry(
     // An npm-alias edge names its alias-keyed package; yarn lists the alias
     // descriptor on the real package's block instead.
     let block_key = |key: String| -> String {
-        match canonical.get(&key).and_then(|p| alias_target_key(p)) {
-            Some(real) if canonical.contains_key(&real) => real,
-            _ => key,
+        match canonical
+            .get(&key)
+            .and_then(|p| alias_block_key(p, &canonical))
+        {
+            Some(real) => real,
+            None => key,
         }
     };
     for dep in graph.importers.get(".").into_iter().flatten() {
@@ -1100,7 +1150,7 @@ pub fn write_berry(
 
     for (canonical_key, pkg) in &canonical {
         // An alias-keyed package is written as the real package's block.
-        if alias_target_key(pkg).is_some_and(|real| canonical.contains_key(&real)) {
+        if alias_block_key(pkg, &canonical).is_some() {
             continue;
         }
         let mut out = String::new();
@@ -1239,7 +1289,9 @@ fn berry_exact_spec(
                 pkg.name, pkg.name, pkg.version, path
             )
         }
-        (None, None) => format!("{}@npm:{}", pkg.name, pkg.version),
+        // An npm alias resolves to the real package (`choice@npm:is-odd@1.0.0`
+        // has `resolution: "is-odd@npm:1.0.0"`).
+        (None, None) => format!("{}@npm:{}", pkg.registry_name(), pkg.version),
         (Some(src), _) => format!("{}@{}", pkg.name, src.specifier()),
     }
 }
@@ -1309,11 +1361,26 @@ fn write_berry_dep_map(
     }
 }
 
-/// The real package's key for an npm-alias package (`string-width-cjs@4.2.3`
-/// aliasing `string-width` gives `string-width@4.2.3`).
-fn alias_target_key(pkg: &LockedPackage) -> Option<String> {
+/// The block an npm-alias package is written into: the real registry
+/// package's (`string-width-cjs@4.2.3` aliasing `string-width` gives
+/// `string-width@4.2.3`). `None` when the graph holds no such registry row,
+/// so a same-version local or aliased row never absorbs the alias, and the
+/// alias keeps a block of its own.
+fn alias_block_key(
+    pkg: &LockedPackage,
+    canonical: &BTreeMap<String, &LockedPackage>,
+) -> Option<String> {
     let real = pkg.alias_of.as_deref()?;
-    (pkg.local_source.is_none() && real != pkg.name).then(|| format!("{real}@{}", pkg.version))
+    if pkg.local_source.is_some() || real == pkg.name {
+        return None;
+    }
+    let key = format!("{real}@{}", pkg.version);
+    canonical
+        .get(&key)
+        .is_some_and(|target| {
+            target.name == real && target.alias_of.is_none() && target.local_source.is_none()
+        })
+        .then_some(key)
 }
 
 /// `dependenciesMeta:` flagging each surviving optional edge, as yarn does.

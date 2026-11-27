@@ -707,6 +707,133 @@ fn berry_writer_keeps_a_direct_alias_descriptor_beside_the_real_one() {
 }
 
 #[test]
+fn berry_reads_root_file_and_alias_dependencies_beside_each_other() {
+    // Yarn 4.9.2's own lockfile: the `file:` block header carries
+    // `::locator=…`, which the manifest range does not.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"al@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "al@workspace:."
+  dependencies:
+    choice: "npm:is-odd@1.0.0"
+    is-odd: "file:./local.tgz"
+  languageName: unknown
+  linkType: soft
+
+"choice@npm:is-odd@1.0.0":
+  version: 1.0.0
+  resolution: "is-odd@npm:1.0.0"
+  languageName: node
+  linkType: hard
+
+"is-odd@file:./local.tgz::locator=al%40workspace%3A.":
+  version: 1.0.0
+  resolution: "is-odd@file:./local.tgz#./local.tgz::hash=c88871&locator=al%40workspace%3A."
+  languageName: node
+  linkType: hard
+"#,
+    )
+    .unwrap();
+    let manifest = make_manifest(
+        &[
+            ("choice", "npm:is-odd@1.0.0"),
+            ("is-odd", "file:./local.tgz"),
+        ],
+        &[],
+    );
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    let local = |name: &str| {
+        let dep = graph.importers["."]
+            .iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} must be a root dependency"));
+        graph.packages[&dep.dep_path].local_source.clone()
+    };
+    assert_eq!(local("choice"), None);
+    assert_eq!(
+        local("is-odd"),
+        Some(LocalSource::Tarball(PathBuf::from("./local.tgz")))
+    );
+    // The direct alias gets its own alias-keyed package to install under.
+    let choice = graph.importers["."].iter().find(|d| d.name == "choice").unwrap();
+    assert_eq!(choice.dep_path, "choice@1.0.0");
+    assert_eq!(graph.packages["choice@1.0.0"].registry_name(), "is-odd");
+}
+
+#[test]
+fn berry_writer_keeps_an_alias_apart_from_a_same_version_local_package() {
+    // A fresh resolve of `choice: npm:is-odd@1.0.0` beside `is-odd:
+    // file:./local.tgz`, both 1.0.0: the alias must keep its own registry
+    // block rather than fold into the local tarball's.
+    let alias = LockedPackage {
+        name: "choice".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: "choice@1.0.0".to_string(),
+        alias_of: Some("is-odd".to_string()),
+        ..Default::default()
+    };
+    let source = LocalSource::Tarball(PathBuf::from("./local.tgz"));
+    let local = LockedPackage {
+        name: "is-odd".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: source.dep_path("is-odd"),
+        local_source: Some(source),
+        ..Default::default()
+    };
+    let direct = |name: &str, dep_path: &str| crate::DirectDep {
+        name: name.to_string(),
+        dep_path: dep_path.to_string(),
+        dep_type: DepType::Production,
+        specifier: None,
+    };
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(
+            ".".to_string(),
+            vec![
+                direct("choice", &alias.dep_path),
+                direct("is-odd", &local.dep_path),
+            ],
+        )]),
+        packages: BTreeMap::from([
+            (alias.dep_path.clone(), alias.clone()),
+            (local.dep_path.clone(), local.clone()),
+        ]),
+        ..Default::default()
+    };
+    let manifest = make_manifest(
+        &[
+            ("choice", "npm:is-odd@1.0.0"),
+            ("is-odd", "file:./local.tgz"),
+        ],
+        &[],
+    );
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        written.contains(
+            "\"choice@npm:is-odd@1.0.0\":\n  version: 1.0.0\n  resolution: \"is-odd@npm:1.0.0\"\n"
+        ),
+        "the alias must keep a registry block:\n{written}"
+    );
+    let reparsed = parse(out.path(), &manifest).unwrap();
+    let dep = reparsed.importers["."]
+        .iter()
+        .find(|d| d.name == "choice")
+        .unwrap_or_else(|| panic!("choice must survive a readback:\n{written}"));
+    assert_eq!(
+        reparsed.packages[&dep.dep_path].local_source, None,
+        "{written}"
+    );
+}
+
+#[test]
 fn berry_npm_alias_edge_reaches_the_aliased_package() {
     // `@isaacs/cliui` depends on both `string-width@^5.1.2` and
     // `string-width-cjs: npm:string-width@^4.2.0`; yarn merges the alias
