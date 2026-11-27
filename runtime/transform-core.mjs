@@ -463,6 +463,9 @@ export function barePkg(specifier) {
 const PRESERVE_SYMLINKS =
   process.execArgv.includes("--preserve-symlinks") ||
   /(^|\s)--preserve-symlinks(\s|$)/.test(process.env.NODE_OPTIONS || "");
+const PRESERVE_SYMLINKS_MAIN =
+  process.execArgv.includes("--preserve-symlinks-main") ||
+  /(^|\s)--preserve-symlinks-main(\s|$)/.test(process.env.NODE_OPTIONS || "");
 
 function resolveTs(specifier, parentPath) {
   if (!nubNative) return null;
@@ -739,7 +742,22 @@ const CJS_NOT_FOUND = /^Cannot find module '(.*)'(\. Please verify that the pack
 // A relative or absolute specifier is a path the author wrote and gets no mapping,
 // as in tsc. The entry is the exception: `node dist/index.js` is the `start`
 // script a workspace package runs from its build.
-export function outDirSource(err, specifier, parentPath, isEntry) {
+//
+// `lookupPaths` (CommonJS only) returns the `node_modules` directories Node searched,
+// which a `require.resolve` `paths` option points away from the importer.
+export function outDirSource(err, specifier, parentPath, isEntry, lookupPaths) {
+  const found = outDirTarget(err, specifier, parentPath, isEntry, lookupPaths);
+  return found && found.path;
+}
+
+// The ESM form: a URL that keeps the query and fragment of the target Node chose,
+// since they are part of the module's identity.
+export function outDirSourceURL(err, specifier, parentPath, isEntry) {
+  const found = outDirTarget(err, specifier, parentPath, isEntry, null);
+  return found && pathToFileURL(found.path).href + found.suffix;
+}
+
+function outDirTarget(err, specifier, parentPath, isEntry, lookupPaths) {
   if (!nubNative || typeof nubNative.resolveOutDirSource !== "function") return null;
   if (typeof specifier !== "string" || !err) return null;
   if (specifier.startsWith("./") || specifier.startsWith("../") || specifier === "." || specifier === "..") {
@@ -749,10 +767,16 @@ export function outDirSource(err, specifier, parentPath, isEntry) {
   if (isPath && !isEntry) return null;
   const code = err.code;
   let missing = null;
+  let suffix = "";
+  let paths = null;
   let probe = !!isEntry;
   if (code === "ERR_MODULE_NOT_FOUND" && typeof err.url === "string") {
     if (!err.url.startsWith("file:")) return null;
-    try { missing = fileURLToPath(err.url); } catch { return null; }
+    try {
+      const url = new URL(err.url);
+      suffix = url.search + url.hash;
+      missing = fileURLToPath(url);
+    } catch { return null; }
   } else if (code === "MODULE_NOT_FOUND" && (typeof err.path === "string" || isEntry)) {
     const m = CJS_NOT_FOUND.exec(String(err.message).split("\n", 1)[0]);
     if (!m || !isAbsolute(m[1])) return null;
@@ -760,7 +784,8 @@ export function outDirSource(err, specifier, parentPath, isEntry) {
     if (m[2]) probe = true;
   } else if (code === "MODULE_NOT_FOUND") {
     // A subpath into an `exports`-less package (`pkg/dist/x`), named by specifier only.
-    if (isPath || specifier.startsWith("#")) return null;
+    if (isPath || specifier.startsWith("#") || typeof lookupPaths !== "function") return null;
+    try { paths = lookupPaths(); } catch { return null; }
     probe = true;
   } else if (code === "ERR_MODULE_NOT_FOUND" ||
              (code === "ERR_INTERNAL_ASSERTION" && String(err.message).includes("ERR_MODULE_NOT_FOUND"))) {
@@ -769,8 +794,9 @@ export function outDirSource(err, specifier, parentPath, isEntry) {
     return null;
   }
   try {
-    return nubNative.resolveOutDirSource(missing, specifier, parentPath || "", probe,
-      RUNTIME_TSCONFIG, PRESERVE_SYMLINKS) ?? null;
+    const path = nubNative.resolveOutDirSource(missing, specifier, parentPath || "", probe,
+      RUNTIME_TSCONFIG, isEntry ? PRESERVE_SYMLINKS_MAIN : PRESERVE_SYMLINKS, paths);
+    return path ? { path, suffix } : null;
   } catch {
     return null;
   }

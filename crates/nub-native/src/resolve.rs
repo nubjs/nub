@@ -311,8 +311,10 @@ fn resolve_bare_subpath(
 /// wins. `missing` is the absolute path Node could not find: what a package's
 /// `main`, `exports` or `imports` named, or the entry file. When Node's error does not
 /// carry that path, `missing` is absent and `specifier` is a bare package specifier
-/// whose path is re-derived (see [`package_path`]), from `parent_path` (the importer,
-/// empty for the entry).
+/// whose path is re-derived (see [`package_path`]): from the `node_modules`
+/// directories Node searched when `lookup_paths` is given (CommonJS, which a
+/// `require.resolve` `paths` option can point anywhere), else up from `parent_path`
+/// (the importer, empty for the entry), as ESM searches.
 ///
 /// `probe` is for a path Node itself probes: a legacy `main`, a CommonJS subpath or
 /// the entry, where `build` means `build.js` or `build/index.js`. An `exports` or
@@ -327,6 +329,7 @@ pub fn resolve_out_dir_source(
     probe: Option<bool>,
     tsconfig_path: Option<String>,
     preserve_symlinks: Option<bool>,
+    lookup_paths: Option<Vec<String>>,
 ) -> Option<String> {
     let preserve_symlinks = preserve_symlinks.unwrap_or(false);
     let tsconfig_path = tsconfig_path.as_deref();
@@ -343,20 +346,25 @@ pub fn resolve_out_dir_source(
             } else {
                 dirname(&parent_path)
             };
-            let path = package_path(&specifier, &parent_dir)?;
+            let path = package_path(&specifier, &parent_dir, lookup_paths.as_deref())?;
             source_for_output(&path, true, tsconfig_path, preserve_symlinks)
         }
     }
 }
 
 /// The path a bare specifier names inside a package with no `exports`, found as
-/// Node finds the package: the nearest `node_modules/<name>` directory up from the
-/// importer. A bare name means its legacy `main`; a subpath is joined on. Node's
+/// Node finds the package: the first of `lookup_paths` holding `<name>`, or with
+/// none given the nearest `node_modules/<name>` directory up from the importer. A
+/// bare name means its legacy `main`; a subpath is joined on. Node's
 /// error carries the exact path for an `exports` or `imports` target, so this covers
 /// only the two shapes it does not: ESM's failed legacy `main` (reported without the
 /// path on every version, and on Node 18 as an internal assertion), and a CommonJS
 /// subpath (`Cannot find module 'pkg/dist/x'`).
-fn package_path(specifier: &str, parent_dir: &str) -> Option<String> {
+fn package_path(
+    specifier: &str,
+    parent_dir: &str,
+    lookup_paths: Option<&[String]>,
+) -> Option<String> {
     if specifier.starts_with('#') || specifier.starts_with('.') {
         return None;
     }
@@ -377,7 +385,13 @@ fn package_path(specifier: &str, parent_dir: &str) -> Option<String> {
     {
         return None;
     }
-    let pkg_dir = tsconfig::find_up_dir(parent_dir, &format!("node_modules/{name}"))?;
+    let pkg_dir = match lookup_paths {
+        Some(dirs) => dirs.iter().find_map(|dir| {
+            let pkg = Path::new(dir).join(&name);
+            pkg.is_dir().then(|| pkg.to_string_lossy().into_owned())
+        })?,
+        None => tsconfig::find_up_dir(parent_dir, &format!("node_modules/{name}"))?,
+    };
     let text = std::fs::read_to_string(Path::new(&pkg_dir).join("package.json")).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
     if manifest.get("exports").is_some() {
@@ -480,11 +494,13 @@ fn source_for_output(
             .find_map(|output| map_output_to_source(output, &dirs))
     })?;
 
-    // Under `--preserve-symlinks` every other module of a linked package is keyed by
-    // its path through the link, so the answer has to be spelled that way too, or
-    // the same file would instantiate twice.
+    // Node keys a module by its real path, so a symlinked source is canonicalized as
+    // Node's own realpath step would. Under `--preserve-symlinks` every module of a
+    // linked package is keyed by its path through the link instead, so the answer is
+    // spelled that way. Either way, the same file loads once.
     if !preserve_symlinks {
-        return Some(source);
+        let source = real_path(&source);
+        return (!is_node_modules(&source)).then_some(source);
     }
     let (mut lexical, mut real_base) = (lexical, real_base);
     loop {

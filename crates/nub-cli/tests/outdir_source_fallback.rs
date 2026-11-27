@@ -41,10 +41,16 @@ const OWN_DIRS: &str = r#"{"compilerOptions":{"rootDir":"src","outDir":"dist"}}"
 
 /// `(stdout, stderr)` of `nub <entry>` run from `dir`.
 fn run(dir: &Path, entry: &str) -> (String, String) {
+    run_with(dir, entry, &[])
+}
+
+fn run_with(dir: &Path, entry: &str, envs: &[(&str, &str)]) -> (String, String) {
     let out = Command::new(nub_binary())
         .arg(entry)
         .current_dir(dir)
         .env_remove("NODE_COMPAT")
+        .env_remove("NODE_OPTIONS")
+        .envs(envs.iter().copied())
         .env(
             "XDG_CACHE_HOME",
             std::env::temp_dir().join(format!("nub-outdir-cache-{}", std::process::id())),
@@ -229,4 +235,101 @@ fn dependency_in_node_modules_never_maps() {
         stdout.is_empty() && stderr.contains("Cannot find module"),
         "a dependency's source must not load: stdout {stdout:?}, stderr {stderr}"
     );
+}
+
+/// `require.resolve` with `paths` looks only where Node looked: another project's
+/// own link wins over the caller's, and a project with no link keeps Node's error.
+#[cfg(unix)]
+#[test]
+fn require_resolve_paths_searches_only_the_given_roots() {
+    let root = work_dir("paths");
+    for (pkg, from) in [("lib-a", "caller"), ("lib-b", "other")] {
+        let dir = root.join("packages").join(pkg);
+        write(&dir.join("package.json"), r#"{"name":"lib"}"#);
+        write(&dir.join("tsconfig.json"), OWN_DIRS);
+        write(&dir.join("src/missing.ts"), "exports.x = 1;");
+        let link = root.join(from).join("node_modules/lib");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&dir, link).unwrap();
+    }
+    write(&root.join("empty/package.json"), "{}");
+    write(
+        &root.join("caller/app.cts"),
+        r#"const at = (p: string) => {
+  try { return require.resolve("lib/dist/missing", { paths: [p] }).split("packages/")[1]; }
+  catch (e: any) { return e.code; }
+};
+console.log(at(__dirname + "/../other") + "|" + at(__dirname + "/../empty"));
+"#,
+    );
+    let (stdout, stderr) = run(&root.join("caller"), "app.cts");
+    assert_eq!(
+        stdout, "lib-b/src/missing.ts|MODULE_NOT_FOUND",
+        "stderr: {stderr}"
+    );
+}
+
+/// A query or fragment on the target Node selected stays on the source URL, so the
+/// two spellings stay two module instances, as they are once built.
+#[test]
+fn target_query_and_fragment_survive_the_mapping() {
+    let dir = work_dir("suffix");
+    write(
+        &dir.join("package.json"),
+        r##"{"type":"module","imports":{"#one":"./dist/item.mjs?one","#two":"./dist/item.mjs#two"}}"##,
+    );
+    write(&dir.join("tsconfig.json"), OWN_DIRS);
+    write(
+        &dir.join("src/item.mts"),
+        "export const url: string = import.meta.url;",
+    );
+    write(
+        &dir.join("main.mts"),
+        r##"import * as one from "#one";
+import * as two from "#two";
+console.log([one.url, two.url].map((u) => u.split("/").pop()).join("|") + "|" + (one !== two));
+"##,
+    );
+    let (stdout, stderr) = run(&dir, "main.mts");
+    assert_eq!(stdout, "item.mts?one|item.mts#two|true", "stderr: {stderr}");
+}
+
+/// A symlinked source is keyed by its real path, as Node keys every module, so the
+/// fallback and a direct import share one instance. `--preserve-symlinks` keeps the
+/// path through the link, as Node does.
+#[cfg(unix)]
+#[test]
+fn symlinked_source_is_one_module() {
+    let dir = work_dir("symlink");
+    write(
+        &dir.join("package.json"),
+        r##"{"type":"module","imports":{"#item":"./dist/item.js","#citem":"./dist/citem.cjs"}}"##,
+    );
+    write(&dir.join("tsconfig.json"), OWN_DIRS);
+    write(
+        &dir.join("real/item.ts"),
+        "export const url: string = import.meta.url;",
+    );
+    write(&dir.join("real/citem.cts"), "exports.id = {};");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    for file in ["item.ts", "citem.cts"] {
+        std::os::unix::fs::symlink(format!("../real/{file}"), dir.join("src").join(file)).unwrap();
+    }
+    write(
+        &dir.join("main.ts"),
+        r##"import * as viaMap from "#item";
+import * as direct from "./real/item.ts";
+console.log(viaMap === direct, viaMap.url.split("/").slice(-2).join("/"));
+"##,
+    );
+    write(
+        &dir.join("main.cts"),
+        r##"console.log(require("#citem") === require("./real/citem.cts"));"##,
+    );
+    let (stdout, stderr) = run(&dir, "main.ts");
+    assert_eq!(stdout, "true real/item.ts", "stderr: {stderr}");
+    let (stdout, stderr) = run(&dir, "main.cts");
+    assert_eq!(stdout, "true", "stderr: {stderr}");
+    let (stdout, stderr) = run_with(&dir, "main.ts", &[("NODE_OPTIONS", "--preserve-symlinks")]);
+    assert_eq!(stdout, "false src/item.ts", "stderr: {stderr}");
 }

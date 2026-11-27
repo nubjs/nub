@@ -672,6 +672,24 @@ function resolveViaParentRequire(specifier, parentURL) {
   }
 }
 
+// The `node_modules` directories Node's CommonJS resolver searched for a bare
+// request, built the way `Module._resolveFilename` builds them: each root of a
+// `require.resolve` `paths` option expanded on its own, else the parent's.
+function cjsLookupPaths(request, parent, options) {
+  if (!options || !ArrayIsArray(options.paths)) {
+    return module_._resolveLookupPaths(request, parent) || [];
+  }
+  const paths = [];
+  for (let i = 0; i < options.paths.length; i++) {
+    const root = { paths: module_._nodeModulePaths(options.paths[i]) };
+    const dirs = module_._resolveLookupPaths(request, root) || [];
+    for (let j = 0; j < dirs.length; j++) {
+      if (!ArrayPrototypeIncludes(paths, dirs[j])) ArrayPrototypePush(paths, dirs[j]);
+    }
+  }
+  return paths;
+}
+
 // Phantom-dependency remediation for nub's isolated layout. The isolated layout
 // (the post-flip default for npm/yarn/bun incumbents, and the standing default
 // for pnpm/fresh projects) exposes only DECLARED packages at the importer's
@@ -858,9 +876,9 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
         const fallback = resolveViaParentRequire(specifier, context.parentURL);
         if (fallback) return fallback;
       }
-      const source = core.outDirSource(err, specifier, filePathOf(context.parentURL),
+      const url = core.outDirSourceURL(err, specifier, filePathOf(context.parentURL),
         context.parentURL === undefined);
-      if (source) return { url: pathToFileURL(source).href, shortCircuit: true };
+      if (url) return { url, shortCircuit: true };
       if (err && err.code === "ERR_MODULE_NOT_FOUND") {
         const hint = phantomDepHint(specifier, context.parentURL);
         if (hint) annotateError(err, hint);
@@ -1401,7 +1419,8 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       }
       if (e && e.code === "MODULE_NOT_FOUND") {
         const fromPath = parent && typeof parent.filename === "string" ? parent.filename : null;
-        const source = core.outDirSource(e, request, fromPath, !!isMain);
+        const source = core.outDirSource(e, request, fromPath, !!isMain,
+          () => cjsLookupPaths(request, parent, options));
         if (source) return checkedTsTarget(source);
         const hint = phantomDepHint(request, fromPath);
         if (hint) annotateError(e, hint);
