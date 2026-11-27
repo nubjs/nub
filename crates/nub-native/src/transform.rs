@@ -429,6 +429,8 @@ impl From<ReactRefreshOptions> for oxc::transformer::ReactRefreshOptions {
 #[derive(Default)]
 pub struct Helpers {
     pub mode: Option<HelperMode>,
+    /// The package the helpers are imported from, `@oxc-project/runtime` by default.
+    pub module_name: Option<String>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -443,9 +445,10 @@ pub enum HelperMode {
 
 impl From<Helpers> for HelperLoaderOptions {
     fn from(value: Helpers) -> Self {
+        let defaults = HelperLoaderOptions::default();
         Self {
             mode: value.mode.map(HelperLoaderMode::from).unwrap_or_default(),
-            ..HelperLoaderOptions::default()
+            module_name: value.module_name.map_or(defaults.module_name, Into::into),
         }
     }
 }

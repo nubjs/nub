@@ -177,20 +177,28 @@ const IMPORT_DEFAULT: &str = r#"var __importDefault = (this && this.__importDefa
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };"#;
 
-/// `import(specifier)` resolved as `require.resolve` would: a builtin or JSON is
-/// required, as `tsc`'s `require()` would; anything else is imported, and if what
-/// ran was CommonJS (it is then in `require.cache`, as the namespace's `default`),
-/// its `module.exports` is handed back as `tsc`'s `require()` would, else the
-/// namespace. `WRAP` is `__importStar` under `esModuleInterop`, else nothing.
+/// `import(specifier)`, observed as `tsc`'s `require()` where the two load the same
+/// thing. With import attributes it is the real `import()`, untouched. Without, a
+/// builtin or a relative `.json` file is required, since `import()` of JSON needs an
+/// attribute; anything else is imported, and the namespace is unwrapped to the
+/// CommonJS `module.exports` only when it is that module's own: the one `import()`
+/// returns for the file `require.resolve` names. An ES module that default-exports
+/// a CommonJS module's exports keeps its namespace. The cache is read off
+/// `node:module`, since the `require` Node hands an entry loaded with a hook's source
+/// has no `cache`. `WRAP` is `__importStar` under `esModuleInterop`, else nothing.
 const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, options) {
+    if (arguments.length > 1) return import(specifier, options);
     var id;
     try { id = require.resolve(specifier); } catch (e) {}
-    if (id !== undefined && (require("node:module").isBuiltin(id) || /\.json$/i.test(id))) {
+    if (id !== undefined && (require("node:module").isBuiltin(id) || /^\.\.?\/.*\.json$/i.test(specifier))) {
         return Promise.resolve().then(function () { return WRAP(require(id)); });
     }
-    return (arguments.length > 1 ? import(specifier, options) : import(specifier)).then(function (ns) {
-        var m = id !== undefined && require.cache[id];
-        return m && ns.default === m.exports ? WRAP(m.exports) : ns;
+    return import(specifier).then(function (ns) {
+        var m = id !== undefined && require("node:module")._cache[id];
+        if (!m || ns.default !== m.exports) return ns;
+        return import(require("node:url").pathToFileURL(id).href).then(function (own) {
+            return own === ns ? WRAP(m.exports) : ns;
+        }, function () { return ns; });
     });
 };"#;
 
@@ -1366,7 +1374,9 @@ impl<'a> CjsTransform<'a> {
         }
     }
 
-    /// `for (x of xs)` writes `x` on every iteration, so each copy opens the body.
+    /// `for (x of xs)` writes `x` on every iteration, so each copy opens the body. A
+    /// body that declares its own bindings, which could shadow `x` or `exports`, is
+    /// nested in a block the copies open instead.
     fn copy_after_loop_head(
         &self,
         left: &mut ForStatementLeft<'a>,
@@ -1390,7 +1400,12 @@ impl<'a> CjsTransform<'a> {
                 &ast,
             ));
         }
-        if let Statement::BlockStatement(block) = body {
+        if let Statement::BlockStatement(block) = body
+            && block
+                .scope_id
+                .get()
+                .is_none_or(|scope| ctx.scoping().get_bindings(scope).is_empty())
+        {
             block.body.splice(0..0, statements);
         } else {
             statements.push(body.take_in(&ast));

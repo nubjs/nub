@@ -255,7 +255,7 @@ import path = require("node:path");
 import * as lib from "./lib";
 const show = require("./show.cjs");
 show("fn", fn);
-show("sep", path.sep);
+show("sep", path.posix.sep);
 show("lib", lib);
 `,
     },
@@ -413,6 +413,29 @@ for (const step of ${JSON.stringify(writeSteps)}) {
   (lib as any)[step]();
   show(step, [d, x, lib.default]);
 }
+`,
+    },
+  },
+  {
+    name: "loop heads shadowed in the body",
+    esm: { after: 'after = [3, "a"]' },
+    files: {
+      "lib.ts": `let x: any = 0;
+let k: any = "";
+export { x, k };
+export function run() {
+  const seen: any[] = [];
+  for (x of [1, 2]) { let x = "inner"; seen.push(x); }
+  for (x of [3]) { const exports = "local exports"; seen.push(exports); }
+  for (k in { a: 1 }) { const k = "inner"; seen.push(k); }
+  return seen;
+}
+`,
+      "main.ts": `import { x, k, run } from "./lib";
+const show = require("./show.cjs");
+show("before", [x, k]);
+show("run", run());
+show("after", [x, k]);
 `,
     },
   },

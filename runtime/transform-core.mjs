@@ -280,6 +280,12 @@ export function dataExtsFor(url) {
 // Packages resolved from Nub's distribution, not the user's.
 export const VENDORED_PACKAGES = new Set(["@oxc-project/runtime"]);
 
+// The name CommonJS output `require()`s Nub's transpile helpers by, in place of
+// `@oxc-project/runtime`, so the resolvers can tell the emit's request from a
+// project's own `require()` of that package, which keeps its installed copy as on
+// plain Node. Nothing publishes it; only resolveSpec and resolveCjsPath answer it.
+export const HELPERS_SPECIFIER = "@nubjs/oxc-runtime";
+
 // Package clobbering: specifiers that resolve to a synthetic module re-exporting
 // the native global instead of the userland package.
 export const CLOBBER_MAP = new Map([
@@ -445,6 +451,12 @@ function vendoredUrl(specifier) {
   return url;
 }
 
+// The vendored file a HELPERS_SPECIFIER request names, as a file: URL, or null.
+function emittedHelperUrl(specifier) {
+  if (!specifier.startsWith(`${HELPERS_SPECIFIER}/`)) return null;
+  return vendoredUrl(`@oxc-project/runtime${specifier.slice(HELPERS_SPECIFIER.length)}`);
+}
+
 export function barePkg(specifier) {
   return specifier.startsWith("@")
     ? specifier.split("/").slice(0, 2).join("/")
@@ -567,9 +579,13 @@ export function resolveSpec(specifier, parentURL, fromRequire = false) {
   if (specifier.startsWith("node:") || specifier.startsWith("data:")) return null;
   if (module.isBuiltin(specifier)) return null;
 
-  // 1. Vendored packages (e.g. @oxc-project/runtime).
+  // 1. Vendored packages: the helpers CommonJS output requires, and the
+  // `@oxc-project/runtime` imports of ES module output. A `require()` of the package
+  // by name is a project's own and resolves as on plain Node.
+  const helperUrl = emittedHelperUrl(specifier);
+  if (helperUrl) return { url: helperUrl, shortCircuit: true };
   const bare = barePkg(specifier);
-  if (VENDORED_PACKAGES.has(bare)) {
+  if (VENDORED_PACKAGES.has(bare) && !fromRequire) {
     const url = vendoredUrl(specifier);
     if (url) return { url, shortCircuit: true };
   }
@@ -702,7 +718,7 @@ export async function resolveRedirectAsync(redirect, context, next) {
 // CommonJS `require()` resolution for the compat-tier Module._resolveFilename
 // patch. Returns an absolute file path for a require specifier nub should
 // redirect (tsconfig `paths`, extensionless `.ts`, `.js`→`.ts` swap, Nub's
-// vendored helpers), or null to defer to Node's resolver. Mirrors resolveSpec
+// transpile helpers), or null to defer to Node's resolver. Mirrors resolveSpec
 // steps 1 and 3 but returns a path (not a URL) and never handles clobber/builtin
 // — those are import-only, and a clobber's data: URL can't be a require target. `parentPath` is the requiring
 // file's absolute path (from the CJS parent Module), or null for the entry.
@@ -713,19 +729,10 @@ export function resolveCjsPath(request, parentPath) {
       module.isBuiltin(request)) {
     return null;
   }
-  // Nub's own transpile helpers, which a file compiled to CommonJS `require()`s:
-  // from Nub's distribution, as `resolveSpec` does for `import`, since the
-  // standalone runner puts nothing on NODE_PATH. A dependency's own `require()`
-  // of the package keeps the copy it would get on plain Node.
-  // Nub's own `require.resolve` of it comes back through here with a parent
-  // inside the runtime dir, which Node's resolver answers.
-  if (VENDORED_PACKAGES.has(barePkg(request)) && parentPath) {
-    const parentURL = pathToFileURL(parentPath).href;
-    if (!isNubInternalParent(parentURL) && !isDependency(parentURL)) {
-      const url = vendoredUrl(request);
-      if (url) return fileURLToPath(url);
-    }
-  }
+  // Nub's transpile helpers, which CommonJS output requires by HELPERS_SPECIFIER:
+  // from Nub's distribution, since the standalone runner puts nothing on NODE_PATH.
+  const helperUrl = emittedHelperUrl(request);
+  if (helperUrl) return fileURLToPath(helperUrl);
   // The SAME native additive resolver as resolveSpec, returning an absolute path
   // (not a URL). Clobber/builtin are import-only and never reach here. A null
   // result (node_modules / `exports` / a plain bare package) falls through to
@@ -1173,8 +1180,8 @@ export function loadTranspile(url, ext, source) {
     // Lower syntax newer than the 22.15 floor. Critically this downlevels
     // `using`/`await using` (Explicit Resource Management) — unparseable on Node
     // 22's V8 — into the vendored `@oxc-project/runtime/helpers/usingCtx` shape,
-    // which resolves via VENDORED_PACKAGES. Without a target, oxc leaves `using`
-    // verbatim and Node 22 throws a SyntaxError. es2022 is the highest target
+    // which resolves from Nub's distribution (resolveSpec step 1). Without a
+    // target, oxc leaves `using` verbatim and Node 22 throws a SyntaxError. es2022 is the highest target
     // that still lowers `using` while leaving everything Node 22 already supports
     // (top-level await, class fields, private methods) untouched.
     target: "es2022",
@@ -1185,6 +1192,9 @@ export function loadTranspile(url, ext, source) {
       ? { legacy: true, emitDecoratorMetadata: co?.emitDecoratorMetadata === true }
       : undefined,
     cjs,
+    // CommonJS output `require()`s its helpers by a name of Nub's own (see
+    // HELPERS_SPECIFIER); ES module output imports `@oxc-project/runtime`.
+    helpers: format === "commonjs" ? { moduleName: HELPERS_SPECIFIER } : undefined,
   };
   if (lang === "tsx" || lang === "jsx") {
     opts.jsx = {

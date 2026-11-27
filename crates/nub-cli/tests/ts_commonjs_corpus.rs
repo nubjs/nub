@@ -1,7 +1,8 @@
 //! Every import and export form in tests/ts-commonjs/corpus.json, compiled to CommonJS
-//! by Nub with `esModuleInterop` on and off, observes at runtime what TypeScript
-//! 5.9.3's CommonJS emit observes, mutations included. tests/ts-commonjs/record.mjs
-//! records the corpus from the cases in cases.mjs, so this test needs no TypeScript.
+//! by Nub and by the standalone loader with `esModuleInterop` on and off, observes at
+//! runtime what TypeScript 5.9.3's CommonJS emit observes, mutations included.
+//! tests/ts-commonjs/record.mjs records the corpus from the cases in cases.mjs, so this
+//! test needs no TypeScript.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,6 +11,7 @@ struct Run {
     label: String,
     root: PathBuf,
     node_dir: Option<PathBuf>,
+    standalone: bool,
     expected: String,
 }
 
@@ -19,9 +21,24 @@ fn write(root: &Path, rel: &str, body: &str) {
     std::fs::write(path, body).unwrap();
 }
 
-/// The difference, or `None` when the run printed what `tsc`'s emit printed.
+/// The difference, or `None` when the run printed what `tsc`'s emit printed. A
+/// standalone run is the loader `@nubjs/runner` ships, on the same Node.
 fn check(run: &Run) -> Option<String> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_nub"));
+    let mut command = if run.standalone {
+        let node = run
+            .node_dir
+            .as_ref()
+            .map_or(PathBuf::from("node"), |dir| dir.join("node"));
+        let mut command = Command::new(node);
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
+        command.arg(format!(
+            "--import={}/loader-register.mjs",
+            runtime.display()
+        ));
+        command
+    } else {
+        Command::new(env!("CARGO_BIN_EXE_nub"))
+    };
     if let Some(dir) = &run.node_dir {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let mut dirs = vec![dir.clone()];
@@ -75,30 +92,41 @@ fn commonjs_output_observes_what_tsc_emit_observes() {
         None => eprintln!("skipping the Node 22.13 leg: TEST_NODE_BIN_22_13_0 is not set"),
     }
 
+    // Nub, and on Unix the standalone loader, whose entry Node loads with the hook's
+    // source rather than through its own CommonJS loader.
+    let mut runners = vec![("nub", false)];
+    if cfg!(unix) {
+        runners.push(("standalone", true));
+    }
+
     let dir = tempfile::tempdir().unwrap();
     let mut runs = Vec::new();
     for (i, case) in cases.iter().enumerate() {
         for (mode, interop) in [("esModuleInterop", true), ("noEsModuleInterop", false)] {
             for (n, (node, node_dir)) in nodes.iter().enumerate() {
-                let root = dir.path().join(format!("{i}-{interop}-{n}"));
-                let files = shared.iter().chain(case["files"].as_object().unwrap());
-                for (name, body) in files {
-                    write(&root, name, body.as_str().unwrap());
+                for &(runner, standalone) in &runners {
+                    let root = dir.path().join(format!("{i}-{interop}-{n}-{runner}"));
+                    let files = shared.iter().chain(case["files"].as_object().unwrap());
+                    for (name, body) in files {
+                        write(&root, name, body.as_str().unwrap());
+                    }
+                    write(&root, "package.json", "{}");
+                    write(
+                        &root,
+                        "tsconfig.json",
+                        &format!(
+                            r#"{{"compilerOptions":{{"module":"commonjs","target":"es2022","esModuleInterop":{interop}}}}}"#
+                        ),
+                    );
+                    let name = case["name"].as_str().unwrap();
+                    runs.push(Run {
+                        label: format!("{name} [{mode}, {node}, {runner}]"),
+                        root,
+                        node_dir: node_dir.clone(),
+                        standalone,
+                        expected: case["expected"][mode].as_str().unwrap().to_string(),
+                    });
                 }
-                write(&root, "package.json", "{}");
-                write(
-                    &root,
-                    "tsconfig.json",
-                    &format!(
-                        r#"{{"compilerOptions":{{"module":"commonjs","target":"es2022","esModuleInterop":{interop}}}}}"#
-                    ),
-                );
-                runs.push(Run {
-                    label: format!("{} [{mode}, {node}]", case["name"].as_str().unwrap()),
-                    root,
-                    node_dir: node_dir.clone(),
-                    expected: case["expected"][mode].as_str().unwrap().to_string(),
-                });
             }
         }
     }

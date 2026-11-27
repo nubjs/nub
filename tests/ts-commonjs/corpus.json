@@ -116,7 +116,7 @@
       "files": {
         "fn.cjs": "module.exports = function fn() { return \"fn\"; };\nmodule.exports.extra = \"extra\";\nmodule.exports.self = function () {\n  return this === module.exports ? \"module\" : this === globalThis ? \"global\" : typeof this;\n};\n",
         "lib.ts": "export import again = require(\"./fn.cjs\");\nexport const own = \"own\";\n",
-        "main.ts": "import fn = require(\"./fn.cjs\");\nimport path = require(\"node:path\");\nimport * as lib from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"fn\", fn);\nshow(\"sep\", path.sep);\nshow(\"lib\", lib);\n"
+        "main.ts": "import fn = require(\"./fn.cjs\");\nimport path = require(\"node:path\");\nimport * as lib from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"fn\", fn);\nshow(\"sep\", path.posix.sep);\nshow(\"lib\", lib);\n"
       },
       "expected": {
         "esModuleInterop": "fn = [function fn]{extra: \"extra\", self: [function anonymous]}\nsep = \"/\"\nlib = {(__esModule), own: \"own\", again: [function fn]{extra: \"extra\", self: [function anonymous]}}\n",
@@ -258,6 +258,17 @@
       "expected": {
         "esModuleInterop": "start = [0, 0]\nassign = [1, 1, 1]\ncompound = [11, 11, 11]\npostfixStatement = [12, 12, 12]\npostfixValue = [13, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [13, 13, 13]\nlogicalOr = [5, 5, 5]\nlogicalAnd = [6, 6, 6]\nnullish = [7, 7, 7]\narrayPattern = [8, 8, 8]\nobjectShorthand = [9, 9, 9]\nobjectRenamed = [10, 10, 10]\narrayDefault = [11, 11, 11]\nobjectDefault = [12, 12, 12]\nnested = [13, 13, 13]\narrayRest = [[14], [14], [14]]\nobjectRest = [{r: 15}, {r: 15}, {r: 15}]\nforOf = [17, 17, 17]\nforIn = [\"18\", \"18\", \"18\"]\nforUpdate = [3, 3, 3]\nclosure = [19, 19, 19]\nswap = [20, 20, 20]\nshadowed = [20, 20, 20]\ninExpression = [21, 21, 21]\n",
         "noEsModuleInterop": "start = [0, 0]\nassign = [1, 1, 1]\ncompound = [11, 11, 11]\npostfixStatement = [12, 12, 12]\npostfixValue = [13, 13, 13]\nprefix = [14, 14, 14]\ndecrement = [13, 13, 13]\nlogicalOr = [5, 5, 5]\nlogicalAnd = [6, 6, 6]\nnullish = [7, 7, 7]\narrayPattern = [8, 8, 8]\nobjectShorthand = [9, 9, 9]\nobjectRenamed = [10, 10, 10]\narrayDefault = [11, 11, 11]\nobjectDefault = [12, 12, 12]\nnested = [13, 13, 13]\narrayRest = [[14], [14], [14]]\nobjectRest = [{r: 15}, {r: 15}, {r: 15}]\nforOf = [17, 17, 17]\nforIn = [\"18\", \"18\", \"18\"]\nforUpdate = [3, 3, 3]\nclosure = [19, 19, 19]\nswap = [20, 20, 20]\nshadowed = [20, 20, 20]\ninExpression = [21, 21, 21]\n"
+      }
+    },
+    {
+      "name": "loop heads shadowed in the body",
+      "files": {
+        "lib.ts": "let x: any = 0;\nlet k: any = \"\";\nexport { x, k };\nexport function run() {\n  const seen: any[] = [];\n  for (x of [1, 2]) { let x = \"inner\"; seen.push(x); }\n  for (x of [3]) { const exports = \"local exports\"; seen.push(exports); }\n  for (k in { a: 1 }) { const k = \"inner\"; seen.push(k); }\n  return seen;\n}\n",
+        "main.ts": "import { x, k, run } from \"./lib\";\nconst show = require(\"./show.cjs\");\nshow(\"before\", [x, k]);\nshow(\"run\", run());\nshow(\"after\", [x, k]);\n"
+      },
+      "expected": {
+        "esModuleInterop": "before = [0, \"\"]\nrun = [\"inner\", \"inner\", \"local exports\", \"inner\"]\nafter = [3, \"a\"]\n",
+        "noEsModuleInterop": "before = [0, \"\"]\nrun = [\"inner\", \"inner\", \"local exports\", \"inner\"]\nafter = [3, \"a\"]\n"
       }
     },
     {

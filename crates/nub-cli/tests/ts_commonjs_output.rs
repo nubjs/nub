@@ -207,6 +207,143 @@ fn a_commonjs_entry_requires_an_es_module_on_the_compat_tier() {
     }
 }
 
+/// `nub` and (on Unix) the standalone loader, on each pinned Node and, when
+/// `path_node` is set, the Node on `PATH`.
+fn legs(path_node: bool) -> Vec<(String, Option<PathBuf>, bool)> {
+    let mut nodes = Vec::new();
+    if path_node {
+        nodes.push(("PATH node".to_string(), None));
+    }
+    nodes.extend(
+        pinned_nodes()
+            .into_iter()
+            .map(|(key, dir)| (key.to_string(), Some(dir))),
+    );
+    let mut legs = Vec::new();
+    for (name, dir) in nodes {
+        legs.push((name.clone(), dir.clone(), false));
+        if cfg!(unix) {
+            legs.push((format!("{name}, standalone"), dir, true));
+        }
+    }
+    legs
+}
+
+/// A dynamic `import()` takes what the real `import()` loads: its attributes, the
+/// package's `import` target, and an ES module's own namespace, here one that
+/// default-exports the CommonJS module its package's `require` target names. On the
+/// pinned Nodes only, since Node 18 reads no `with` attributes.
+#[test]
+fn dynamic_import_follows_what_import_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", "{}");
+    write(
+        root,
+        "tsconfig.json",
+        r#"{"compilerOptions":{"module":"commonjs","esModuleInterop":true}}"#,
+    );
+    write(root, "data.json", r#"{"a":1}"#);
+    write(
+        root,
+        "node_modules/split/package.json",
+        r#"{"name":"split","exports":{"import":"./index.mjs","require":"./data.json"}}"#,
+    );
+    write(
+        root,
+        "node_modules/split/index.mjs",
+        "export const from = 'index.mjs';
+",
+    );
+    write(
+        root,
+        "node_modules/split/data.json",
+        r#"{"from":"data.json"}"#,
+    );
+    write(
+        root,
+        "node_modules/dual/package.json",
+        r#"{"name":"dual","exports":{"import":"./index.mjs","require":"./index.cjs"}}"#,
+    );
+    write(
+        root,
+        "node_modules/dual/index.cjs",
+        "exports.cjs = 'cjs';
+",
+    );
+    write(
+        root,
+        "node_modules/dual/index.mjs",
+        "import wrapped from './index.cjs';
+export default wrapped;
+export const named = 'esm';
+",
+    );
+    write(
+        root,
+        "main.ts",
+        r#"async function main() {
+  const text: any = await import("./data.json", { with: { type: "text" } });
+  const split: any = await import("split");
+  const dual: any = await import("dual");
+  console.log(typeof text.default, split.from, dual.named, dual.default.cjs);
+}
+main();
+"#,
+    );
+    for (what, node_dir, standalone) in legs(false) {
+        let out = run(root, node_dir.as_deref(), standalone, "main.ts");
+        assert_eq!(stdout(&out, &what), "string index.mjs esm cjs", "{what}");
+    }
+}
+
+/// The emit requires its helpers from Nub's runtime while a project's own `require()` of
+/// the same package keeps the installed copy, as on plain Node.
+#[test]
+fn a_project_require_of_the_helper_package_gets_its_own_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", "{}");
+    write(
+        root,
+        "tsconfig.json",
+        r#"{"compilerOptions":{"module":"commonjs"}}"#,
+    );
+    write(
+        root,
+        "node_modules/@oxc-project/runtime/package.json",
+        r#"{"name":"@oxc-project/runtime","version":"0.0.0"}"#,
+    );
+    write(
+        root,
+        "node_modules/@oxc-project/runtime/helpers/usingCtx.js",
+        "module.exports = 'project copy';
+",
+    );
+    write(
+        root,
+        "user.cjs",
+        "console.log(require('@oxc-project/runtime/helpers/usingCtx'));
+",
+    );
+    write(
+        root,
+        "main.ts",
+        "import \"./user.cjs\";
+using r = { [Symbol.dispose]() { console.log(\"disposed\"); } };
+console.log(\"body\");
+",
+    );
+    for (what, node_dir, standalone) in legs(true) {
+        let out = run(root, node_dir.as_deref(), standalone, "main.ts");
+        assert_eq!(
+            stdout(&out, &what),
+            "project copy\nbody\ndisposed",
+            "{what}"
+        );
+    }
+}
+
 /// Neither has a CommonJS form, so the run stops on the file instead of loading it as an
 /// ES module. Under `"type": "module"` the same file stays an ES module and runs.
 #[test]
