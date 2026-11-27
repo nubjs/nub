@@ -594,14 +594,6 @@ fn wire_global_bin_path(code: i32) {
                 layout.bin_dir.display()
             );
         }
-        Ok(nub_core::pm::shim::ProfileOutcome::Skipped { line }) => {
-            eprintln!(
-                "warning: {} is not on PATH, so the commands just installed will \
-                 not run.\n  NUB_NO_MODIFY_PATH is set, so no shell config file \
-                 was edited. Add this line to yours to put it on PATH:\n    {line}",
-                layout.bin_dir.display()
-            );
-        }
         Err(e) => eprintln!("warning: could not update your shell profile: {e}"),
     }
 }

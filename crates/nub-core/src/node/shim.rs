@@ -172,6 +172,12 @@ pub fn add_node_path_block() -> Result<ProfileOutcome> {
     shim::add_path_block_current_shell(&NODE_SHIM_BLOCK)
 }
 
+/// The node shim's PATH line, printed in place of the profile edit under
+/// `nub node shim --no-modify-path`.
+pub fn node_path_line() -> String {
+    shim::path_line_for_current_shell(&NODE_SHIM_BLOCK)
+}
+
 /// `nub node unshim`: delete the node shim dir and strip the node-shim PATH
 /// block from every profile. Touches only the dedicated dir + profile files, so
 /// it keeps working from any nub still on PATH. Returns `(dirs actually removed,

@@ -190,8 +190,29 @@ pub fn route_installs_enabled(shim_dir: &Path) -> bool {
 
 /// Write or remove the [`ROUTE_INSTALLS_MARKER`]. Idempotent either way.
 pub fn set_route_installs(shim_dir: &Path, on: bool) -> Result<()> {
-    let marker = shim_dir.join(ROUTE_INSTALLS_MARKER);
-    if on {
+    set_marker(shim_dir, ROUTE_INSTALLS_MARKER, on)
+}
+
+/// Marker for `--no-modify-path`: the shim install leaves shell config files
+/// alone. Same reasoning as [`ROUTE_INSTALLS_MARKER`]: it lives in the shim dir,
+/// so a re-run after `nub upgrade` keeps the choice without the flag, and an
+/// unshim forgets it. Shared by the PM shims and the `node` shim, each in its
+/// own dir.
+pub const NO_MODIFY_PATH_MARKER: &str = ".no-modify-path";
+
+/// Whether the shim install in `shim_dir` edits shell config files.
+pub fn modify_path_enabled(shim_dir: &Path) -> bool {
+    !shim_dir.join(NO_MODIFY_PATH_MARKER).is_file()
+}
+
+/// Record `--modify-path` (`on`) or `--no-modify-path` for `shim_dir`.
+pub fn set_modify_path(shim_dir: &Path, on: bool) -> Result<()> {
+    set_marker(shim_dir, NO_MODIFY_PATH_MARKER, !on)
+}
+
+fn set_marker(shim_dir: &Path, name: &str, present: bool) -> Result<()> {
+    let marker = shim_dir.join(name);
+    if present {
         std::fs::create_dir_all(shim_dir)
             .with_context(|| format!("creating shim dir {}", shim_dir.display()))?;
         std::fs::write(&marker, "").with_context(|| format!("writing {}", marker.display()))?;
@@ -1291,53 +1312,38 @@ pub enum ProfileOutcome {
     /// No known profile exists / is writable for this shell — the CLI prints
     /// `line` as "add this to your shell config yourself" and exits 0.
     Manual { line: String },
-    /// `NUB_NO_MODIFY_PATH` is set, so no profile was touched. `line` is in the
-    /// current shell's dialect, for the CLI to print.
-    Skipped { line: String },
 }
 
-/// Whether `NUB_NO_MODIFY_PATH`, the install script's opt-out, is set. Read with
-/// install.sh's grammar: `1`/`yes`/`true`/`on` opts out, unset or
-/// `0`/`no`/`false`/`off` does not, and anything else is an error rather than a
-/// guess. Every command that writes a profile honors it, so a user who manages
-/// PATH themselves sets it once and re-running a shim command after an upgrade
-/// never puts the block back.
-pub fn path_edits_disabled() -> Result<bool> {
-    let raw = std::env::var_os("NUB_NO_MODIFY_PATH");
-    parse_no_modify_path(raw.as_deref().map(|v| v.to_string_lossy()).as_deref())
-}
-
-fn parse_no_modify_path(raw: Option<&str>) -> Result<bool> {
-    let Some(raw) = raw else { return Ok(false) };
-    match raw.to_ascii_lowercase().as_str() {
-        "" | "0" | "no" | "false" | "off" => Ok(false),
-        "1" | "yes" | "true" | "on" => Ok(true),
-        _ => bail!("invalid NUB_NO_MODIFY_PATH: {raw} (expected 1/yes/true/on or 0/no/false/off)"),
-    }
-}
-
-/// Wire `block` into the profiles of the shell in `$SHELL`, or return
-/// [`ProfileOutcome::Skipped`] when [`path_edits_disabled`]. The one entry point
-/// for every shim family, so none of them can forget the opt-out.
-pub(crate) fn add_path_block_current_shell(block: &ShimBlock) -> Result<ProfileOutcome> {
+/// `$SHELL`'s basename, or `bash` when it is unset or empty (install.sh parity:
+/// the CI/container default, not a Manual bailout).
+fn current_shell() -> String {
     let shell = std::env::var("SHELL").unwrap_or_default();
-    let shell = Path::new(&shell)
+    Path::new(&shell)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .filter(|s| !s.is_empty())
-        // install.sh parity: an unset/empty $SHELL is treated as bash (the
-        // CI/container default), not a Manual bailout.
-        .unwrap_or_else(|| "bash".to_string());
-    if path_edits_disabled()? {
-        let line = if shell == "fish" {
-            &block.fish_line
-        } else {
-            &block.posix_line
-        };
-        return Ok(ProfileOutcome::Skipped {
-            line: line.to_string(),
-        });
+        .unwrap_or_else(|| "bash".to_string())
+}
+
+/// `block`'s PATH line in the current shell's dialect, for the CLI to print
+/// when it was told not to write one.
+pub(crate) fn path_line_for_current_shell(block: &ShimBlock) -> String {
+    if current_shell() == "fish" {
+        block.fish_line.to_string()
+    } else {
+        block.posix_line.to_string()
     }
+}
+
+/// The PM shims' PATH line, printed in place of the profile edit under
+/// `nub pm shim --no-modify-path`.
+pub fn path_line() -> String {
+    path_line_for_current_shell(&PM_SHIM_BLOCK)
+}
+
+/// Wire `block` into the profiles of the shell in `$SHELL`.
+pub(crate) fn add_path_block_current_shell(block: &ShimBlock) -> Result<ProfileOutcome> {
+    let shell = current_shell();
     let home = dirs_next::home_dir().context("cannot locate the home directory")?;
     let xdg = std::env::var_os("XDG_CONFIG_HOME")
         .filter(|v| !v.is_empty())
@@ -1406,8 +1412,7 @@ pub(crate) fn add_path_block_for(
             // A single target that can't be written (e.g. an unwritable, already
             // existing login file) doesn't sink the whole operation — another
             // target may still have landed. A target-level Manual is absorbed.
-            // `append_block` never skips; the opt-out returns before this loop.
-            ProfileOutcome::Manual { .. } | ProfileOutcome::Skipped { .. } => {}
+            ProfileOutcome::Manual { .. } => {}
         }
     }
     Ok(match (first_added, first_rewritten, first_present) {
