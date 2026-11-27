@@ -545,8 +545,13 @@ pub(super) fn parse_berry_str(
                        skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<(), Error> {
         let resolved = crate::override_match::apply(&resolution_rules, name, range);
-        if let Some(dep_path) =
-            local_by_workspace.get(&(local_descriptor(name, range), importer.replace('\\', "/")))
+        // A `resolutions` replacement wins over the declared range, as in
+        // `berry_spec_candidates` below.
+        let workspace = importer.replace('\\', "/");
+        if let Some(dep_path) = resolved
+            .into_iter()
+            .chain([range])
+            .find_map(|r| local_by_workspace.get(&(local_descriptor(name, r), workspace.clone())))
         {
             into.push(DirectDep {
                 name: name.to_string(),

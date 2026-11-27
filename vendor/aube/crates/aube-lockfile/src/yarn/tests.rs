@@ -1085,6 +1085,79 @@ fn berry_rebases_a_relative_path_without_climbing_past_a_root() {
 }
 
 #[test]
+fn berry_prefers_a_file_resolution_over_the_declared_bare_path() {
+    // Yarn 4.9.2's lockfile for a root `leaf: ./direct` that `resolutions`
+    // replaces with `file:./replacement`, while `consumer/leaf` keeps
+    // `file:./direct`: yarn installs the replacement at the root.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"consumer@file:./consumer::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "consumer@file:./consumer#./consumer::hash=d959f4&locator=rroot%40workspace%3A."
+  dependencies:
+    leaf: "file:./direct"
+  languageName: node
+  linkType: hard
+
+"leaf@file:./direct::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./direct#./direct::hash=375bb7&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"leaf@file:./replacement::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./replacement#./replacement::hash=eb2872&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"rroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "rroot@workspace:."
+  dependencies:
+    consumer: "file:./consumer"
+    leaf: ./direct
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let mut manifest = make_manifest(
+        &[("leaf", "./direct"), ("consumer", "file:./consumer")],
+        &[],
+    );
+    manifest.extra.insert(
+        "resolutions".to_string(),
+        serde_json::json!({ "consumer/leaf": "file:./direct", "leaf": "file:./replacement" }),
+    );
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    let source = |dep_path: &str| graph.packages[dep_path].local_source.clone();
+    let root_leaf = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "leaf")
+        .unwrap();
+    assert_eq!(
+        source(&root_leaf.dep_path),
+        Some(LocalSource::Directory(PathBuf::from("./replacement")))
+    );
+    let consumer = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "consumer")
+        .unwrap();
+    let edge = &graph.packages[&consumer.dep_path].dependencies["leaf"];
+    let target = crate::resolve_dep_edge("leaf", edge, |k| graph.packages.contains_key(k)).unwrap();
+    assert_eq!(
+        source(&target),
+        Some(LocalSource::Directory(PathBuf::from("./direct")))
+    );
+}
+
+#[test]
 fn berry_writer_keeps_an_alias_apart_from_a_same_version_local_package() {
     // A fresh resolve of `choice: npm:is-odd@1.0.0` beside `is-odd:
     // file:./local.tgz`, both 1.0.0: the alias must keep its own registry
