@@ -2884,7 +2884,8 @@ fs.writeFileSync(target, JSON.stringify({ compilerOptions: { strict: true } }));
 /// edges and then install only the host's binding, and none under
 /// `--no-optional` (nubjs/nub#1153). An older lockfile that pins each tarball
 /// only by a `#<sha1>` URL fragment must prune the same way, and an offline
-/// reinstall must find the binding in the store it was installed into.
+/// reinstall must find the binding in the store it was installed into, going
+/// by the stored package over cached registry metadata that disagrees.
 #[test]
 fn yarn_classic_lockfile_installs_only_the_host_optional_binding() {
     if test_registry().is_none() {
@@ -3015,15 +3016,22 @@ fn yarn_classic_lockfile_installs_only_the_host_optional_binding() {
         apply_test_registry(&mut cmd, &dir);
         cmd.output().expect("failed to spawn nub")
     };
-    for args in [
-        &["install", "--ignore-scripts"][..],
-        &[
-            "install",
-            "--ignore-scripts",
-            "--offline",
-            "--frozen-lockfile",
-        ][..],
-    ] {
+    let offline = [
+        "install",
+        "--ignore-scripts",
+        "--offline",
+        "--frozen-lockfile",
+    ];
+    for (step, args) in [&["install", "--ignore-scripts"][..], &offline[..]]
+        .into_iter()
+        .enumerate()
+    {
+        if step == 1 {
+            assert!(
+                retarget_cached_os(&cache, &format!("@esbuild/{host}")) > 0,
+                "the cached packument for @esbuild/{host} must be found under {cache:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(dir.join("node_modules"));
         let out = install(args);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -3050,4 +3058,44 @@ fn yarn_classic_lockfile_installs_only_the_host_optional_binding() {
         legacy,
         "a sha1 yarn.lock must stay byte-identical"
     );
+}
+
+/// Rewrite every cached packument version of `name` under `dir` to claim
+/// `os: ["aix"]`, returning how many versions were changed.
+fn retarget_cached_os(dir: &Path, name: &str) -> usize {
+    fn walk(value: &mut serde_json::Value, name: &str) -> usize {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut n = 0;
+                if map.get("name").and_then(|v| v.as_str()) == Some(name) && map.contains_key("os")
+                {
+                    map.insert("os".into(), serde_json::json!(["aix"]));
+                    n += 1;
+                }
+                n + map.values_mut().map(|v| walk(v, name)).sum::<usize>()
+            }
+            serde_json::Value::Array(items) => items.iter_mut().map(|v| walk(v, name)).sum(),
+            _ => 0,
+        }
+    }
+    let mut changed = 0;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            changed += retarget_cached_os(&path, name);
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let n = walk(&mut doc, name);
+        if n > 0 {
+            std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+            changed += n;
+        }
+    }
+    changed
 }

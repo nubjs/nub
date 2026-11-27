@@ -757,11 +757,11 @@ fn warn_lockfile_conflict_markers(lockfile_dir: &Path, err: &aube_lockfile::Erro
 /// installs every variant. Bun does the same after migrating a yarn or pnpm
 /// lockfile (`fetch_necessary_package_metadata_after_yarn_or_pnpm_migration`).
 ///
-/// The fields come from the (cached) abbreviated packument when it
-/// describes the locked tarball (see [`describes_locked_artifact`]), so
-/// metadata for some other registry's build never prunes it; otherwise from
-/// the package's own `package.json` in the store. A package with neither
-/// stays unconstrained and installs. Offline, an optional package this host
+/// The fields come from the package's own `package.json` when it is in the
+/// store, since that is the artifact being installed; otherwise from the
+/// (cached) abbreviated packument when it describes the locked tarball (see
+/// [`describes_locked_artifact`]), so metadata for some other build never
+/// prunes it. A package with neither stays unconstrained and installs. Offline, an optional package this host
 /// could use but whose files are not in the store cannot be fetched: its
 /// optional edges are dropped with one warning, as npm and yarn skip an
 /// optional dependency they cannot get. A required path to it still fails.
@@ -843,15 +843,14 @@ pub(super) async fn backfill_yarn_classic_platforms(
             let Some(pkg) = graph.packages.get_mut(&key) else {
                 continue;
             };
-            let from_registry = packument
-                .as_ref()
-                .and_then(|p| p.versions.get(&pkg.version))
-                .filter(|meta| describes_locked_artifact(meta, pkg))
-                .map(|meta| (meta.os.clone(), meta.cpu.clone(), meta.libc.clone()));
-            let key = read_key(pkg);
-            if let Some((os, cpu, libc)) =
-                from_registry.or_else(|| stored_manifest_platform(store, pkg, key.as_deref()?))
-            {
+            let stored = read_key(pkg).and_then(|key| stored_manifest_platform(store, pkg, &key));
+            if let Some((os, cpu, libc)) = stored.or_else(|| {
+                packument
+                    .as_ref()
+                    .and_then(|p| p.versions.get(&pkg.version))
+                    .filter(|meta| describes_locked_artifact(meta, pkg))
+                    .map(|meta| (meta.os.clone(), meta.cpu.clone(), meta.libc.clone()))
+            }) {
                 pkg.os = os.into_iter().collect();
                 pkg.cpu = cpu.into_iter().collect();
                 pkg.libc = libc.into_iter().collect();
@@ -940,8 +939,7 @@ fn describes_locked_artifact(
             .is_some_and(|sri| sri == locked)
 }
 
-/// `os`/`cpu`/`libc` from a package's own `package.json` in the store, for
-/// a package installed before whose registry metadata is not cached.
+/// `os`/`cpu`/`libc` from a package's own `package.json` in the store.
 fn stored_manifest_platform(
     store: &aube_store::Store,
     pkg: &aube_lockfile::LockedPackage,
