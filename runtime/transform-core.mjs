@@ -761,6 +761,18 @@ export function resolveCjsPath(request, parentPath, lookupPaths) {
   return resolveTs(request, parentPath || "", lookupPaths);
 }
 
+// The directory a `require.resolve` `paths` root stands for when a relative request
+// resolves in it. Node realpaths what it resolves unless symlinks are preserved, and
+// an importer's own directory is already real, so the root is made real too. Null
+// for a root that does not exist.
+export function cjsRootDir(root) {
+  try {
+    return PRESERVE_SYMLINKS ? root : realpathSync(root);
+  } catch {
+    return null;
+  }
+}
+
 // A bare specifier with a subpath (`pkg/sub`, `@scope/pkg/sub`): the one shape whose
 // native answer depends on which `node_modules` directories are searched.
 export function isBareSubpath(specifier) {

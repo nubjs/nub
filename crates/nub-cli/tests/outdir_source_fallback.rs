@@ -282,7 +282,8 @@ fn dependency_in_node_modules_never_maps() {
 /// `require.resolve` with `paths` looks where Node looked, root by root: another
 /// project's own link wins over the caller's, a `lib` without the source passes to
 /// the next root, and a project with no link keeps Node's error. A later root's
-/// built file is Node's answer, so it wins over an earlier root's source.
+/// built file is Node's answer, so it wins over an earlier root's source. A missing
+/// `exports` target ends Node's lookup in its root, so the source behind it answers.
 #[cfg(unix)]
 #[test]
 fn require_resolve_paths_searches_only_the_given_roots() {
@@ -292,9 +293,15 @@ fn require_resolve_paths_searches_only_the_given_roots() {
         ("lib-b", "other", true),
         ("lib-c", "first", false),
         ("lib-d", "built", false),
+        ("lib-e", "exported", false),
     ] {
         let dir = root.join("packages").join(pkg);
-        write(&dir.join("package.json"), r#"{"name":"lib"}"#);
+        let manifest = if pkg == "lib-e" {
+            r#"{"name":"lib","exports":{"./feature":"./dist/feature.js"}}"#
+        } else {
+            r#"{"name":"lib"}"#
+        };
+        write(&dir.join("package.json"), manifest);
         write(&dir.join("tsconfig.json"), OWN_DIRS);
         if source {
             write(&dir.join("src/missing.ts"), "exports.x = 1;");
@@ -307,23 +314,31 @@ fn require_resolve_paths_searches_only_the_given_roots() {
         &root.join("packages/lib-d/dist/missing.js"),
         "exports.x = 1;",
     );
+    write(
+        &root.join("packages/lib-e/src/feature.ts"),
+        "exports.x = 1;",
+    );
+    write(&root.join("packages/lib-b/feature.js"), "exports.x = 1;");
     write(&root.join("empty/package.json"), "{}");
     write(
         &root.join("caller/app.cts"),
         r#"// A `require` from `createRequire`: on the compat tier the entry's own `require` is
 // the ESM translator's, whose `resolve` takes no options.
 const { resolve } = require("node:module").createRequire(__filename);
-const at = (...roots: string[]) => {
+const find = (request: string, ...roots: string[]) => {
   const paths = roots.map((r) => __dirname + "/../" + r);
-  try { return resolve("lib/dist/missing", { paths }).split("packages/")[1]; }
+  try { return resolve(request, { paths }).split("packages/")[1]; }
   catch (e: any) { return e.code; }
 };
-console.log([at("other"), at("empty"), at("first", "other"), at("caller", "built")].join("|"));
+const at = (...roots: string[]) => find("lib/dist/missing", ...roots);
+console.log([at("other"), at("empty"), at("first", "other"), at("caller", "built"),
+  find("lib/feature", "exported", "other")].join("|"));
 "#,
     );
     let (stdout, stderr) = run(&root.join("caller"), "app.cts");
     assert_eq!(
-        stdout, "lib-b/src/missing.ts|MODULE_NOT_FOUND|lib-b/src/missing.ts|lib-d/dist/missing.js",
+        stdout,
+        "lib-b/src/missing.ts|MODULE_NOT_FOUND|lib-b/src/missing.ts|lib-d/dist/missing.js|lib-e/src/feature.ts",
         "stderr: {stderr}"
     );
 }

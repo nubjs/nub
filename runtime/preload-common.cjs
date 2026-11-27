@@ -672,26 +672,35 @@ function resolveViaParentRequire(specifier, parentURL) {
   }
 }
 
-// Nub's additive answer for a CommonJS request, from where Node looks. A bare subpath
-// is probed in Node's own lookup directories, so an edited `module.paths` or a parent
-// with no filename resolves where Node resolves it. With a `paths` option (one root
-// by now), the importer stands in that root, as Node resolves a relative request
-// against it and a bare one from its `node_modules`. A caller inside `node_modules`
-// gets Node's answer alone, as it does without the option.
-function cjsAdditiveResolve(core, request, parent, parentPath, roots) {
-  if (roots === null) {
+// Nub's additive answer for a CommonJS request. A tsconfig alias belongs to the real
+// importer, whatever `paths` says. A bare subpath is probed in the directories Node
+// searches: the parent's `module.paths`, or the roots of a `paths` option. A relative
+// request under `paths` resolves in each root in turn, as Node resolves it, and stops
+// at the first root Node answers from itself, with a file or with an error that ends
+// its lookup. A caller inside `node_modules` gets Node's answer alone.
+function cjsAdditiveResolve(core, request, parent, parentPath, isMain, options) {
+  const roots = options != null && ArrayIsArray(options.paths) ? options.paths : null;
+  if (roots === null || !(request.startsWith("./") || request.startsWith("../"))) {
     const lookup = core.isBareSubpath(request)
-      ? module_._resolveLookupPaths(request, parent) || []
+      ? cjsLookupPaths(request, parent, options)
       : undefined;
     return core.resolveCjsPath(request, parentPath, lookup);
   }
-  if (roots.length === 0 || (parentPath !== null && core.isNodeModules(parentPath))) return null;
-  const root = pathResolve(String(roots[0]));
-  const anchor = join(root, parentPath === null ? "index.js" : basename(parentPath));
-  const lookup = core.isBareSubpath(request)
-    ? module_._resolveLookupPaths(request, { paths: module_._nodeModulePaths(root) }) || []
-    : undefined;
-  return core.resolveCjsPath(request, anchor, lookup);
+  if (parentPath !== null && core.isNodeModules(parentPath)) return null;
+  const name = parentPath === null ? "index.js" : basename(parentPath);
+  for (let i = 0; i < roots.length; i++) {
+    if (typeof roots[i] !== "string") return null;
+    const root = pathResolve(roots[i]);
+    const dir = core.cjsRootDir(root);
+    const hit = dir === null ? null : core.resolveCjsPath(request, join(dir, name));
+    if (hit) return hit;
+    try {
+      if (module_._findPath(request, [root], isMain)) return null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 // The `node_modules` directories Node's CommonJS resolver searched for a bare
@@ -1361,36 +1370,12 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     return resolved;
   };
 
-  // Set while the roots of a `paths` option are tried one at a time. A miss in
-  // every root then goes to Node with all of them, so the fallbacks after Node's
-  // error see only a miss Node would report, never a root a later one answers.
-  let oneRootOfMany = false;
-  const resolveFilename = function (request, parent, isMain, options) {
+  module_._resolveFilename = function (request, parent, isMain, options) {
     let resolved = null;
-    const roots = options != null && ArrayIsArray(options.paths) ? options.paths : null;
-    if (roots !== null && roots.length > 1) {
-      // Node searches the roots of a `paths` option in turn. One root at a time
-      // through this function keeps Nub's answer and Node's in that order for each.
-      const outer = oneRootOfMany;
-      oneRootOfMany = true;
-      try {
-        for (let i = 0; i < roots.length; i++) {
-          try {
-            return ReflectApply(resolveFilename, this,
-              [request, parent, isMain, { ...options, paths: [roots[i]] }]);
-          } catch (err) {
-            if (!err || err.code !== "MODULE_NOT_FOUND") throw err;
-          }
-        }
-      } finally {
-        oneRootOfMany = outer;
-      }
-    } else {
-      try {
-        const parentPath = parent && typeof parent.filename === "string" ? parent.filename : null;
-        resolved = cjsAdditiveResolve(core, request, parent, parentPath, roots);
-      } catch { /* fall through to Node */ }
-    }
+    try {
+      const parentPath = parent && typeof parent.filename === "string" ? parent.filename : null;
+      resolved = cjsAdditiveResolve(core, request, parent, parentPath, isMain, options);
+    } catch { /* fall through to Node */ }
     if (resolved !== null && typeof resolved === "object") {
       // A `paths` redirect (see transform-core `resolveRedirect`). Node's CommonJS
       // resolver tries a self-reference from the parent's own package first, so a
@@ -1462,7 +1447,6 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       }
       return byNode;
     } catch (e) {
-      if (oneRootOfMany) throw e;
       // Under PnP, an in-tree issuer requiring a dep NOT in its manifest makes PnP
       // throw. That is nub's OWN transpile helpers (e.g. `@oxc-project/runtime`),
       // injected into transpiled user code and resolved via NODE_PATH globalPaths
@@ -1488,7 +1472,6 @@ function installCjsRequireHooks(core, withClassicTranspile) {
       throw e;
     }
   };
-  module_._resolveFilename = resolveFilename;
 
   if (!withClassicTranspile) return;
 
