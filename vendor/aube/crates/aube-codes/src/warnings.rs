@@ -104,6 +104,7 @@ pub const WARN_AUBE_INVALID_CLIENT_CERT: &str = "WARN_AUBE_INVALID_CLIENT_CERT";
 // ── resolver ────────────────────────────────────────────────────────
 pub const WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL: &str = "WARN_AUBE_UNSUPPORTED_PLATFORM_INSTALL";
 #[rustfmt::skip] pub const WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION: &str = "WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION";
+#[rustfmt::skip] pub const WARN_AUBE_SKIPPED_OPTIONAL_OFFLINE: &str = "WARN_AUBE_SKIPPED_OPTIONAL_OFFLINE";
 pub const WARN_AUBE_EXOTIC_SUBDEP_SKIPPED: &str = "WARN_AUBE_EXOTIC_SUBDEP_SKIPPED";
 pub const WARN_AUBE_PEER_DEDUPE_COLLISION: &str = "WARN_AUBE_PEER_DEDUPE_COLLISION";
 #[rustfmt::skip] pub const WARN_AUBE_TRUST_DOWNGRADE_SKIPPED: &str = "WARN_AUBE_TRUST_DOWNGRADE_SKIPPED";
@@ -610,6 +611,12 @@ pub const ALL: &[CodeMeta] = &[
         name: WARN_AUBE_SKIPPED_OPTIONAL_NO_MATCHING_VERSION,
         category: category::RESOLVER,
         description: "No version of an optional dep matched its range, so the dep was skipped instead of failing the install.",
+        exit_code: None,
+    },
+    CodeMeta {
+        name: WARN_AUBE_SKIPPED_OPTIONAL_OFFLINE,
+        category: category::RESOLVER,
+        description: "An offline install skipped an optional dep from a yarn v1 lockfile whose files are not in the store, instead of failing the install.",
         exit_code: None,
     },
     CodeMeta {

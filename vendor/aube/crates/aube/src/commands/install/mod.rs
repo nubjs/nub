@@ -1475,6 +1475,10 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     // (lockfile-matched fast path, killswitch disabled, `lockfile=false`,
     // or after the rare catch-up integrity rewrite joined it early).
     let mut lockfile_write_handle: Option<lockfile_write_overlap::LockfileWriteHandle> = None;
+    // An offline install that skipped an optional package for being
+    // unavailable must not leave state that lets the next (online) install
+    // report "already up to date" without it.
+    let mut offline_skipped_optional = false;
     let (graph, package_indices, cached_count, fetch_count) = match lockfile_result {
         Ok((mut graph, kind)) => {
             // Under `sharedWorkspaceLockfile=false` the project's own
@@ -1488,6 +1492,28 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
             // produces every importer).
             if !shared_workspace_lockfile && has_workspace {
                 let _ = merge_member_lockfile_graphs(&cwd, &mut graph, &manifests);
+            }
+            if matches!(kind, aube_lockfile::LockfileKind::Yarn) {
+                let (os, cpu, libc) = settings::effective_supported_architectures(
+                    &manifest,
+                    &ws_config_shared,
+                    &settings_ctx,
+                );
+                offline_skipped_optional = resolve::backfill_yarn_classic_platforms(
+                    &mut graph,
+                    &make_client(&cwd).with_network_mode(opts.network_mode),
+                    &packument_cache_dir,
+                    &store,
+                    &cwd,
+                    &aube_resolver::SupportedArchitectures {
+                        os,
+                        cpu,
+                        libc,
+                        ..Default::default()
+                    },
+                    opts.network_mode == aube_registry::NetworkMode::Offline,
+                )
+                .await;
             }
             let graph = resolve::apply_lockfile_graph_platform_rules(
                 graph,
@@ -3242,7 +3268,7 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
     {
         sync_package_manager_pin(&lockfile_dir, opts.network_mode).await;
     }
-    finalize::run_finalize_phase(finalize::FinalizePhaseInput {
+    let finalized = finalize::run_finalize_phase(finalize::FinalizePhaseInput {
         cwd: &cwd,
         settings_ctx: &settings_ctx,
         store: store.as_ref(),
@@ -3292,8 +3318,13 @@ async fn run_inner(opts: InstallOptions, cwd: std::path::PathBuf) -> miette::Res
         prog_ref,
         phase_timings: &mut phase_timings,
     })
-    .await?;
-    Ok(())
+    .await;
+    // Finalize writes state before it can still fail on build policy, so
+    // drop it on either outcome.
+    if offline_skipped_optional {
+        let _ = crate::state::remove_state(&cwd);
+    }
+    finalized
 }
 
 #[cfg(test)]
@@ -3487,6 +3518,23 @@ fn filter_graph_for_install(
 ) -> miette::Result<aube_lockfile::LockfileGraph> {
     let mut filtered = if opts.dep_selection.is_filtered() {
         let sel = opts.dep_selection;
+        // `--no-optional` omits optional dependencies at every depth, not
+        // only the importer's own: readers mirror a package's optional
+        // edges into `dependencies`, so cut them before the closure walk. A
+        // package also reached through a required edge stays.
+        let without_optional;
+        let graph = if sel.skip_optional() {
+            let mut g = graph.clone();
+            for pkg in g.packages.values_mut() {
+                for name in std::mem::take(&mut pkg.optional_dependencies).into_keys() {
+                    pkg.dependencies.remove(&name);
+                }
+            }
+            without_optional = g;
+            &without_optional
+        } else {
+            graph
+        };
         let selected = graph.filter_deps(|d| sel.keeps(d));
         let dropped = graph.packages.len() - selected.packages.len();
         if log_dropped_packages && dropped > 0 {

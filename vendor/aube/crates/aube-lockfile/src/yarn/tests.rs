@@ -443,6 +443,81 @@ bar@^2.0.0:
 }
 
 #[test]
+fn classic_keeps_transitive_optional_dependencies_through_parse_and_write() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"# yarn lockfile v1
+
+"@rolldown/binding-darwin-arm64@1.2.12":
+  version "1.2.12"
+  integrity sha512-darwin
+
+"@rolldown/binding-linux-x64-gnu@1.2.12":
+  version "1.2.12"
+  integrity sha512-linux
+
+rolldown@1.2.12:
+  version "1.2.12"
+  integrity sha512-rolldown
+  dependencies:
+    "@oxc-project/types" "=0.152.0"
+  optionalDependencies:
+    "@rolldown/binding-darwin-arm64" "1.2.12"
+    "@rolldown/binding-linux-x64-gnu" "1.2.12"
+
+"@oxc-project/types@=0.152.0":
+  version "0.152.0"
+  integrity sha512-types
+"#;
+    std::fs::write(tmp.path(), content).unwrap();
+    let manifest = make_manifest(&[("rolldown", "1.2.12")], &[]);
+    let graph = parse(tmp.path(), &manifest).unwrap();
+
+    let rolldown = &graph.packages["rolldown@1.2.12"];
+    for binding in [
+        "@rolldown/binding-darwin-arm64",
+        "@rolldown/binding-linux-x64-gnu",
+    ] {
+        assert_eq!(
+            rolldown
+                .optional_dependencies
+                .get(binding)
+                .map(String::as_str),
+            Some("1.2.12"),
+            "{binding} should be an optional edge of rolldown"
+        );
+        assert!(
+            rolldown.dependencies.contains_key(binding),
+            "{binding} should be mirrored into dependencies so the linker walks it"
+        );
+    }
+    assert!(
+        !rolldown
+            .optional_dependencies
+            .contains_key("@oxc-project/types")
+    );
+
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_classic(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    let block = written
+        .split("\n\n")
+        .find(|b| b.starts_with("\"rolldown@1.2.12\""))
+        .unwrap();
+    assert!(
+        block.contains(
+            "  dependencies:\n    \"@oxc-project/types\" \"=0.152.0\"\n  optionalDependencies:\n    \"@rolldown/binding-darwin-arm64\" \"1.2.12\"\n"
+        ),
+        "rolldown's block should keep yarn's section split, got:\n{block}"
+    );
+
+    let reparsed = parse(out.path(), &manifest).unwrap();
+    assert_eq!(
+        reparsed.packages["rolldown@1.2.12"].optional_dependencies,
+        rolldown.optional_dependencies
+    );
+}
+
+#[test]
 fn test_dev_dep_classification() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let content = r#"foo@^1.0.0:

@@ -2878,3 +2878,224 @@ fs.writeFileSync(target, JSON.stringify({ compilerOptions: { strict: true } }));
         "the install must not report the tsconfig the script generates: {err}"
     );
 }
+
+/// A yarn v1 lockfile records every platform binding under the parent's
+/// `optionalDependencies:` with no `os`/`cpu`, so the install must read those
+/// edges and then install only the host's binding, and none under
+/// `--no-optional` (nubjs/nub#1153). An older lockfile that pins each tarball
+/// only by a `#<sha1>` URL fragment must prune the same way, and an offline
+/// reinstall must find the binding in the store it was installed into, going
+/// by the stored package over cached registry metadata that disagrees.
+#[test]
+fn yarn_classic_lockfile_installs_only_the_host_optional_binding() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
+        return;
+    }
+    // The offline registry stores tarballs only for the suite's hosts
+    // (`tests/registry/seed.mts`); the other bindings are packument-only and
+    // must be pruned without a fetch.
+    let bindings = [
+        "darwin-arm64",
+        "darwin-x64",
+        "linux-arm64",
+        "linux-x64",
+        "win32-x64",
+    ];
+    let seeded_hosts = [
+        ("darwin-arm64", "macos", "aarch64"),
+        ("linux-arm64", "linux", "aarch64"),
+        ("linux-x64", "linux", "x86_64"),
+    ];
+    let Some(host) = seeded_hosts
+        .iter()
+        .find(|(_, os, arch)| *os == std::env::consts::OS && *arch == std::env::consts::ARCH)
+        .map(|(name, _, _)| *name)
+    else {
+        eprintln!("skipping: the offline registry has no esbuild binding for this host");
+        return;
+    };
+    let storage = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/registry/storage");
+    let dist = |name: &str, field: &str| -> String {
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(storage.join(name).join("package.json")).unwrap(),
+        )
+        .unwrap();
+        doc["versions"]["0.21.5"]["dist"][field]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let integrity = |name: &str| dist(name, "integrity");
+    let mut lock = String::from("# yarn lockfile v1\n\n\n");
+    for name in bindings {
+        let pkg = format!("@esbuild/{name}");
+        lock.push_str(&format!(
+            "\"{pkg}@0.21.5\":\n  version \"0.21.5\"\n  resolved \"https://registry.yarnpkg.com/{pkg}/-/{name}-0.21.5.tgz\"\n  integrity {}\n\n",
+            integrity(&pkg)
+        ));
+    }
+    lock.push_str(&format!(
+        "esbuild@0.21.5:\n  version \"0.21.5\"\n  resolved \"https://registry.yarnpkg.com/esbuild/-/esbuild-0.21.5.tgz\"\n  integrity {}\n  optionalDependencies:\n",
+        integrity("esbuild")
+    ));
+    for name in bindings {
+        lock.push_str(&format!("    \"@esbuild/{name}\" \"0.21.5\"\n"));
+    }
+
+    for (tag, args, expect_host) in [
+        (
+            "yarn-classic-optional",
+            &["install", "--ignore-scripts"][..],
+            true,
+        ),
+        (
+            "yarn-classic-no-optional",
+            &["install", "--ignore-scripts", "--no-optional"][..],
+            false,
+        ),
+    ] {
+        let dir = pm_tmpdir(tag);
+        std::fs::write(
+            dir.join("package.json"),
+            r#"{"name":"yarn-classic-optional","private":true,"dependencies":{"esbuild":"0.21.5"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("yarn.lock"), &lock).unwrap();
+        let (_, stderr, code) = run_install(&dir, args);
+        assert_eq!(code, 0, "{args:?} from yarn.lock failed: {stderr}");
+        let store = dir.join("node_modules/.store");
+        assert!(
+            store.join("esbuild@0.21.5").exists(),
+            "{args:?} must install esbuild"
+        );
+        for name in bindings {
+            let installed = store.join(format!("@esbuild+{name}@0.21.5")).exists();
+            assert_eq!(
+                installed,
+                expect_host && name == host,
+                "{args:?}: @esbuild/{name} installed={installed} on host binding {host}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
+            lock,
+            "{args:?} must leave yarn.lock byte-identical"
+        );
+    }
+
+    let mut legacy = String::from("# yarn lockfile v1\n\n\n");
+    for name in bindings {
+        let pkg = format!("@esbuild/{name}");
+        legacy.push_str(&format!(
+            "\"{pkg}@0.21.5\":\n  version \"0.21.5\"\n  resolved \"https://registry.yarnpkg.com/{pkg}/-/{name}-0.21.5.tgz#{}\"\n\n",
+            dist(&pkg, "shasum")
+        ));
+    }
+    legacy.push_str(&format!(
+        "esbuild@0.21.5:\n  version \"0.21.5\"\n  resolved \"https://registry.yarnpkg.com/esbuild/-/esbuild-0.21.5.tgz#{}\"\n  optionalDependencies:\n",
+        dist("esbuild", "shasum")
+    ));
+    for name in bindings {
+        legacy.push_str(&format!("    \"@esbuild/{name}\" \"0.21.5\"\n"));
+    }
+    let dir = pm_tmpdir("yarn-classic-sha1");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"yarn-classic-sha1","private":true,"dependencies":{"esbuild":"0.21.5"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join("yarn.lock"), &legacy).unwrap();
+    let (data, cache) = (pm_tmpdir("xdg-data"), pm_tmpdir("xdg-cache"));
+    let install = |args: &[&str]| {
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(args)
+            .current_dir(&dir)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CACHE_HOME", &cache);
+        apply_test_registry(&mut cmd, &dir);
+        cmd.output().expect("failed to spawn nub")
+    };
+    let offline = [
+        "install",
+        "--ignore-scripts",
+        "--offline",
+        "--frozen-lockfile",
+    ];
+    for (step, args) in [&["install", "--ignore-scripts"][..], &offline[..]]
+        .into_iter()
+        .enumerate()
+    {
+        if step == 1 {
+            assert!(
+                retarget_cached_os(&cache, &format!("@esbuild/{host}")) > 0,
+                "the cached packument for @esbuild/{host} must be found under {cache:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir.join("node_modules"));
+        let out = install(args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "{args:?} from a sha1 yarn.lock failed: {stderr}"
+        );
+        assert!(
+            !stderr.contains("SKIPPED_OPTIONAL_OFFLINE"),
+            "{args:?} must find the stored binding: {stderr}"
+        );
+        let store = dir.join("node_modules/.store");
+        for name in bindings {
+            let installed = store.join(format!("@esbuild+{name}@0.21.5")).exists();
+            assert_eq!(
+                installed,
+                name == host,
+                "{args:?}: @esbuild/{name} installed={installed} on host binding {host}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
+        legacy,
+        "a sha1 yarn.lock must stay byte-identical"
+    );
+}
+
+/// Rewrite every cached packument version of `name` under `dir` to claim
+/// `os: ["aix"]`, returning how many versions were changed.
+fn retarget_cached_os(dir: &Path, name: &str) -> usize {
+    fn walk(value: &mut serde_json::Value, name: &str) -> usize {
+        match value {
+            serde_json::Value::Object(map) => {
+                let mut n = 0;
+                if map.get("name").and_then(|v| v.as_str()) == Some(name) && map.contains_key("os")
+                {
+                    map.insert("os".into(), serde_json::json!(["aix"]));
+                    n += 1;
+                }
+                n + map.values_mut().map(|v| walk(v, name)).sum::<usize>()
+            }
+            serde_json::Value::Array(items) => items.iter_mut().map(|v| walk(v, name)).sum(),
+            _ => 0,
+        }
+    }
+    let mut changed = 0;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            changed += retarget_cached_os(&path, name);
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(mut doc) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let n = walk(&mut doc, name);
+        if n > 0 {
+            std::fs::write(&path, serde_json::to_string(&doc).unwrap()).unwrap();
+            changed += n;
+        }
+    }
+    changed
+}
