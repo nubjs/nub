@@ -410,10 +410,12 @@ pub(super) fn parse_berry_str(
          -> Result<BTreeMap<String, String>, Error> {
             let mut out = BTreeMap::new();
             for (name, raw_spec) in raw {
-                if let Some(target) = resolution_of
-                    .get(dep_path)
-                    .and_then(|res| local_by_locator.get(&(raw_spec.clone(), res.clone())))
-                {
+                let declared = raw_spec
+                    .strip_prefix(&format!("{name}@"))
+                    .unwrap_or(raw_spec);
+                if let Some(target) = resolution_of.get(dep_path).and_then(|res| {
+                    local_by_locator.get(&(local_descriptor(name, declared), res.clone()))
+                }) {
                     out.insert(name.clone(), tail(name, target));
                     continue;
                 }
@@ -544,7 +546,7 @@ pub(super) fn parse_berry_str(
      -> Result<(), Error> {
         let resolved = crate::override_match::apply(&resolution_rules, name, range);
         if let Some(dep_path) =
-            local_by_workspace.get(&(format!("{name}@{range}"), importer.replace('\\', "/")))
+            local_by_workspace.get(&(local_descriptor(name, range), importer.replace('\\', "/")))
         {
             into.push(DirectDep {
                 name: name.to_string(),
@@ -909,6 +911,16 @@ fn spec_locator(spec: &str) -> Option<String> {
     percent_decode(locator)
 }
 
+/// The descriptor yarn binds a range to: a bare path (`./child`) is a
+/// `file:` one, as yarn's file resolver reads it.
+fn local_descriptor(name: &str, range: &str) -> String {
+    if range.starts_with("./") || range.starts_with("../") || range.starts_with('/') {
+        format!("{name}@file:{range}")
+    } else {
+        format!("{name}@{range}")
+    }
+}
+
 /// The directory of a `name@workspace:<dir>` locator.
 fn workspace_dir(locator: &str) -> Option<String> {
     let at = locator.get(1..)?.find('@')? + 1;
@@ -960,23 +972,34 @@ fn percent_decode(s: &str) -> Option<String> {
 
 /// `path` as written in directory `dir`, relative to the project root, in
 /// the `./…` form a root-level `file:` path takes.
-fn rebase_on_workspace(dir: &str, path: &std::path::Path) -> PathBuf {
+pub(super) fn rebase_on_workspace(dir: &str, path: &std::path::Path) -> PathBuf {
     use std::path::Component;
     if dir == "." || path.is_absolute() {
         return path.to_path_buf();
     }
-    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    let mut parts: Vec<Component> = Vec::new();
     for component in std::path::Path::new(dir)
         .components()
         .chain(path.components())
     {
         match component {
             Component::CurDir => {}
-            Component::ParentDir if parts.last().is_some_and(|p| p != "..") => {
-                parts.pop();
-            }
-            other => parts.push(other.as_os_str().to_owned()),
+            Component::ParentDir => match parts.last() {
+                Some(Component::Normal(_)) => {
+                    parts.pop();
+                }
+                // `..` at a filesystem root stays at the root.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => parts.push(component),
+            },
+            other => parts.push(other),
         }
+    }
+    if matches!(
+        parts.first(),
+        Some(Component::RootDir | Component::Prefix(_))
+    ) {
+        return parts.iter().collect();
     }
     let mut out = PathBuf::from(".");
     out.extend(parts);

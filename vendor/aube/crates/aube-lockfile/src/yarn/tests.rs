@@ -988,6 +988,103 @@ fn berry_reads_a_nested_file_dependency_relative_to_its_parent() {
 }
 
 #[test]
+fn berry_reads_each_parents_own_bare_relative_child() {
+    // Yarn 4.9.2's lockfile for two local parents that each declare
+    // `child: ./child`, a bare path yarn binds as `file:./child` in each.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"broot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "broot@workspace:."
+  dependencies:
+    parent-a: "file:./parent-a"
+    parent-b: "file:./parent-b"
+  languageName: unknown
+  linkType: soft
+
+"child@file:./child::locator=parent-a%40file%3A.%2Fparent-a%23.%2Fparent-a%3A%3Ahash%3Dab5a81%26locator%3Dbroot%2540workspace%253A.":
+  version: 1.0.0
+  resolution: "child@file:./child#./child::hash=45f604&locator=parent-a%40file%3A.%2Fparent-a%23.%2Fparent-a%3A%3Ahash%3Dab5a81%26locator%3Dbroot%2540workspace%253A."
+  languageName: node
+  linkType: hard
+
+"child@file:./child::locator=parent-b%40file%3A.%2Fparent-b%23.%2Fparent-b%3A%3Ahash%3D920e51%26locator%3Dbroot%2540workspace%253A.":
+  version: 1.0.0
+  resolution: "child@file:./child#./child::hash=f00c62&locator=parent-b%40file%3A.%2Fparent-b%23.%2Fparent-b%3A%3Ahash%3D920e51%26locator%3Dbroot%2540workspace%253A."
+  languageName: node
+  linkType: hard
+
+"parent-a@file:./parent-a::locator=broot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "parent-a@file:./parent-a#./parent-a::hash=ab5a81&locator=broot%40workspace%3A."
+  dependencies:
+    child: ./child
+  languageName: node
+  linkType: hard
+
+"parent-b@file:./parent-b::locator=broot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "parent-b@file:./parent-b#./parent-b::hash=920e51&locator=broot%40workspace%3A."
+  dependencies:
+    child: ./child
+  languageName: node
+  linkType: hard
+"#,
+    )
+    .unwrap();
+    let manifest = make_manifest(
+        &[
+            ("parent-a", "file:./parent-a"),
+            ("parent-b", "file:./parent-b"),
+        ],
+        &[],
+    );
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    for parent_name in ["parent-a", "parent-b"] {
+        let dep = graph.importers["."]
+            .iter()
+            .find(|d| d.name == parent_name)
+            .unwrap();
+        let parent = &graph.packages[&dep.dep_path];
+        let edge = parent
+            .dependencies
+            .get("child")
+            .unwrap_or_else(|| panic!("{parent_name} must keep its child edge"));
+        let target = crate::resolve_dep_edge("child", edge, |k| graph.packages.contains_key(k))
+            .unwrap_or_else(|| panic!("{parent_name}'s child edge {edge} must name a package"));
+        assert_eq!(
+            graph.packages[&target].local_source,
+            Some(LocalSource::Directory(PathBuf::from(format!(
+                "./{parent_name}/child"
+            ))))
+        );
+    }
+}
+
+#[test]
+fn berry_rebases_a_relative_path_without_climbing_past_a_root() {
+    use super::berry::rebase_on_workspace;
+    use std::path::Path;
+    assert_eq!(
+        rebase_on_workspace("packages/app", Path::new("../../shared/x.tgz")),
+        PathBuf::from("./shared/x.tgz")
+    );
+    assert_eq!(
+        rebase_on_workspace("packages", Path::new("../../outside")),
+        PathBuf::from("./../outside")
+    );
+    assert_eq!(
+        rebase_on_workspace("/abs/parent", Path::new("../../../child")),
+        PathBuf::from("/child")
+    );
+}
+
+#[test]
 fn berry_writer_keeps_an_alias_apart_from_a_same_version_local_package() {
     // A fresh resolve of `choice: npm:is-odd@1.0.0` beside `is-odd:
     // file:./local.tgz`, both 1.0.0: the alias must keep its own registry
