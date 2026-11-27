@@ -1,0 +1,226 @@
+//! A tsconfig with `"module": "commonjs"` compiles `import`/`export` in `.ts` files to
+//! CommonJS the way `tsc` emits it, under `nub` and under the standalone loader
+//! (`node --import <runtime>/loader-register.mjs`, what `@nubjs/runner` ships).
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+fn write(root: &Path, rel: &str, body: &str) {
+    let path = root.join(rel);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, body).unwrap();
+}
+
+/// `nub` with `node_dir` first on `PATH` (Nub runs the first Node it finds there), or
+/// the standalone loader on that Node when `standalone` is set.
+fn run(root: &Path, node_dir: Option<&Path>, standalone: bool, entry: &str) -> Output {
+    let mut command = if standalone {
+        let node = node_dir.map_or(PathBuf::from("node"), |dir| dir.join("node"));
+        let mut command = Command::new(node);
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
+        command.arg(format!(
+            "--import={}/loader-register.mjs",
+            runtime.display()
+        ));
+        command
+    } else {
+        Command::new(env!("CARGO_BIN_EXE_nub"))
+    };
+    if let Some(dir) = node_dir {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut dirs = vec![dir.to_path_buf()];
+        dirs.extend(std::env::split_paths(&path));
+        command.env("PATH", std::env::join_paths(dirs).unwrap());
+    }
+    command
+        .arg(entry)
+        .current_dir(root)
+        .env("XDG_CACHE_HOME", root.join(".cache"))
+        .env_remove("NODE_COMPAT")
+        .env_remove("NODE_OPTIONS")
+        .env_remove("__NUB_RUNTIME_CONFIG")
+        .env_remove("__NUB_TSCONFIG_REPORTED")
+        .output()
+        .unwrap()
+}
+
+fn stdout(output: &Output, what: &str) -> String {
+    assert!(
+        output.status.success(),
+        "{what}: exited {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// The pinned Nodes CI installs: a compat-tier one and a fast-tier one, both of which
+/// remap stack traces (Nub withholds source maps on 26.0 through 26.7).
+fn pinned_nodes() -> Vec<(&'static str, PathBuf)> {
+    ["TEST_NODE_BIN_22_13_0", "TEST_NODE_BIN_22_23_3"]
+        .into_iter()
+        .filter_map(|key| match std::env::var_os(key) {
+            Some(dir) => Some((key, PathBuf::from(dir))),
+            None => {
+                eprintln!("skipping the {key} leg: it is not set");
+                None
+            }
+        })
+        .collect()
+}
+
+const MAIN: &str = r#"import path from "node:path";
+import fn from "cjs-fn";
+import greet, { named, fail, bump, count } from "./lib";
+
+console.log(path.basename(__dirname), typeof require, require.main === module, fn(), greet(), named, bump(), count);
+try {
+  fail();
+} catch (error) {
+  console.log((error as Error).stack!.split("\n")[1].trim().replace(__dirname + path.sep, ""));
+}
+"#;
+
+const LIB: &str = r#"export const named: string = "named";
+export default function greet() { return "default"; }
+export function fail(): never {
+  throw new Error("from lib");
+}
+let count = 0;
+export { count };
+export function bump() { return count++; }
+"#;
+
+#[test]
+fn module_commonjs_compiles_imports_to_require() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("app");
+    write(&root, "package.json", r#"{"name":"app"}"#);
+    write(
+        &root,
+        "tsconfig.json",
+        r#"{"compilerOptions":{"module":"commonjs","esModuleInterop":true}}"#,
+    );
+    write(
+        &root,
+        "node_modules/cjs-fn/package.json",
+        r#"{"main":"index.js"}"#,
+    );
+    write(
+        &root,
+        "node_modules/cjs-fn/index.js",
+        "module.exports = () => 'fn';\n",
+    );
+    write(&root, "main.ts", MAIN);
+    write(&root, "lib.ts", LIB);
+    write(
+        &root,
+        "side.ts",
+        "const before: number = 1;\n\n\n\nimport \"./boom\";\n",
+    );
+    write(&root, "boom.ts", "throw new Error(\"boom\");\n");
+
+    // `bump()` returns the old count, and the import reads the new one live.
+    let first = "app function true fn default named 0 1";
+    let mut legs = vec![(false, None)];
+    if cfg!(unix) {
+        legs.push((true, None));
+    }
+    for (standalone, node) in legs {
+        let out = stdout(&run(&root, node, standalone, "main.ts"), "PATH node");
+        assert_eq!(out.lines().next(), Some(first), "standalone: {standalone}");
+    }
+    // The stack frames prove the source map points at the original lines, a
+    // side-effect import's `require()` included.
+    for (key, node_dir) in pinned_nodes() {
+        let out = stdout(&run(&root, Some(&node_dir), false, "main.ts"), key);
+        assert_eq!(out, format!("{first}\nat fail (lib.ts:4:9)"), "{key}");
+        let out = run(&root, Some(&node_dir), false, "side.ts");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("side.ts:5:1)"), "{key}: {stderr}");
+    }
+}
+
+/// Neither has a CommonJS form, so the run stops on the file instead of loading it as an
+/// ES module. Under `"type": "module"` the same file stays an ES module and runs.
+#[test]
+fn module_commonjs_refuses_import_meta_and_top_level_await() {
+    for (source, needle) in [
+        (
+            "console.log(import.meta.url);\n",
+            "`import.meta` is not available",
+        ),
+        (
+            "await Promise.resolve();\nconsole.log('ran');\n",
+            "Top-level `await` is not available",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "package.json", "{}");
+        write(
+            root,
+            "tsconfig.json",
+            r#"{"compilerOptions":{"module":"commonjs"}}"#,
+        );
+        write(root, "main.ts", source);
+        let out = run(root, None, false, "main.ts");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "{needle}: the run must stop: {stderr}"
+        );
+        assert!(stderr.contains(needle), "{needle}: {stderr}");
+        assert!(
+            stderr.contains("main.ts"),
+            "the error names the file: {stderr}"
+        );
+
+        write(root, "package.json", r#"{"type":"module"}"#);
+        let out = run(root, None, false, "main.ts");
+        assert!(
+            out.status.success(),
+            "{needle}, type module: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// With `esModuleInterop` unset, `import * as` follows the installed TypeScript's
+/// default: off in TypeScript 5, so the namespace is the callable `module.exports`; on
+/// from 6, so it is an object.
+#[test]
+fn es_module_interop_defaults_to_the_installed_typescript() {
+    for (version, expected) in [("5.9.3", "function"), ("6.0.3", "object")] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write(root, "package.json", "{}");
+        write(
+            root,
+            "tsconfig.json",
+            r#"{"compilerOptions":{"module":"commonjs"}}"#,
+        );
+        write(
+            root,
+            "node_modules/typescript/package.json",
+            &format!(r#"{{"name":"typescript","version":"{version}"}}"#),
+        );
+        write(
+            root,
+            "node_modules/cjs-fn/package.json",
+            r#"{"main":"index.js"}"#,
+        );
+        write(
+            root,
+            "node_modules/cjs-fn/index.js",
+            "module.exports = () => 'fn';\n",
+        );
+        write(
+            root,
+            "main.ts",
+            "import * as fn from \"cjs-fn\";\nconsole.log(typeof fn);\n",
+        );
+        let out = stdout(&run(root, None, false, "main.ts"), version);
+        assert_eq!(out, expected, "TypeScript {version}");
+    }
+}

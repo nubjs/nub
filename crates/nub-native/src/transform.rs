@@ -24,17 +24,24 @@
 
 use std::{ops::ControlFlow, path::Path, path::PathBuf};
 
+use crate::cjs::{self, CjsOptions};
+
 use napi::Either;
 use napi_derive::napi;
 use rustc_hash::FxHashMap;
 
 use oxc::{
     CompilerInterface,
+    allocator::Allocator,
+    ast::ast::Program,
     codegen::CodegenReturn,
     diagnostics::{Diagnostics, OxcDiagnostic},
+    parser::{Parser, ParserReturn},
+    semantic::Scoping,
+    span::SourceType,
     transformer::{
         EnvOptions, HelperLoaderMode, HelperLoaderOptions, JsxRuntime, ProposalOptions,
-        RewriteExtensionsMode,
+        RewriteExtensionsMode, Transformer, TransformerReturn,
     },
     transformer_plugins::{InjectGlobalVariablesConfig, InjectImport, ReplaceGlobalDefinesConfig},
 };
@@ -116,6 +123,17 @@ pub struct TransformOptions {
 
     /// Third-party plugins to use.
     pub plugins: Option<PluginsOptions>,
+
+    /// Nub's own addition, absent from `oxc-transform`: compile `import`/`export` to
+    /// CommonJS the way `tsc` does under `"module": "commonjs"` (see `cjs.rs`).
+    pub cjs: Option<CjsTransformOptions>,
+}
+
+#[napi(object)]
+#[derive(Default, Clone, Copy)]
+pub struct CjsTransformOptions {
+    /// Resolved in JS: the tsconfig value, else the project's TypeScript default.
+    pub es_module_interop: bool,
 }
 
 impl TryFrom<TransformOptions> for oxc::transformer::TransformOptions {
@@ -457,11 +475,20 @@ struct Compiler {
 
     helpers_used: FxHashMap<String, String>,
     errors: Vec<OxcDiagnostic>,
+
+    cjs: Option<CjsOptions>,
 }
 
 impl Compiler {
     fn new(options: Option<TransformOptions>) -> Result<Self, Vec<OxcDiagnostic>> {
         let mut options = options;
+
+        let cjs = options
+            .as_mut()
+            .and_then(|options| options.cjs.take())
+            .map(|o| CjsOptions {
+                es_module_interop: o.es_module_interop,
+            });
 
         let sourcemap = options
             .as_ref()
@@ -518,6 +545,7 @@ impl Compiler {
             inject,
             helpers_used: FxHashMap::default(),
             errors: vec![],
+            cjs,
         })
     }
 }
@@ -543,9 +571,57 @@ impl CompilerInterface for Compiler {
         self.inject.clone()
     }
 
+    /// Under the CommonJS emit the file arrives as `commonjs`, which keeps a file with
+    /// no `import`/`export` sloppy and allows a top-level `return`, as Node's CommonJS
+    /// does. One that has module syntax is reparsed as a module: `tsc` makes such a
+    /// file strict, and it is the module parse that lets the CommonJS pass name a
+    /// top-level `await` instead of failing on a parse error.
+    fn parse<'a>(
+        &self,
+        allocator: &'a Allocator,
+        source_text: &'a str,
+        source_type: SourceType,
+    ) -> ParserReturn<'a> {
+        let ret = Parser::new(allocator, source_text, source_type)
+            .with_options(self.parse_options())
+            .parse();
+        if self.cjs.is_some() && !source_type.is_module() && ret.module_record.has_module_syntax {
+            return Parser::new(allocator, source_text, source_type.with_module(true))
+                .with_options(self.parse_options())
+                .parse();
+        }
+        ret
+    }
+
+    fn transform<'a>(
+        &self,
+        options: &oxc::transformer::TransformOptions,
+        allocator: &'a Allocator,
+        program: &mut Program<'a>,
+        source_path: &Path,
+        scoping: Scoping,
+    ) -> TransformerReturn {
+        let shape = self.cjs.map(|_| cjs::module_shape(program));
+        let mut ret =
+            Transformer::new(allocator, source_path, options).build_with_scoping(scoping, program);
+        if let (Some(options), Some(shape)) = (self.cjs, shape)
+            && !ret.diagnostics.has_errors()
+        {
+            let (scoping, errors) = cjs::to_commonjs(allocator, program, shape, options);
+            ret.scoping = scoping;
+            ret.diagnostics.extend(errors);
+        }
+        ret
+    }
+
     fn after_codegen(&mut self, ret: CodegenReturn) {
         self.printed = ret.code;
-        self.printed_sourcemap = ret.map.map(SourceMap::from);
+        let map = if self.cjs.is_some() {
+            ret.map.map(cjs::drop_names)
+        } else {
+            ret.map
+        };
+        self.printed_sourcemap = map.map(SourceMap::from);
     }
 
     #[expect(deprecated)]

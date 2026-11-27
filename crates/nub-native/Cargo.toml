@@ -61,6 +61,9 @@ napi-derive = "3"
 oxc = { version = "=0.140.0", features = ["full"] }
 oxc_napi = "=0.140.0"
 oxc_sourcemap = { version = "=8.1.0", features = ["napi"] }
+# The AST walker oxc's own transforms run on, which the `oxc` facade does not
+# re-export. The CommonJS pass (src/cjs.rs) needs it to rewrite references by symbol.
+oxc_traverse = "=0.140.0"
 rustc-hash = "2"
 serde_json = "1"
 # blake3 content hash for the transpile-cache key + integrity prefix (SIMD,
@@ -135,6 +138,7 @@ serde_json.workspace = true
 oxc.workspace = true
 oxc_napi.workspace = true
 oxc_sourcemap.workspace = true
+oxc_traverse.workspace = true
 rustc-hash.workspace = true
 # The transpile cache's integrity prefix (SIMD content hash, replaced SHA-256 on
 # the warm path).

@@ -798,9 +798,54 @@ function moduleFormatWithInfo(ext, pkgType, filePath, source) {
   if (ext === ".mts" || ext === ".mjs") return { format: "module", info: null };
   if (ext === ".cts" || ext === ".cjs") return { format: "commonjs", info: null };
   if (pkgType === "module") return { format: "module", info: null };
+  if (tsconfigEmitsCommonJs(ext, pkgType, filePath)) return { format: "commonjs", info: null };
   if (pkgType === "commonjs") return { format: "commonjs", info: null };
   const info = detectModuleInfo(filePath, source, langFor(ext));
   return { format: info.hasValueEsmSyntax ? "module" : "commonjs", info };
+}
+
+// ── CommonJS emit (`"module": "commonjs"`) ──────────────────────────
+// A `.ts`/`.tsx` file whose tsconfig says `"module": "commonjs"`, outside a
+// `"type": "module"` package, runs as the CommonJS `tsc` would emit for it: its
+// `import`/`export` compile to `require`/`exports` (nub-native `cjs.rs`), so
+// `__dirname`, `require` and `module` work, as they do under ts-node. This
+// overrides both Node's syntax detection (no `"type"`) and an explicit
+// `"type": "commonjs"`, where Node would refuse the `import` outright. `.mts` and
+// `.cts` keep their extension's format, and `node16`/`nodenext` keep Node's rules.
+function tsconfigEmitsCommonJs(ext, pkgType, filePath) {
+  if ((ext !== ".ts" && ext !== ".tsx") || pkgType === "module") return false;
+  const module_ = getTsconfigForDir(dirname(filePath)).compilerOptions?.module;
+  return typeof module_ === "string" && module_.toLowerCase() === "commonjs";
+}
+
+// `esModuleInterop` as `tsc` applies it to this project. An explicit value wins.
+// Absent, its default depends on the compiler: TypeScript 6 turned it on, and 5
+// and earlier left it off, so the project's own `typescript` decides, read from
+// the nearest `node_modules` above its tsconfig. With none found, on, which is
+// also how Node's own `import` of CommonJS behaves.
+const interopDefaultCache = new Map();
+function esModuleInteropFor(tsconfig) {
+  const explicit = tsconfig.compilerOptions?.esModuleInterop;
+  if (typeof explicit === "boolean") return explicit;
+  const key = tsconfig.path || "";
+  if (interopDefaultCache.has(key)) return interopDefaultCache.get(key);
+  let interop = true;
+  let dir = tsconfig.path ? dirname(tsconfig.path) : null;
+  while (dir) {
+    const manifest = join(dir, "node_modules", "typescript", "package.json");
+    if (fileExists(manifest)) {
+      try {
+        const major = Number.parseInt(JSON.parse(readFileSync(manifest, "utf8")).version, 10);
+        if (major < 6) interop = false;
+      } catch {}
+      break;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  interopDefaultCache.set(key, interop);
+  return interop;
 }
 
 // The Stage-3-decorator rejection diagnostic. oxc does not lower TC39 Stage 3
@@ -1099,6 +1144,9 @@ export function loadTranspile(url, ext, source) {
   const { format, info: moduleInfo } = moduleFormatWithInfo(ext, pkgType, filePath, source);
 
   const lang = langFor(ext);
+  const cjs = format === "commonjs" && tsconfigEmitsCommonJs(ext, pkgType, filePath)
+    ? { esModuleInterop: esModuleInteropFor(getTsconfigForDir(dir)) }
+    : undefined;
 
   const opts = {
     lang,
@@ -1118,6 +1166,7 @@ export function loadTranspile(url, ext, source) {
     decorator: co?.experimentalDecorators === true
       ? { legacy: true, emitDecoratorMetadata: co?.emitDecoratorMetadata === true }
       : undefined,
+    cjs,
   };
   if (lang === "tsx" || lang === "jsx") {
     opts.jsx = {
@@ -1151,10 +1200,13 @@ export function loadTranspile(url, ext, source) {
   const formatByte = format === "commonjs" ? "c" : "m";
   // The RAW configured loader, not `lang`: a non-TS/JSX loader (`text`, `json5`)
   // changes the output without changing `lang`, so the key must see it.
+  // `cjs` too: its interop default comes from the installed TypeScript, which the
+  // tsconfig hash cannot see.
   const runtimeHash = JSON.stringify({
     loader: RUNTIME_LOADER[ext] || null,
     tsconfig: RUNTIME_TSCONFIG || null,
     compilerOptions: RUNTIME_COMPILER_OPTIONS,
+    cjs: cjs || null,
   });
   // process.version decides how the appended `//# sourceURL` is percent-encoded:
   // it is spelled to match THIS host's pathToFileURL, whose escape set widened

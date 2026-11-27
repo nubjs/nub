@@ -16,6 +16,8 @@ pub struct TsCompilerOptions {
     pub jsx_fragment_factory: Option<String>,
     pub experimental_decorators: Option<bool>,
     pub emit_decorator_metadata: Option<bool>,
+    pub module: Option<String>,
+    pub es_module_interop: Option<bool>,
 }
 
 impl From<nub_tsconfig::TsCompilerOptions> for TsCompilerOptions {
@@ -27,6 +29,8 @@ impl From<nub_tsconfig::TsCompilerOptions> for TsCompilerOptions {
             jsx_fragment_factory: o.jsx_fragment_factory,
             experimental_decorators: o.experimental_decorators,
             emit_decorator_metadata: o.emit_decorator_metadata,
+            module: o.module,
+            es_module_interop: o.es_module_interop,
         }
     }
 }
