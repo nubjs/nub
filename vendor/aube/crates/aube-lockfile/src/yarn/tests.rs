@@ -1161,7 +1161,9 @@ fn berry_prefers_a_file_resolution_over_the_declared_bare_path() {
 fn berry_yarn_resolution_takes_the_first_rule_that_applies_to_the_declarer() {
     use super::berry::yarn_resolution;
     let rules: Vec<(String, String)> = [
+        ("**/leaf", "file:./glob"),
         ("rroot/leaf", "file:./direct"),
+        ("lib@npm:1.0.0/leaf", "file:./pinned"),
         ("consumer/leaf", "file:./replacement"),
         ("leaf", "file:./replacement"),
         ("@s/parent/@s/dep", "2.0.0"),
@@ -1171,23 +1173,32 @@ fn berry_yarn_resolution_takes_the_first_rule_that_applies_to_the_declarer() {
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
     let get = |from, name, range| yarn_resolution(&rules, from, name, range);
+    let root = Some(("rroot", "workspace:."));
     assert_eq!(
-        get(Some("rroot"), "leaf", "./direct").as_deref(),
+        get(root, "leaf", "./direct").as_deref(),
         Some("file:./direct")
     );
     assert_eq!(
-        get(Some("consumer"), "leaf", "^1.0.0").as_deref(),
+        get(Some(("consumer", "file:./consumer")), "leaf", "^1.0.0").as_deref(),
+        Some("file:./replacement")
+    );
+    // A version-qualified parent matches only that version of it.
+    assert_eq!(
+        get(Some(("lib", "npm:1.0.0")), "leaf", "^1.0.0").as_deref(),
+        Some("file:./pinned")
+    );
+    assert_eq!(
+        get(Some(("lib", "npm:2.0.0")), "leaf", "^1.0.0").as_deref(),
         Some("file:./replacement")
     );
     assert_eq!(
-        get(Some("other"), "leaf", "^1.0.0").as_deref(),
-        Some("file:./replacement")
-    );
-    assert_eq!(
-        get(Some("@s/parent"), "@s/dep", "^1.0.0").as_deref(),
+        get(Some(("@s/parent", "npm:1.0.0")), "@s/dep", "^1.0.0").as_deref(),
         Some("2.0.0")
     );
-    assert_eq!(get(Some("@s/other"), "@s/dep", "^1.0.0"), None);
+    assert_eq!(
+        get(Some(("@s/other", "npm:1.0.0")), "@s/dep", "^1.0.0"),
+        None
+    );
     assert_eq!(
         get(None, "lodash", "npm:^4.0.0").as_deref(),
         Some("4.17.21")
@@ -1270,6 +1281,94 @@ fn berry_honors_a_parent_scoped_resolution_for_the_root() {
         source(&target),
         Some(LocalSource::Directory(PathBuf::from("./replacement")))
     );
+}
+
+#[test]
+fn berry_skips_resolutions_that_do_not_apply_to_the_root_workspace() {
+    // Yarn 4.9.2 writes this lockfile for both rule sets: a version-qualified
+    // parent never matches a workspace, whose reference is `workspace:.`,
+    // and yarn ignores a `**/` rule with a warning. Either way the bare
+    // `leaf` rule gives the root `./replacement`; consumer keeps `./direct`.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"consumer@file:./consumer::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "consumer@file:./consumer#./consumer::hash=472864&locator=rroot%40workspace%3A."
+  dependencies:
+    leaf: "file:./direct"
+  languageName: node
+  linkType: hard
+
+"leaf@file:./direct::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./direct#./direct::hash=375bb7&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"leaf@file:./replacement::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./replacement#./replacement::hash=eb2872&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"rroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "rroot@workspace:."
+  dependencies:
+    consumer: "file:./consumer"
+    leaf: ./direct
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    for skipped in ["rroot@npm:1.0.0/leaf", "**/leaf"] {
+        let mut manifest = make_manifest(
+            &[("leaf", "./direct"), ("consumer", "file:./consumer")],
+            &[],
+        );
+        manifest.name = Some("rroot".to_string());
+        manifest.version = Some("1.0.0".to_string());
+        let mut resolutions = serde_json::Map::new();
+        for (rule, reference) in [
+            (skipped, "file:./direct"),
+            ("consumer/leaf", "file:./direct"),
+            ("leaf", "file:./replacement"),
+        ] {
+            resolutions.insert(rule.to_string(), reference.into());
+        }
+        manifest
+            .extra
+            .insert("resolutions".to_string(), resolutions.into());
+        let graph = parse(tmp.path(), &manifest).unwrap();
+        let source = |dep_path: &str| graph.packages[dep_path].local_source.clone();
+        let direct = |name: &str| {
+            graph.importers["."]
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap()
+                .dep_path
+                .clone()
+        };
+        assert_eq!(
+            source(&direct("leaf")),
+            Some(LocalSource::Directory(PathBuf::from("./replacement"))),
+            "{skipped}"
+        );
+        let edge = &graph.packages[&direct("consumer")].dependencies["leaf"];
+        let target =
+            crate::resolve_dep_edge("leaf", edge, |k| graph.packages.contains_key(k)).unwrap();
+        assert_eq!(
+            source(&target),
+            Some(LocalSource::Directory(PathBuf::from("./direct"))),
+            "{skipped}"
+        );
+    }
 }
 
 #[test]

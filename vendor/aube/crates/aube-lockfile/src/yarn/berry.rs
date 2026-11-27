@@ -382,11 +382,12 @@ pub(super) fn parse_berry_str(
             .collect(),
         _ => Vec::new(),
     };
-    let resolve_override = |from: Option<&str>, name: &str, range: &str| -> Option<String> {
-        yarn_resolution(&yarn_resolutions, from, name, range).or_else(|| {
-            crate::override_match::apply(&resolution_rules, name, range).map(str::to_string)
-        })
-    };
+    let resolve_override =
+        |from: Option<(&str, &str)>, name: &str, range: &str| -> Option<String> {
+            yarn_resolution(&yarn_resolutions, from, name, range).or_else(|| {
+                crate::override_match::apply(&resolution_rules, name, range).map(str::to_string)
+            })
+        };
     for (spec, dep_path) in unqualified_local {
         if let Some(dep_path) = dep_path {
             spec_to_dep_path.entry(spec).or_insert(dep_path);
@@ -454,7 +455,12 @@ pub(super) fn parse_berry_str(
                     .strip_prefix(&format!("{name}@"))
                     .unwrap_or(raw_spec);
                 let bare = range.strip_prefix("npm:").unwrap_or(range);
-                if let Some(resolved) = resolve_override(Some(pkg.registry_name()), name, bare) {
+                let declarer = pkg.registry_name();
+                let reference = resolution_of
+                    .get(dep_path)
+                    .and_then(|res| res.strip_prefix(&format!("{declarer}@")))
+                    .unwrap_or(&pkg.version);
+                if let Some(resolved) = resolve_override(Some((declarer, reference)), name, bare) {
                     for candidate in berry_spec_candidates(name, bare, Some(&resolved)) {
                         if let Some(target) = crate::resolve_dep_spec(
                             &candidate,
@@ -554,7 +560,7 @@ pub(super) fn parse_berry_str(
     let push_direct = |name: &str,
                        range: &str,
                        dep_type: DepType,
-                       (importer, from): (&str, Option<&str>),
+                       (importer, from): (&str, Option<(&str, &str)>),
                        into: &mut Vec<DirectDep>,
                        skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<(), Error> {
@@ -624,7 +630,11 @@ pub(super) fn parse_berry_str(
                           skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<Vec<DirectDep>, Error> {
         let mut out: Vec<DirectDep> = Vec::new();
-        let owner = (importer, pj.name.as_deref());
+        let reference = format!("workspace:{}", importer.replace('\\', "/"));
+        let owner = (
+            importer,
+            pj.name.as_deref().map(|n| (n, reference.as_str())),
+        );
         for (name, range) in &pj.dependencies {
             push_direct(name, range, DepType::Production, owner, &mut out, skipped)?;
         }
@@ -926,12 +936,15 @@ fn spec_locator(spec: &str) -> Option<String> {
 }
 
 /// The first of yarn's ordered `resolutions` that rewrites `name@range` as
-/// declared by `from` (`CorePlugin#reduceDependency`): `name` matches any
-/// declarer, `parent/name` only `parent`'s, and `name@range` only that
-/// exact range. A yarn-1-style `**/` prefix matches any declarer.
+/// declared by `from`, the declaring package's name and locator reference
+/// (`CorePlugin#reduceDependency`): `name` matches any declarer,
+/// `parent/name` only `parent`'s, `parent@1.0.0/name` only that version of
+/// it (a workspace's reference is `workspace:<dir>`, never its version), and
+/// `name@range` only that exact range. Yarn ignores a yarn-1 glob rule
+/// (`**/name`) with a warning, and so does this.
 pub(super) fn yarn_resolution(
     rules: &[(String, String)],
-    from: Option<&str>,
+    from: Option<(&str, &str)>,
     name: &str,
     range: &str,
 ) -> Option<String> {
@@ -948,7 +961,10 @@ pub(super) fn yarn_resolution(
     };
     let bare = |r: &str| r.strip_prefix("npm:").unwrap_or(r).to_string();
     rules.iter().find_map(|(pattern, reference)| {
-        let pattern = pattern.strip_prefix("**/").unwrap_or(pattern);
+        let pattern = pattern.as_str();
+        if pattern.starts_with("*/") || pattern.starts_with("**/") {
+            return None;
+        }
         // A scoped ident carries its own `/`: `@s/parent/name`, `@s/name`.
         let split = match pattern.strip_prefix('@') {
             Some(rest) => rest
@@ -961,8 +977,9 @@ pub(super) fn yarn_resolution(
             None => (None, pattern),
         };
         if let Some(parent) = parent {
-            let (parent_name, _) = split_ident(parent);
-            if Some(parent_name.as_str()) != from {
+            let (parent_name, parent_ref) = split_ident(parent);
+            let (from_name, from_ref) = from?;
+            if parent_name != from_name || parent_ref.is_some_and(|r| bare(&r) != bare(from_ref)) {
                 return None;
             }
         }
