@@ -1158,6 +1158,121 @@ fn berry_prefers_a_file_resolution_over_the_declared_bare_path() {
 }
 
 #[test]
+fn berry_yarn_resolution_takes_the_first_rule_that_applies_to_the_declarer() {
+    use super::berry::yarn_resolution;
+    let rules: Vec<(String, String)> = [
+        ("rroot/leaf", "file:./direct"),
+        ("consumer/leaf", "file:./replacement"),
+        ("leaf", "file:./replacement"),
+        ("@s/parent/@s/dep", "2.0.0"),
+        ("lodash@^4.0.0", "4.17.21"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let get = |from, name, range| yarn_resolution(&rules, from, name, range);
+    assert_eq!(
+        get(Some("rroot"), "leaf", "./direct").as_deref(),
+        Some("file:./direct")
+    );
+    assert_eq!(
+        get(Some("consumer"), "leaf", "^1.0.0").as_deref(),
+        Some("file:./replacement")
+    );
+    assert_eq!(
+        get(Some("other"), "leaf", "^1.0.0").as_deref(),
+        Some("file:./replacement")
+    );
+    assert_eq!(
+        get(Some("@s/parent"), "@s/dep", "^1.0.0").as_deref(),
+        Some("2.0.0")
+    );
+    assert_eq!(get(Some("@s/other"), "@s/dep", "^1.0.0"), None);
+    assert_eq!(
+        get(None, "lodash", "npm:^4.0.0").as_deref(),
+        Some("4.17.21")
+    );
+    assert_eq!(get(None, "lodash", "^3.0.0"), None);
+}
+
+#[test]
+fn berry_honors_a_parent_scoped_resolution_for_the_root() {
+    // Yarn 4.9.2's lockfile where `rroot/leaf` precedes a bare `leaf` rule:
+    // yarn installs `./direct` at the root and `./replacement` in consumer.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"consumer@file:./consumer::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "consumer@file:./consumer#./consumer::hash=f78707&locator=rroot%40workspace%3A."
+  dependencies:
+    leaf: "file:./replacement"
+  languageName: node
+  linkType: hard
+
+"leaf@file:./direct::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./direct#./direct::hash=375bb7&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"leaf@file:./replacement::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./replacement#./replacement::hash=eb2872&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"rroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "rroot@workspace:."
+  dependencies:
+    consumer: "file:./consumer"
+    leaf: ./direct
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let mut manifest = make_manifest(
+        &[("leaf", "./direct"), ("consumer", "file:./consumer")],
+        &[],
+    );
+    manifest.name = Some("rroot".to_string());
+    manifest.extra.insert(
+        "resolutions".to_string(),
+        serde_json::json!({
+            "rroot/leaf": "file:./direct",
+            "consumer/leaf": "file:./replacement",
+            "leaf": "file:./replacement"
+        }),
+    );
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    let source = |dep_path: &str| graph.packages[dep_path].local_source.clone();
+    let root_leaf = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "leaf")
+        .unwrap();
+    assert_eq!(
+        source(&root_leaf.dep_path),
+        Some(LocalSource::Directory(PathBuf::from("./direct")))
+    );
+    let consumer = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "consumer")
+        .unwrap();
+    let edge = &graph.packages[&consumer.dep_path].dependencies["leaf"];
+    let target = crate::resolve_dep_edge("leaf", edge, |k| graph.packages.contains_key(k)).unwrap();
+    assert_eq!(
+        source(&target),
+        Some(LocalSource::Directory(PathBuf::from("./replacement")))
+    );
+}
+
+#[test]
 fn berry_writer_keeps_an_alias_apart_from_a_same_version_local_package() {
     // A fresh resolve of `choice: npm:is-odd@1.0.0` beside `is-odd:
     // file:./local.tgz`, both 1.0.0: the alias must keep its own registry

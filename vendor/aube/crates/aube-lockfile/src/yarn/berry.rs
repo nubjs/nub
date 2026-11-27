@@ -372,6 +372,21 @@ pub(super) fn parse_berry_str(
     // bare-name (`@types/node`) and descriptor-keyed (`lru-cache@^10.0.1`)
     // resolution keys.
     let resolution_rules = crate::override_match::compile(&manifest.overrides_map());
+    // Yarn's own `resolutions`, in declaration order: the first rule that
+    // matches wins, and a `parent/name` rule matches a dependency declared
+    // by `parent`, which `override_match` has no notion of at this level.
+    let yarn_resolutions: Vec<(String, String)> = match manifest.extra.get("resolutions") {
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let resolve_override = |from: Option<&str>, name: &str, range: &str| -> Option<String> {
+        yarn_resolution(&yarn_resolutions, from, name, range).or_else(|| {
+            crate::override_match::apply(&resolution_rules, name, range).map(str::to_string)
+        })
+    };
     for (spec, dep_path) in unqualified_local {
         if let Some(dep_path) = dep_path {
             spec_to_dep_path.entry(spec).or_insert(dep_path);
@@ -439,9 +454,8 @@ pub(super) fn parse_berry_str(
                     .strip_prefix(&format!("{name}@"))
                     .unwrap_or(raw_spec);
                 let bare = range.strip_prefix("npm:").unwrap_or(range);
-                if let Some(resolved) = crate::override_match::apply(&resolution_rules, name, bare)
-                {
-                    for candidate in berry_spec_candidates(name, bare, Some(resolved)) {
+                if let Some(resolved) = resolve_override(Some(pkg.registry_name()), name, bare) {
+                    for candidate in berry_spec_candidates(name, bare, Some(&resolved)) {
                         if let Some(target) = crate::resolve_dep_spec(
                             &candidate,
                             optional,
@@ -540,11 +554,12 @@ pub(super) fn parse_berry_str(
     let push_direct = |name: &str,
                        range: &str,
                        dep_type: DepType,
-                       importer: &str,
+                       (importer, from): (&str, Option<&str>),
                        into: &mut Vec<DirectDep>,
                        skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<(), Error> {
-        let resolved = crate::override_match::apply(&resolution_rules, name, range);
+        let resolved = resolve_override(from, name, range);
+        let resolved = resolved.as_deref();
         // A `resolutions` replacement wins over the declared range, as in
         // `berry_spec_candidates` below.
         let workspace = importer.replace('\\', "/");
@@ -609,21 +624,15 @@ pub(super) fn parse_berry_str(
                           skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<Vec<DirectDep>, Error> {
         let mut out: Vec<DirectDep> = Vec::new();
+        let owner = (importer, pj.name.as_deref());
         for (name, range) in &pj.dependencies {
-            push_direct(
-                name,
-                range,
-                DepType::Production,
-                importer,
-                &mut out,
-                skipped,
-            )?;
+            push_direct(name, range, DepType::Production, owner, &mut out, skipped)?;
         }
         for (name, range) in &pj.dev_dependencies {
-            push_direct(name, range, DepType::Dev, importer, &mut out, skipped)?;
+            push_direct(name, range, DepType::Dev, owner, &mut out, skipped)?;
         }
         for (name, range) in &pj.optional_dependencies {
-            push_direct(name, range, DepType::Optional, importer, &mut out, skipped)?;
+            push_direct(name, range, DepType::Optional, owner, &mut out, skipped)?;
         }
         Ok(out)
     };
@@ -914,6 +923,55 @@ fn spec_locator(spec: &str) -> Option<String> {
         .split('&')
         .find_map(|pair| pair.strip_prefix("locator="))?;
     percent_decode(locator)
+}
+
+/// The first of yarn's ordered `resolutions` that rewrites `name@range` as
+/// declared by `from` (`CorePlugin#reduceDependency`): `name` matches any
+/// declarer, `parent/name` only `parent`'s, and `name@range` only that
+/// exact range. A yarn-1-style `**/` prefix matches any declarer.
+pub(super) fn yarn_resolution(
+    rules: &[(String, String)],
+    from: Option<&str>,
+    name: &str,
+    range: &str,
+) -> Option<String> {
+    let split_ident = |s: &str| -> (String, Option<String>) {
+        let at = if let Some(rest) = s.strip_prefix('@') {
+            rest.find('@').map(|i| i + 1)
+        } else {
+            s.find('@')
+        };
+        match at {
+            Some(i) => (s[..i].to_string(), Some(s[i + 1..].to_string())),
+            None => (s.to_string(), None),
+        }
+    };
+    let bare = |r: &str| r.strip_prefix("npm:").unwrap_or(r).to_string();
+    rules.iter().find_map(|(pattern, reference)| {
+        let pattern = pattern.strip_prefix("**/").unwrap_or(pattern);
+        // A scoped ident carries its own `/`: `@s/parent/name`, `@s/name`.
+        let split = match pattern.strip_prefix('@') {
+            Some(rest) => rest
+                .find('/')
+                .and_then(|i| rest[i + 1..].find('/').map(|j| i + j + 3)),
+            None => pattern.find('/').map(|i| i + 1),
+        };
+        let (parent, descriptor) = match split {
+            Some(i) => (Some(&pattern[..i - 1]), &pattern[i..]),
+            None => (None, pattern),
+        };
+        if let Some(parent) = parent {
+            let (parent_name, _) = split_ident(parent);
+            if Some(parent_name.as_str()) != from {
+                return None;
+            }
+        }
+        let (rule_name, rule_range) = split_ident(descriptor);
+        if rule_name != name || rule_range.is_some_and(|r| bare(&r) != bare(range)) {
+            return None;
+        }
+        Some(reference.clone())
+    })
 }
 
 /// The descriptor yarn binds a range to: a bare path (`./child`) is a
