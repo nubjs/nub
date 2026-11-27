@@ -761,15 +761,15 @@ export function resolveCjsPath(request, parentPath, lookupPaths) {
   return resolveTs(request, parentPath || "", lookupPaths);
 }
 
-// The directory a `require.resolve` `paths` root stands for when a relative request
-// resolves in it. Node realpaths what it resolves unless symlinks are preserved, and
-// an importer's own directory is already real, so the root is made real too. Null
-// for a root that does not exist.
-export function cjsRootDir(root) {
+// A file found by joining a request onto a `require.resolve` `paths` root, keyed as
+// Node keys it. Node joins lexically, so `..` steps out of the root as spelled, and
+// then realpaths the file unless symlinks are preserved.
+export function cjsRealPath(file) {
+  if (PRESERVE_SYMLINKS) return file;
   try {
-    return PRESERVE_SYMLINKS ? root : realpathSync(root);
+    return realpathSync(file);
   } catch {
-    return null;
+    return file;
   }
 }
 

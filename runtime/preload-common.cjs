@@ -691,9 +691,8 @@ function cjsAdditiveResolve(core, request, parent, parentPath, isMain, options) 
   for (let i = 0; i < roots.length; i++) {
     if (typeof roots[i] !== "string") return null;
     const root = pathResolve(roots[i]);
-    const dir = core.cjsRootDir(root);
-    const hit = dir === null ? null : core.resolveCjsPath(request, join(dir, name));
-    if (hit) return hit;
+    const hit = core.resolveCjsPath(request, join(root, name));
+    if (typeof hit === "string") return core.cjsRealPath(hit);
     try {
       if (module_._findPath(request, [root], isMain)) return null;
     } catch {

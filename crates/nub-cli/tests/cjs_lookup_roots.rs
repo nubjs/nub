@@ -165,12 +165,18 @@ fn bare_subpaths_resolve_from_the_roots_node_searches() {
 /// A TypeScript importer's `./y.js` maps to `y.ts`, and under a `paths` option it
 /// does so in the root, where Node resolves the relative request, not beside the
 /// importer. A root reached through a symlink answers with the real path, as Node
-/// does, and a root where Node's lookup ends in an error ends it here too.
+/// does, after `..` has been taken lexically from the root as spelled. A root where
+/// Node's lookup ends in an error ends it here too.
 #[test]
 fn relative_request_resolves_in_the_paths_root() {
     let root = fixture("relative");
     let caller = root.join("caller");
     link("other", &root.join("other-link"));
+    link("../other", &root.join("sub/link"));
+    for dir in [root.join("sub"), root.clone()] {
+        write(&dir.join("chosen.js"), "");
+        write(&dir.join("picked.ts"), "");
+    }
     write(
         &root.join("ended/dir/package.json"),
         r#"{"main":"gone.js"}"#,
@@ -192,12 +198,15 @@ console.log([
   show("./y.js", "other-link"),
   show("./y.js", "first", "other"),
   show("./dir", "ended", "other"),
+  show("../chosen.js", "sub/link"),
+  show("../picked.js", "sub/link"),
 ].join(" "));
 "#,
     );
     assert_eq!(
         nub(&caller, &root.join(".cache"), "app.cts"),
-        "other/x.js other/y.ts other/x.js other/y.ts other/y.ts MODULE_NOT_FOUND"
+        "other/x.js other/y.ts other/x.js other/y.ts other/y.ts MODULE_NOT_FOUND \
+         sub/chosen.js sub/picked.ts"
     );
 }
 
