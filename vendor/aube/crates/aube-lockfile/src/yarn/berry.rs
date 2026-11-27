@@ -54,6 +54,10 @@ pub(super) fn parse_berry_str(
     // when it names a single package.
     let mut local_by_workspace: BTreeMap<(String, String), String> = BTreeMap::new();
     let mut unqualified_local: BTreeMap<String, Option<String>> = BTreeMap::new();
+    // The same descriptors keyed by their full declaring locator, which for a
+    // `file:` edge inside a local package is that package's `resolution:`.
+    let mut local_by_locator: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut resolution_of: BTreeMap<String, String> = BTreeMap::new();
     let mut packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
     let mut patched_dependencies: BTreeMap<String, String> = BTreeMap::new();
     // Under `strict_unsupported_source` (nub), a block whose protocol the
@@ -228,10 +232,13 @@ pub(super) fn parse_berry_str(
         // Berry always pairs registry and local deps by `name@version`
         // at the graph layer, so duplicate names with the same version
         // but different protocols collapse — same as the classic writer.
-        // Yarn reads a `file:` path relative to the declaring workspace;
-        // aube reads it from the project root, so rebase a member's.
-        let workspace_dir = specs.iter().find_map(|spec| spec_workspace_dir(spec));
-        let local_source = match (local_source, workspace_dir.as_deref()) {
+        // Yarn reads a `file:` path relative to the workspace or package that
+        // declared it; aube reads it from the project root, so rebase it.
+        let base_dir = specs
+            .iter()
+            .find_map(|spec| spec_locator(spec))
+            .and_then(|locator| locator_dir(&locator));
+        let local_source = match (local_source, base_dir.as_deref()) {
             (Some(LocalSource::Tarball(p)), Some(dir)) if res_protocol == "file" => {
                 Some(LocalSource::Tarball(rebase_on_workspace(dir, &p)))
             }
@@ -244,6 +251,7 @@ pub(super) fn parse_berry_str(
             Some(src) => src.dep_path(res_name),
             None => format!("{res_name}@{version}"),
         };
+        resolution_of.insert(dep_path.clone(), resolution.to_string());
 
         for spec in &specs {
             spec_to_dep_path.insert(spec.clone(), dep_path.clone());
@@ -262,8 +270,12 @@ pub(super) fn parse_berry_str(
                 if stripped.contains("@patch:") {
                     spec_to_dep_path.insert(stripped.to_string(), dep_path.clone());
                 } else if local_source.is_some() {
-                    if let Some(dir) = spec_workspace_dir(spec) {
-                        local_by_workspace.insert((stripped.to_string(), dir), dep_path.clone());
+                    if let Some(locator) = spec_locator(spec) {
+                        if let Some(dir) = workspace_dir(&locator) {
+                            local_by_workspace
+                                .insert((stripped.to_string(), dir), dep_path.clone());
+                        }
+                        local_by_locator.insert((stripped.to_string(), locator), dep_path.clone());
                     }
                     unqualified_local
                         .entry(stripped.to_string())
@@ -398,6 +410,13 @@ pub(super) fn parse_berry_str(
          -> Result<BTreeMap<String, String>, Error> {
             let mut out = BTreeMap::new();
             for (name, raw_spec) in raw {
+                if let Some(target) = resolution_of
+                    .get(dep_path)
+                    .and_then(|res| local_by_locator.get(&(raw_spec.clone(), res.clone())))
+                {
+                    out.insert(name.clone(), tail(name, target));
+                    continue;
+                }
                 if let Some(target) = crate::resolve_dep_spec(
                     raw_spec,
                     optional,
@@ -879,16 +898,47 @@ fn collect_peer_meta(block: &yaml_serde::Mapping) -> BTreeMap<String, crate::Pee
         .unwrap_or_default()
 }
 
-/// The directory of the workspace named by a header spec's `::locator=…`
-/// qualifier (`app%40workspace%3Apackages%2Fapp` gives `packages/app`).
-fn spec_workspace_dir(spec: &str) -> Option<String> {
+/// The decoded `locator=` qualifier of a header spec or resolution
+/// (`…::locator=app%40workspace%3Apackages%2Fapp` gives
+/// `app@workspace:packages/app`).
+fn spec_locator(spec: &str) -> Option<String> {
     let (_, qualifiers) = spec.split_once("::")?;
     let locator = qualifiers
         .split('&')
         .find_map(|pair| pair.strip_prefix("locator="))?;
-    let locator = percent_decode(locator)?;
-    let (_, dir) = locator.rsplit_once("@workspace:")?;
-    Some(dir.to_string())
+    percent_decode(locator)
+}
+
+/// The directory of a `name@workspace:<dir>` locator.
+fn workspace_dir(locator: &str) -> Option<String> {
+    let at = locator.get(1..)?.find('@')? + 1;
+    locator[at + 1..]
+        .strip_prefix("workspace:")
+        .map(str::to_string)
+}
+
+/// The directory a locator names, relative to the project root: a
+/// workspace's own, or a local `file:` directory package's, resolved
+/// through the locator that declared it in turn. `None` for anything else,
+/// a tarball included.
+fn locator_dir(locator: &str) -> Option<String> {
+    if let Some(dir) = workspace_dir(locator) {
+        return Some(dir);
+    }
+    let at = locator.get(1..)?.find('@')? + 1;
+    let body = locator[at + 1..].strip_prefix("file:")?;
+    let path = body.split(['#', ':']).next()?;
+    if !matches!(file_protocol_source(path), LocalSource::Directory(_)) {
+        return None;
+    }
+    let parent = spec_locator(body)
+        .and_then(|p| locator_dir(&p))
+        .unwrap_or_else(|| ".".into());
+    Some(
+        rebase_on_workspace(&parent, std::path::Path::new(path))
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn percent_decode(s: &str) -> Option<String> {
@@ -908,13 +958,29 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// `path` as written in workspace `dir`, relative to the project root.
+/// `path` as written in directory `dir`, relative to the project root, in
+/// the `./…` form a root-level `file:` path takes.
 fn rebase_on_workspace(dir: &str, path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
     if dir == "." || path.is_absolute() {
         return path.to_path_buf();
     }
-    let rel = path.strip_prefix(".").unwrap_or(path);
-    PathBuf::from(format!("./{dir}")).join(rel)
+    let mut parts: Vec<std::ffi::OsString> = Vec::new();
+    for component in std::path::Path::new(dir)
+        .components()
+        .chain(path.components())
+    {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if parts.last().is_some_and(|p| p != "..") => {
+                parts.pop();
+            }
+            other => parts.push(other.as_os_str().to_owned()),
+        }
+    }
+    let mut out = PathBuf::from(".");
+    out.extend(parts);
+    out
 }
 
 /// Resolve a `file:`-protocol body like `./vendor/foo` or

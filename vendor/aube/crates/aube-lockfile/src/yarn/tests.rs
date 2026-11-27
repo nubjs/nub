@@ -932,6 +932,62 @@ fn berry_reads_a_file_resolution_for_root_member_and_transitive_edges() {
 }
 
 #[test]
+fn berry_reads_a_nested_file_dependency_relative_to_its_parent() {
+    // Yarn 4.9.2's lockfile for `parent: file:./parent`, whose own
+    // `child: file:./child` is `./parent/child`, beside an unrelated
+    // root-level `./child` yarn never reads.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"child@file:./child::locator=parent%40file%3A.%2Fparent%23.%2Fparent%3A%3Ahash%3D9783e1%26locator%3Dnroot%2540workspace%253A.":
+  version: 1.0.0
+  resolution: "child@file:./child#./child::hash=70f376&locator=parent%40file%3A.%2Fparent%23.%2Fparent%3A%3Ahash%3D9783e1%26locator%3Dnroot%2540workspace%253A."
+  languageName: node
+  linkType: hard
+
+"nroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "nroot@workspace:."
+  dependencies:
+    parent: "file:./parent"
+  languageName: unknown
+  linkType: soft
+
+"parent@file:./parent::locator=nroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "parent@file:./parent#./parent::hash=9783e1&locator=nroot%40workspace%3A."
+  dependencies:
+    child: "file:./child"
+  languageName: node
+  linkType: hard
+"#,
+    )
+    .unwrap();
+    let manifest = make_manifest(&[("parent", "file:./parent")], &[]);
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    let dep = &graph.importers["."][0];
+    let parent = &graph.packages[&dep.dep_path];
+    assert_eq!(
+        parent.local_source,
+        Some(LocalSource::Directory(PathBuf::from("./parent")))
+    );
+    let edge = parent
+        .dependencies
+        .get("child")
+        .expect("parent must keep its child edge");
+    let target = crate::resolve_dep_edge("child", edge, |k| graph.packages.contains_key(k))
+        .unwrap_or_else(|| panic!("child edge {edge} must name a package"));
+    assert_eq!(
+        graph.packages[&target].local_source,
+        Some(LocalSource::Directory(PathBuf::from("./parent/child")))
+    );
+}
+
+#[test]
 fn berry_writer_keeps_an_alias_apart_from_a_same_version_local_package() {
     // A fresh resolve of `choice: npm:is-odd@1.0.0` beside `is-odd:
     // file:./local.tgz`, both 1.0.0: the alias must keep its own registry
