@@ -44,6 +44,20 @@ pub(super) fn parse_berry_str(
     // `LockedPackage` keyed by canonical `name@version` and recording
     // every header-spec → dep_path mapping for the second pass.
     let mut spec_to_dep_path: BTreeMap<String, String> = BTreeMap::new();
+    // A local block's header carries a `::locator=…` qualifier naming the
+    // workspace or package that declared it (`is-odd@file:./local.tgz::locator=app%40workspace%3A.`
+    // for `is-odd: file:./local.tgz` in the root), which the range in a
+    // manifest, a `resolutions` entry or a dependency edge lacks. Keyed by
+    // the unqualified descriptor and the declaring workspace's directory, since
+    // two workspaces can each depend on their own `file:./x.tgz`; the
+    // unqualified descriptor alone is registered too, after the first pass,
+    // when it names a single package.
+    let mut local_by_workspace: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut unqualified_local: BTreeMap<String, Option<String>> = BTreeMap::new();
+    // The same descriptors keyed by their full declaring locator, which for a
+    // `file:` edge inside a local package is that package's `resolution:`.
+    let mut local_by_locator: BTreeMap<(String, String), String> = BTreeMap::new();
+    let mut resolution_of: BTreeMap<String, String> = BTreeMap::new();
     let mut packages: BTreeMap<String, LockedPackage> = BTreeMap::new();
     let mut patched_dependencies: BTreeMap<String, String> = BTreeMap::new();
     // Under `strict_unsupported_source` (nub), a block whose protocol the
@@ -218,10 +232,26 @@ pub(super) fn parse_berry_str(
         // Berry always pairs registry and local deps by `name@version`
         // at the graph layer, so duplicate names with the same version
         // but different protocols collapse — same as the classic writer.
+        // Yarn reads a `file:` path relative to the workspace or package that
+        // declared it; aube reads it from the project root, so rebase it.
+        let base_dir = specs
+            .iter()
+            .find_map(|spec| spec_locator(spec))
+            .and_then(|locator| locator_dir(&locator));
+        let local_source = match (local_source, base_dir.as_deref()) {
+            (Some(LocalSource::Tarball(p)), Some(dir)) if res_protocol == "file" => {
+                Some(LocalSource::Tarball(rebase_on_workspace(dir, &p)))
+            }
+            (Some(LocalSource::Directory(p)), Some(dir)) if res_protocol == "file" => {
+                Some(LocalSource::Directory(rebase_on_workspace(dir, &p)))
+            }
+            (other, _) => other,
+        };
         let dep_path = match &local_source {
             Some(src) => src.dep_path(res_name),
             None => format!("{res_name}@{version}"),
         };
+        resolution_of.insert(dep_path.clone(), resolution.to_string());
 
         for spec in &specs {
             spec_to_dep_path.insert(spec.clone(), dep_path.clone());
@@ -236,20 +266,49 @@ pub(super) fn parse_berry_str(
             // The base encoding (`npm%3A` vs bare) is preserved verbatim from
             // the resolution value into the header, so a plain prefix strip
             // matches without any URL-decoding.
-            if let Some((stripped, _)) = spec.split_once("::")
-                && stripped.contains("@patch:")
-            {
-                spec_to_dep_path.insert(stripped.to_string(), dep_path.clone());
+            if let Some((stripped, _)) = spec.split_once("::") {
+                if stripped.contains("@patch:") {
+                    spec_to_dep_path.insert(stripped.to_string(), dep_path.clone());
+                } else if local_source.is_some() {
+                    if let Some(locator) = spec_locator(spec) {
+                        if let Some(dir) = workspace_dir(&locator) {
+                            local_by_workspace
+                                .insert((stripped.to_string(), dir), dep_path.clone());
+                        }
+                        local_by_locator.insert((stripped.to_string(), locator), dep_path.clone());
+                    }
+                    unqualified_local
+                        .entry(stripped.to_string())
+                        .and_modify(|seen| {
+                            if seen.as_ref() != Some(&dep_path) {
+                                *seen = None;
+                            }
+                        })
+                        .or_insert_with(|| Some(dep_path.clone()));
+                }
             }
         }
 
         // Transitive deps: `name: "protocol:range"`. We store the raw
         // header-style spec (`name@protocol:range`) and rewrite to a
         // dep_path in pass two.
-        let raw_deps = collect_dep_map(block, "dependencies");
+        // Yarn writes a package's optional dependencies under
+        // `dependencies:`, flagged `optional: true` in `dependenciesMeta`;
+        // split them back out so platform filtering can prune them.
+        let mut raw_deps = collect_dep_map(block, "dependencies");
         let peer_deps = collect_dep_map(block, "peerDependencies");
         let peer_deps_meta = collect_peer_meta(block);
-        let optional_deps = collect_dep_map(block, "optionalDependencies");
+        let mut optional_deps = collect_dep_map(block, "optionalDependencies");
+        for name in collect_optional_meta(block) {
+            if let Some(range) = raw_deps.remove(&name) {
+                optional_deps.insert(name, range);
+            }
+        }
+        let (os, cpu, libc) = block
+            .get("conditions")
+            .and_then(|v| v.as_str())
+            .map(parse_conditions)
+            .unwrap_or_default();
 
         // Declared ranges — same source as `raw_deps` / `optional_deps`
         // but kept as the bare range string (no `name@` prefix) so
@@ -283,6 +342,9 @@ pub(super) fn parse_berry_str(
                     yarn_checksum: checksum,
                     dependencies: raw_deps_specs,
                     optional_dependencies: optional_deps_specs,
+                    os,
+                    cpu,
+                    libc,
                     peer_dependencies: peer_deps,
                     peer_dependencies_meta: peer_deps_meta,
                     dep_path: dep_path.clone(),
@@ -310,17 +372,69 @@ pub(super) fn parse_berry_str(
     // bare-name (`@types/node`) and descriptor-keyed (`lru-cache@^10.0.1`)
     // resolution keys.
     let resolution_rules = crate::override_match::compile(&manifest.overrides_map());
+    // Yarn's own `resolutions`, in declaration order: the first rule that
+    // matches wins, and a `parent/name` rule matches a dependency declared
+    // by `parent`, which `override_match` has no notion of at this level.
+    let yarn_resolutions: Vec<(String, String)> = match manifest.extra.get("resolutions") {
+        Some(serde_json::Value::Object(map)) => map
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+            .collect(),
+        _ => Vec::new(),
+    };
+    let resolve_override =
+        |from: Option<(&str, &str)>, name: &str, range: &str| -> Option<String> {
+            yarn_resolution(&yarn_resolutions, from, name, range).or_else(|| {
+                crate::override_match::apply(&resolution_rules, name, range).map(str::to_string)
+            })
+        };
+    for (spec, dep_path) in unqualified_local {
+        if let Some(dep_path) = dep_path {
+            spec_to_dep_path.entry(spec).or_insert(dep_path);
+        }
+    }
 
     // Second pass: resolve raw header specs on each package's
     // `dependencies` / `optional_dependencies` map to canonical dep_paths.
+    // Edge values are dep_path tails (`6.0.0`, not `is-number@6.0.0`), the
+    // convention the isolated linker builds sibling links from. An npm alias
+    // edge (`string-width-cjs: npm:string-width@^4.2.0`) lands on the real
+    // package's block, which yarn keys by its real name; like the npm and
+    // classic readers, it gets an alias-keyed package (`string-width-cjs@4.2.3`,
+    // `alias_of: string-width`) for the edge to name.
+    let mut aliases: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut tail = |name: &str, target: &str| -> String {
+        if let Some(rest) = target.strip_prefix(name).and_then(|r| r.strip_prefix('@')) {
+            return rest.to_string();
+        }
+        match packages.get(target) {
+            Some(real) if real.local_source.is_none() => {
+                aliases.insert(
+                    format!("{name}@{}", real.version),
+                    (target.to_string(), name.to_string()),
+                );
+                real.version.clone()
+            }
+            _ => target.to_string(),
+        }
+    };
     let mut resolved_deps: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut resolved_opts: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (dep_path, pkg) in &packages {
-        let resolve = |raw: &BTreeMap<String, String>,
-                       optional: bool|
+        let mut resolve = |raw: &BTreeMap<String, String>,
+                           optional: bool|
          -> Result<BTreeMap<String, String>, Error> {
             let mut out = BTreeMap::new();
             for (name, raw_spec) in raw {
+                let declared = raw_spec
+                    .strip_prefix(&format!("{name}@"))
+                    .unwrap_or(raw_spec);
+                if let Some(target) = resolution_of.get(dep_path).and_then(|res| {
+                    local_by_locator.get(&(local_descriptor(name, declared), res.clone()))
+                }) {
+                    out.insert(name.clone(), tail(name, target));
+                    continue;
+                }
                 if let Some(target) = crate::resolve_dep_spec(
                     raw_spec,
                     optional,
@@ -328,7 +442,7 @@ pub(super) fn parse_berry_str(
                     &unsupported,
                     path,
                 )? {
-                    out.insert(name.clone(), target);
+                    out.insert(name.clone(), tail(name, &target));
                     continue;
                 }
                 // Miss: a root `resolutions` may have rewritten this
@@ -341,9 +455,13 @@ pub(super) fn parse_berry_str(
                     .strip_prefix(&format!("{name}@"))
                     .unwrap_or(raw_spec);
                 let bare = range.strip_prefix("npm:").unwrap_or(range);
-                if let Some(resolved) = crate::override_match::apply(&resolution_rules, name, bare)
-                {
-                    for candidate in berry_spec_candidates(name, bare, Some(resolved)) {
+                let declarer = pkg.registry_name();
+                let reference = resolution_of
+                    .get(dep_path)
+                    .and_then(|res| res.strip_prefix(&format!("{declarer}@")))
+                    .unwrap_or(&pkg.version);
+                if let Some(resolved) = resolve_override(Some((declarer, reference)), name, bare) {
+                    for candidate in berry_spec_candidates(name, bare, Some(&resolved)) {
                         if let Some(target) = crate::resolve_dep_spec(
                             &candidate,
                             optional,
@@ -351,7 +469,7 @@ pub(super) fn parse_berry_str(
                             &unsupported,
                             path,
                         )? {
-                            out.insert(name.clone(), target);
+                            out.insert(name.clone(), tail(name, &target));
                             break;
                         }
                     }
@@ -362,15 +480,27 @@ pub(super) fn parse_berry_str(
         resolved_deps.insert(dep_path.clone(), resolve(&pkg.dependencies, false)?);
         resolved_opts.insert(dep_path.clone(), resolve(&pkg.optional_dependencies, true)?);
     }
-    for (dep_path, deps) in resolved_deps {
+    // Active optional edges are mirrored into `dependencies`, as the npm,
+    // pnpm and classic readers do, so the linker walks them.
+    for (dep_path, mut deps) in resolved_deps {
         if let Some(pkg) = packages.get_mut(&dep_path) {
+            let opts = resolved_opts.remove(&dep_path).unwrap_or_default();
+            deps.extend(opts.iter().map(|(n, v)| (n.clone(), v.clone())));
             pkg.dependencies = deps;
+            pkg.optional_dependencies = opts;
         }
     }
-    for (dep_path, deps) in resolved_opts {
-        if let Some(pkg) = packages.get_mut(&dep_path) {
-            pkg.optional_dependencies = deps;
+    for (alias_key, (target, alias_name)) in aliases {
+        if packages.contains_key(&alias_key) {
+            continue;
         }
+        let Some(mut alias) = packages.get(&target).cloned() else {
+            continue;
+        };
+        alias.alias_of = Some(alias.registry_name().to_string());
+        alias.name = alias_name;
+        alias.dep_path = alias_key.clone();
+        packages.insert(alias_key, alias);
     }
 
     // Discover the workspace members from disk, mirroring the classic reader
@@ -430,11 +560,28 @@ pub(super) fn parse_berry_str(
     let push_direct = |name: &str,
                        range: &str,
                        dep_type: DepType,
-                       importer: &str,
+                       (importer, from): (&str, Option<(&str, &str)>),
                        into: &mut Vec<DirectDep>,
                        skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<(), Error> {
-        let resolved = crate::override_match::apply(&resolution_rules, name, range);
+        let resolved = resolve_override(from, name, range);
+        let resolved = resolved.as_deref();
+        // A `resolutions` replacement wins over the declared range, as in
+        // `berry_spec_candidates` below.
+        let workspace = importer.replace('\\', "/");
+        if let Some(dep_path) = resolved
+            .into_iter()
+            .chain([range])
+            .find_map(|r| local_by_workspace.get(&(local_descriptor(name, r), workspace.clone())))
+        {
+            into.push(DirectDep {
+                name: name.to_string(),
+                dep_path: dep_path.clone(),
+                dep_type,
+                specifier: None,
+            });
+            return Ok(());
+        }
         let candidates = berry_spec_candidates(name, range, resolved);
         let optional = matches!(dep_type, DepType::Optional);
         for candidate in &candidates {
@@ -483,21 +630,19 @@ pub(super) fn parse_berry_str(
                           skipped: &mut BTreeMap<String, BTreeMap<String, String>>|
      -> Result<Vec<DirectDep>, Error> {
         let mut out: Vec<DirectDep> = Vec::new();
+        let reference = format!("workspace:{}", importer.replace('\\', "/"));
+        let owner = (
+            importer,
+            pj.name.as_deref().map(|n| (n, reference.as_str())),
+        );
         for (name, range) in &pj.dependencies {
-            push_direct(
-                name,
-                range,
-                DepType::Production,
-                importer,
-                &mut out,
-                skipped,
-            )?;
+            push_direct(name, range, DepType::Production, owner, &mut out, skipped)?;
         }
         for (name, range) in &pj.dev_dependencies {
-            push_direct(name, range, DepType::Dev, importer, &mut out, skipped)?;
+            push_direct(name, range, DepType::Dev, owner, &mut out, skipped)?;
         }
         for (name, range) in &pj.optional_dependencies {
-            push_direct(name, range, DepType::Optional, importer, &mut out, skipped)?;
+            push_direct(name, range, DepType::Optional, owner, &mut out, skipped)?;
         }
         Ok(out)
     };
@@ -515,6 +660,33 @@ pub(super) fn parse_berry_str(
     for (member_dir, member_pj) in &member_manifests {
         let member_direct = build_importer(member_dir, member_pj, &mut skipped_optional)?;
         importers.insert(member_dir.clone(), member_direct);
+    }
+
+    // A direct npm alias (`choice: npm:is-odd@1.0.0`) resolves to the real
+    // package's block as well; point it at an alias-keyed package, as the
+    // transitive edges above are, so the linker installs it under its alias.
+    for deps in importers.values_mut() {
+        for dep in deps.iter_mut() {
+            let Some(real) = packages.get(&dep.dep_path) else {
+                continue;
+            };
+            if real.local_source.is_some() || real.name == dep.name {
+                continue;
+            }
+            let key = format!("{}@{}", dep.name, real.version);
+            match packages.get(&key) {
+                Some(existing) if existing.registry_name() != real.registry_name() => continue,
+                Some(_) => {}
+                None => {
+                    let mut alias = real.clone();
+                    alias.alias_of = Some(alias.registry_name().to_string());
+                    alias.name = dep.name.clone();
+                    alias.dep_path = key.clone();
+                    packages.insert(key.clone(), alias);
+                }
+            }
+            dep.dep_path = key;
+        }
     }
 
     Ok(LockfileGraph {
@@ -639,6 +811,96 @@ fn collect_dep_map(block: &yaml_serde::Mapping, key: &str) -> BTreeMap<String, S
         .unwrap_or_default()
 }
 
+/// Names flagged `optional: true` in a block's `dependenciesMeta`.
+fn collect_optional_meta(block: &yaml_serde::Mapping) -> Vec<String> {
+    block
+        .get("dependenciesMeta")
+        .and_then(|v| v.as_mapping())
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| {
+                    v.as_mapping()
+                        .and_then(|meta| meta.get("optional"))
+                        .and_then(|o| o.as_bool())
+                        .unwrap_or(false)
+                })
+                .filter_map(|(k, _)| Some(k.as_str()?.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A block's `conditions:` as npm-style `os`/`cpu`/`libc` lists. Yarn writes
+/// one term per field, joined by `&` (`Manifest#getConditions`): `os=linux`,
+/// `!os=linux` for a negation, and `(os=darwin | os=linux)` for several
+/// values. Yarn evaluates a group as an OR, so a group holding one
+/// negation excludes just that value (`(!os=linux | os=darwin)` reads as
+/// `!linux`), and one that can never be false (`(!os=linux | !os=win32)`)
+/// is left unconstrained rather than pruning a package yarn would install.
+pub(super) fn parse_conditions(
+    conditions: &str,
+) -> (
+    crate::PlatformList,
+    crate::PlatformList,
+    crate::PlatformList,
+) {
+    let (mut os, mut cpu, mut libc) = Default::default();
+    for term in conditions.split('&') {
+        let tokens: Vec<(bool, &str, &str)> = term
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .split('|')
+            .filter_map(|token| {
+                let token = token.trim();
+                let (negated, token) = match token.strip_prefix('!') {
+                    Some(rest) => (true, rest),
+                    None => (false, token),
+                };
+                let (key, value) = token.split_once('=')?;
+                Some((negated, key.trim(), value.trim()))
+            })
+            .collect();
+        let negations: std::collections::BTreeSet<&str> = tokens
+            .iter()
+            .filter(|(negated, ..)| *negated)
+            .map(|(_, _, value)| *value)
+            .collect();
+        let tokens = match negations.iter().next() {
+            None => tokens,
+            Some(_) if tokens.len() == 1 => tokens,
+            Some(excluded)
+                if negations.len() == 1
+                    && tokens.iter().all(|(_, key, _)| *key == tokens[0].1)
+                    && !tokens
+                        .iter()
+                        .any(|(negated, _, v)| !negated && v == excluded) =>
+            {
+                tokens
+                    .into_iter()
+                    .filter(|(negated, ..)| *negated)
+                    .take(1)
+                    .collect()
+            }
+            Some(_) => continue,
+        };
+        for (negated, key, value) in tokens {
+            let list: &mut crate::PlatformList = match key {
+                "os" => &mut os,
+                "cpu" => &mut cpu,
+                "libc" => &mut libc,
+                _ => continue,
+            };
+            list.push(if negated {
+                format!("!{value}")
+            } else {
+                value.to_string()
+            });
+        }
+    }
+    (os, cpu, libc)
+}
+
 /// Pull `peerDependenciesMeta` into our structured form. Only the
 /// `optional` flag round-trips through aube's model; other keys in
 /// the meta block (if any) are ignored.
@@ -660,6 +922,181 @@ fn collect_peer_meta(block: &yaml_serde::Mapping) -> BTreeMap<String, crate::Pee
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The decoded `locator=` qualifier of a header spec or resolution
+/// (`…::locator=app%40workspace%3Apackages%2Fapp` gives
+/// `app@workspace:packages/app`).
+fn spec_locator(spec: &str) -> Option<String> {
+    let (_, qualifiers) = spec.split_once("::")?;
+    let locator = qualifiers
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("locator="))?;
+    percent_decode(locator)
+}
+
+/// The first of yarn's ordered `resolutions` that rewrites `name@range` as
+/// declared by `from`, the declaring package's name and locator reference
+/// (`CorePlugin#reduceDependency`): `name` matches any declarer,
+/// `parent/name` only `parent`'s, `parent@1.0.0/name` only that version of
+/// it (a workspace's reference is `workspace:<dir>`, never its version), and
+/// `name@range` only that exact range. Yarn ignores a yarn-1 glob rule
+/// (`**/name`) with a warning, and so does this.
+pub(super) fn yarn_resolution(
+    rules: &[(String, String)],
+    from: Option<(&str, &str)>,
+    name: &str,
+    range: &str,
+) -> Option<String> {
+    let split_ident = |s: &str| -> (String, Option<String>) {
+        let at = if let Some(rest) = s.strip_prefix('@') {
+            rest.find('@').map(|i| i + 1)
+        } else {
+            s.find('@')
+        };
+        match at {
+            Some(i) => (s[..i].to_string(), Some(s[i + 1..].to_string())),
+            None => (s.to_string(), None),
+        }
+    };
+    // `Configuration#normalizeLocator`: a bare semver range or tag takes the
+    // default `npm:` protocol; anything else keeps its own (`validRange`
+    // rejects any `:` before parsing).
+    let bare = |r: &str| {
+        let tag = !r.starts_with('v')
+            && !r.is_empty()
+            && r.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+        if tag || (!r.contains(':') && aube_semver::parse_range(r).is_ok()) {
+            format!("npm:{r}")
+        } else {
+            r.to_string()
+        }
+    };
+    rules.iter().find_map(|(pattern, reference)| {
+        let pattern = pattern.as_str();
+        if pattern.starts_with("*/") || pattern.starts_with("**/") {
+            return None;
+        }
+        // A scoped ident carries its own `/`: `@s/parent/name`, `@s/name`.
+        let split = match pattern.strip_prefix('@') {
+            Some(rest) => rest
+                .find('/')
+                .and_then(|i| rest[i + 1..].find('/').map(|j| i + j + 3)),
+            None => pattern.find('/').map(|i| i + 1),
+        };
+        let (parent, descriptor) = match split {
+            Some(i) => (Some(&pattern[..i - 1]), &pattern[i..]),
+            None => (None, pattern),
+        };
+        if let Some(parent) = parent {
+            let (parent_name, parent_ref) = split_ident(parent);
+            let (from_name, from_ref) = from?;
+            if parent_name != from_name || parent_ref.is_some_and(|r| bare(&r) != bare(from_ref)) {
+                return None;
+            }
+        }
+        let (rule_name, rule_range) = split_ident(descriptor);
+        if rule_name != name || rule_range.is_some_and(|r| bare(&r) != bare(range)) {
+            return None;
+        }
+        Some(reference.clone())
+    })
+}
+
+/// The descriptor yarn binds a range to: a bare path (`./child`) is a
+/// `file:` one, as yarn's file resolver reads it.
+fn local_descriptor(name: &str, range: &str) -> String {
+    if range.starts_with("./") || range.starts_with("../") || range.starts_with('/') {
+        format!("{name}@file:{range}")
+    } else {
+        format!("{name}@{range}")
+    }
+}
+
+/// The directory of a `name@workspace:<dir>` locator.
+fn workspace_dir(locator: &str) -> Option<String> {
+    let at = locator.get(1..)?.find('@')? + 1;
+    locator[at + 1..]
+        .strip_prefix("workspace:")
+        .map(str::to_string)
+}
+
+/// The directory a locator names, relative to the project root: a
+/// workspace's own, or a local `file:` directory package's, resolved
+/// through the locator that declared it in turn. `None` for anything else,
+/// a tarball included.
+fn locator_dir(locator: &str) -> Option<String> {
+    if let Some(dir) = workspace_dir(locator) {
+        return Some(dir);
+    }
+    let at = locator.get(1..)?.find('@')? + 1;
+    let body = locator[at + 1..].strip_prefix("file:")?;
+    let path = body.split(['#', ':']).next()?;
+    if !matches!(file_protocol_source(path), LocalSource::Directory(_)) {
+        return None;
+    }
+    let parent = spec_locator(body)
+        .and_then(|p| locator_dir(&p))
+        .unwrap_or_else(|| ".".into());
+    Some(
+        rebase_on_workspace(&parent, std::path::Path::new(path))
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// `path` as written in directory `dir`, relative to the project root, in
+/// the `./…` form a root-level `file:` path takes.
+pub(super) fn rebase_on_workspace(dir: &str, path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    if dir == "." || path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let mut parts: Vec<Component> = Vec::new();
+    for component in std::path::Path::new(dir)
+        .components()
+        .chain(path.components())
+    {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match parts.last() {
+                Some(Component::Normal(_)) => {
+                    parts.pop();
+                }
+                // `..` at a filesystem root stays at the root.
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => parts.push(component),
+            },
+            other => parts.push(other),
+        }
+    }
+    if matches!(
+        parts.first(),
+        Some(Component::RootDir | Component::Prefix(_))
+    ) {
+        return parts.iter().collect();
+    }
+    let mut out = PathBuf::from(".");
+    out.extend(parts);
+    out
 }
 
 /// Resolve a `file:`-protocol body like `./vendor/foo` or
@@ -885,8 +1322,19 @@ pub fn write_berry(
             format!("{dep_name}@npm:{range}")
         }
     };
+    // An npm-alias edge names its alias-keyed package; yarn lists the alias
+    // descriptor on the real package's block instead.
+    let block_key = |key: String| -> String {
+        match canonical
+            .get(&key)
+            .and_then(|p| alias_block_key(p, &canonical))
+        {
+            Some(real) => real,
+            None => key,
+        }
+    };
     for dep in graph.importers.get(".").into_iter().flatten() {
-        let canonical_key = crate::npm::canonical_key_from_dep_path(&dep.dep_path);
+        let canonical_key = block_key(crate::npm::canonical_key_from_dep_path(&dep.dep_path));
         if !canonical.contains_key(&canonical_key) {
             continue;
         }
@@ -898,13 +1346,10 @@ pub fn write_berry(
         if patch_spec_matches(&manifest_spec, pkg, &resolved_patched) {
             patch_specs.insert(canonical_key.clone(), manifest_spec.clone());
         }
-        let exact_spec = berry_exact_spec(pkg, &resolved_patched, &patch_specs);
-        if manifest_spec != exact_spec {
-            extra_specs
-                .entry(canonical_key)
-                .or_default()
-                .insert(manifest_spec);
-        }
+        extra_specs
+            .entry(canonical_key)
+            .or_default()
+            .insert(manifest_spec);
     }
     // Harvest transitive declared ranges, same shape as the classic
     // writer. Berry specs always carry a protocol (`npm:`, `workspace:`,
@@ -914,7 +1359,7 @@ pub fn write_berry(
             let Some(resolved_value) = pkg.dependencies.get(dep_name) else {
                 continue;
             };
-            let target = crate::npm::child_canonical_key(dep_name, resolved_value);
+            let target = block_key(crate::npm::child_canonical_key(dep_name, resolved_value));
             let Some(target_pkg) = canonical.get(&target) else {
                 continue;
             };
@@ -922,10 +1367,7 @@ pub fn write_berry(
             if patch_spec_matches(&manifest_spec, target_pkg, &resolved_patched) {
                 patch_specs.insert(target.clone(), manifest_spec.clone());
             }
-            let exact_spec = berry_exact_spec(target_pkg, &resolved_patched, &patch_specs);
-            if manifest_spec != exact_spec {
-                extra_specs.entry(target).or_default().insert(manifest_spec);
-            }
+            extra_specs.entry(target).or_default().insert(manifest_spec);
         }
     }
 
@@ -957,6 +1399,10 @@ pub fn write_berry(
     }
 
     for (canonical_key, pkg) in &canonical {
+        // An alias-keyed package is written as the real package's block.
+        if alias_block_key(pkg, &canonical).is_some() {
+            continue;
+        }
         let mut out = String::new();
         // Yarn's block header lists every *specifier* that resolves to this
         // package — the declared ranges (`chalk@npm:^4.1.2`), not the exact
@@ -1000,31 +1446,30 @@ pub fn write_berry(
         out.push_str(&quote_yaml_scalar(&exact_spec));
         out.push('\n');
 
-        // Dependencies / peerDependencies / peerDependenciesMeta /
-        // optionalDependencies: nested YAML mappings with
+        // Dependencies / peerDependencies / dependenciesMeta /
+        // peerDependenciesMeta: nested YAML mappings with
         // `name: "npm:<range-or-version>"` values. Resolved
         // transitive deps collapse to the exact version of the target
         // block (the resolver produced the graph, so the key always
-        // exists in `canonical`).
+        // exists in `canonical`). Yarn lists optional dependencies under
+        // `dependencies:` and flags them in `dependenciesMeta`.
+        let mut all_deps = pkg.dependencies.clone();
+        for (name, value) in &pkg.optional_dependencies {
+            all_deps
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
         write_berry_dep_map(
             &mut out,
             "dependencies",
-            &pkg.dependencies,
-            &pkg.declared_dependencies,
-            &canonical,
-            &resolved_patched,
-            &patch_specs,
-        );
-        write_berry_dep_map(
-            &mut out,
-            "optionalDependencies",
-            &pkg.optional_dependencies,
+            &all_deps,
             &pkg.declared_dependencies,
             &canonical,
             &resolved_patched,
             &patch_specs,
         );
         write_berry_peer_deps(&mut out, &pkg.peer_dependencies);
+        write_berry_optional_meta(&mut out, &pkg.optional_dependencies, &canonical);
         write_berry_peer_meta(&mut out, &pkg.peer_dependencies_meta);
         // `bin:` map — binary name → relative executable path. Yarn 4 emits
         // this (from the package manifest's `bin`) ahead of `checksum`. It's
@@ -1038,6 +1483,11 @@ pub fn write_berry(
             // Yarn writes the checksum unquoted (`checksum: 10c0/…`).
             out.push_str("  checksum: ");
             out.push_str(checksum);
+            out.push('\n');
+        }
+        if let Some(conditions) = format_conditions(pkg) {
+            out.push_str("  conditions: ");
+            out.push_str(&quote_yaml_value(&conditions));
             out.push('\n');
         }
         out.push_str("  languageName: node\n");
@@ -1089,7 +1539,9 @@ fn berry_exact_spec(
                 pkg.name, pkg.name, pkg.version, path
             )
         }
-        (None, None) => format!("{}@npm:{}", pkg.name, pkg.version),
+        // An npm alias resolves to the real package (`choice@npm:is-odd@1.0.0`
+        // has `resolution: "is-odd@npm:1.0.0"`).
+        (None, None) => format!("{}@npm:{}", pkg.registry_name(), pkg.version),
         (Some(src), _) => format!("{}@{}", pkg.name, src.specifier()),
     }
 }
@@ -1157,6 +1609,72 @@ fn write_berry_dep_map(
         out.push_str(&quote_yaml_scalar(&body));
         out.push('\n');
     }
+}
+
+/// The block an npm-alias package is written into: the real registry
+/// package's (`string-width-cjs@4.2.3` aliasing `string-width` gives
+/// `string-width@4.2.3`). `None` when the graph holds no such registry row,
+/// so a same-version local or aliased row never absorbs the alias, and the
+/// alias keeps a block of its own.
+fn alias_block_key(
+    pkg: &LockedPackage,
+    canonical: &BTreeMap<String, &LockedPackage>,
+) -> Option<String> {
+    let real = pkg.alias_of.as_deref()?;
+    if pkg.local_source.is_some() || real == pkg.name {
+        return None;
+    }
+    let key = format!("{real}@{}", pkg.version);
+    canonical
+        .get(&key)
+        .is_some_and(|target| {
+            target.name == real && target.alias_of.is_none() && target.local_source.is_none()
+        })
+        .then_some(key)
+}
+
+/// `dependenciesMeta:` flagging each surviving optional edge, as yarn does.
+fn write_berry_optional_meta(
+    out: &mut String,
+    optional: &BTreeMap<String, String>,
+    canonical: &BTreeMap<String, &LockedPackage>,
+) {
+    let names: Vec<&str> = optional
+        .iter()
+        .filter(|(n, v)| canonical.contains_key(&crate::npm::child_canonical_key(n, v)))
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    out.push_str("  dependenciesMeta:\n");
+    for name in names {
+        out.push_str("    ");
+        out.push_str(&quote_yaml_key(name));
+        out.push_str(":\n      optional: true\n");
+    }
+}
+
+/// The inverse of [`parse_conditions`], in yarn's own form
+/// (`Manifest#getConditions`): `os=darwin & cpu=arm64`, `!os=linux`, and
+/// `(os=darwin | os=linux)` for a field with several values.
+fn format_conditions(pkg: &LockedPackage) -> Option<String> {
+    let mut terms = Vec::new();
+    for (key, values) in [("os", &pkg.os), ("cpu", &pkg.cpu), ("libc", &pkg.libc)] {
+        let tokens: Vec<String> = values
+            .iter()
+            .map(|v| match v.strip_prefix('!') {
+                Some(neg) => format!("!{key}={neg}"),
+                None => format!("{key}={v}"),
+            })
+            .collect();
+        match tokens.len() {
+            0 => {}
+            1 => terms.extend(tokens),
+            _ => terms.push(format!("({})", tokens.join(" | "))),
+        }
+    }
+    (!terms.is_empty()).then(|| terms.join(" & "))
 }
 
 fn write_berry_peer_deps(out: &mut String, peer: &BTreeMap<String, String>) {

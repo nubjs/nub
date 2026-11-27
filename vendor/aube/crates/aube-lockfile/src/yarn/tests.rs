@@ -587,6 +587,1021 @@ fn test_range_has_protocol() {
 /// multi-spec block headers, nested `dependencies:`, and the
 /// direct-dep pass that prepends `npm:` to manifest ranges.
 #[test]
+fn berry_optional_dependencies_meta_and_conditions_round_trip() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"@rolldown/binding-darwin-arm64@npm:1.2.12":
+  version: 1.2.12
+  resolution: "@rolldown/binding-darwin-arm64@npm:1.2.12"
+  conditions: os=darwin & cpu=arm64
+  languageName: node
+  linkType: hard
+
+"@rolldown/binding-linux-x64-gnu@npm:1.2.12":
+  version: 1.2.12
+  resolution: "@rolldown/binding-linux-x64-gnu@npm:1.2.12"
+  conditions: os=linux & cpu=x64 & libc=glibc
+  languageName: node
+  linkType: hard
+
+"@rolldown/pluginutils@npm:^1.0.0":
+  version: 1.1.1
+  resolution: "@rolldown/pluginutils@npm:1.1.1"
+  languageName: node
+  linkType: hard
+
+"rolldown@npm:1.2.12":
+  version: 1.2.12
+  resolution: "rolldown@npm:1.2.12"
+  dependencies:
+    "@rolldown/binding-darwin-arm64": "npm:1.2.12"
+    "@rolldown/binding-linux-x64-gnu": "npm:1.2.12"
+    "@rolldown/pluginutils": "npm:^1.0.0"
+  dependenciesMeta:
+    "@rolldown/binding-darwin-arm64":
+      optional: true
+    "@rolldown/binding-linux-x64-gnu":
+      optional: true
+  languageName: node
+  linkType: hard
+"#;
+    std::fs::write(tmp.path(), content).unwrap();
+    let manifest = make_manifest(&[("rolldown", "1.2.12")], &[]);
+    let graph = parse(tmp.path(), &manifest).unwrap();
+
+    let rolldown = &graph.packages["rolldown@1.2.12"];
+    assert_eq!(
+        rolldown
+            .dependencies
+            .get("@rolldown/pluginutils")
+            .map(String::as_str),
+        Some("1.1.1"),
+        "edge values are dep_path tails, which the isolated linker joins to the name"
+    );
+    assert_eq!(
+        rolldown.optional_dependencies.keys().collect::<Vec<_>>(),
+        [
+            "@rolldown/binding-darwin-arm64",
+            "@rolldown/binding-linux-x64-gnu"
+        ]
+    );
+    assert!(
+        rolldown
+            .dependencies
+            .contains_key("@rolldown/binding-darwin-arm64")
+    );
+    let linux = &graph.packages["@rolldown/binding-linux-x64-gnu@1.2.12"];
+    assert_eq!(linux.os.as_slice(), ["linux"]);
+    assert_eq!(linux.cpu.as_slice(), ["x64"]);
+    assert_eq!(linux.libc.as_slice(), ["glibc"]);
+
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        written.contains("  conditions: os=linux & cpu=x64 & libc=glibc\n"),
+        "conditions must be written back:\n{written}"
+    );
+    assert!(
+        written.contains(
+            "  dependenciesMeta:\n    \"@rolldown/binding-darwin-arm64\":\n      optional: true\n"
+        ),
+        "optional edges must stay flagged in dependenciesMeta:\n{written}"
+    );
+    assert!(!written.contains("optionalDependencies:"), "{written}");
+    let reparsed = parse(out.path(), &manifest).unwrap();
+    assert_eq!(
+        reparsed.packages["rolldown@1.2.12"].optional_dependencies,
+        rolldown.optional_dependencies
+    );
+}
+
+#[test]
+fn berry_conditions_read_and_write_yarns_negation_and_groups() {
+    use super::berry::parse_conditions;
+    let (os, cpu, _) = parse_conditions("(os=darwin | os=linux) & cpu=arm64");
+    assert_eq!(os.as_slice(), ["darwin", "linux"]);
+    assert_eq!(cpu.as_slice(), ["arm64"]);
+    // Yarn writes `os: ["!linux"]` as a prefix negation.
+    let (os, ..) = parse_conditions("!os=linux");
+    assert_eq!(os.as_slice(), ["!linux"]);
+    // Yarn ORs a group, so one negation excludes just that value...
+    let (os, ..) = parse_conditions("(!os=linux | os=darwin)");
+    assert_eq!(os.as_slice(), ["!linux"]);
+    // ...and a group that holds on every host is no constraint.
+    for always in [
+        "(!os=linux | !os=win32) & cpu=x64",
+        "(!os=linux | os=linux)",
+    ] {
+        let (os, ..) = parse_conditions(always);
+        assert!(os.is_empty(), "{always}: {os:?}");
+    }
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"not-linux@npm:1.0.0":
+  version: 1.0.0
+  resolution: "not-linux@npm:1.0.0"
+  conditions: "!os=linux"
+  languageName: node
+  linkType: hard
+"#,
+    )
+    .unwrap();
+    let manifest = make_manifest(&[("not-linux", "1.0.0")], &[]);
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    assert_eq!(graph.packages["not-linux@1.0.0"].os.as_slice(), ["!linux"]);
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        written.contains("  conditions: \"!os=linux\"\n"),
+        "negated conditions must be written in yarn's quoted prefix form:\n{written}"
+    );
+}
+
+#[test]
+fn berry_writer_keeps_a_direct_alias_descriptor_beside_the_real_one() {
+    // A fresh resolve of `root-choice: npm:is-odd@1.0.0` beside `is-odd:
+    // 1.0.0` gives the importer an edge to an alias-keyed package; yarn
+    // writes both descriptors on the one `is-odd` block.
+    let pkg = |name: &str, alias_of: Option<&str>| LockedPackage {
+        name: name.to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: format!("{name}@1.0.0"),
+        alias_of: alias_of.map(str::to_string),
+        ..Default::default()
+    };
+    let direct = |name: &str| crate::DirectDep {
+        name: name.to_string(),
+        dep_path: format!("{name}@1.0.0"),
+        dep_type: DepType::Production,
+        specifier: None,
+    };
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(
+            ".".to_string(),
+            vec![direct("is-odd"), direct("root-choice")],
+        )]),
+        packages: BTreeMap::from([
+            ("is-odd@1.0.0".to_string(), pkg("is-odd", None)),
+            (
+                "root-choice@1.0.0".to_string(),
+                pkg("root-choice", Some("is-odd")),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let manifest = make_manifest(
+        &[("is-odd", "1.0.0"), ("root-choice", "npm:is-odd@1.0.0")],
+        &[],
+    );
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        written.contains("\"is-odd@npm:1.0.0, root-choice@npm:is-odd@1.0.0\":\n"),
+        "both descriptors must head the is-odd block:\n{written}"
+    );
+    let reparsed = parse(out.path(), &manifest).unwrap();
+    for name in ["is-odd", "root-choice"] {
+        let dep = reparsed.importers["."]
+            .iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} must survive a readback:\n{written}"));
+        assert_eq!(reparsed.packages[&dep.dep_path].registry_name(), "is-odd");
+    }
+}
+
+#[test]
+fn berry_reads_root_file_and_alias_dependencies_beside_each_other() {
+    // Yarn 4.9.2's own lockfile: the `file:` block header carries
+    // `::locator=…`, which the manifest range does not.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"al@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "al@workspace:."
+  dependencies:
+    choice: "npm:is-odd@1.0.0"
+    is-odd: "file:./local.tgz"
+  languageName: unknown
+  linkType: soft
+
+"choice@npm:is-odd@1.0.0":
+  version: 1.0.0
+  resolution: "is-odd@npm:1.0.0"
+  languageName: node
+  linkType: hard
+
+"is-odd@file:./local.tgz::locator=al%40workspace%3A.":
+  version: 1.0.0
+  resolution: "is-odd@file:./local.tgz#./local.tgz::hash=c88871&locator=al%40workspace%3A."
+  languageName: node
+  linkType: hard
+"#,
+    )
+    .unwrap();
+    let manifest = make_manifest(
+        &[
+            ("choice", "npm:is-odd@1.0.0"),
+            ("is-odd", "file:./local.tgz"),
+        ],
+        &[],
+    );
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    let local = |name: &str| {
+        let dep = graph.importers["."]
+            .iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} must be a root dependency"));
+        graph.packages[&dep.dep_path].local_source.clone()
+    };
+    assert_eq!(local("choice"), None);
+    assert_eq!(
+        local("is-odd"),
+        Some(LocalSource::Tarball(PathBuf::from("./local.tgz")))
+    );
+    // The direct alias gets its own alias-keyed package to install under.
+    let choice = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "choice")
+        .unwrap();
+    assert_eq!(choice.dep_path, "choice@1.0.0");
+    assert_eq!(graph.packages["choice@1.0.0"].registry_name(), "is-odd");
+}
+
+#[test]
+fn berry_keeps_each_workspaces_own_file_dependency() {
+    // Yarn 4.9.2's lockfile for a root and `packages/app` that each depend
+    // on their own `file:./dep.tgz`: yarn reads each path from its workspace.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"wsroot","private":true,"workspaces":["packages/*"],"dependencies":{"test-file":"file:./dep.tgz"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("packages/app")).unwrap();
+    std::fs::write(
+        root.join("packages/app/package.json"),
+        r#"{"name":"app","version":"1.0.0","dependencies":{"test-file":"file:./dep.tgz"}}"#,
+    )
+    .unwrap();
+    let lock_path = root.join("yarn.lock");
+    std::fs::write(
+        &lock_path,
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"app@workspace:packages/app":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:packages/app"
+  dependencies:
+    test-file: "file:./dep.tgz"
+  languageName: unknown
+  linkType: soft
+
+"test-file@file:./dep.tgz::locator=app%40workspace%3Apackages%2Fapp":
+  version: 1.0.0
+  resolution: "test-file@file:./dep.tgz#./dep.tgz::hash=674ba4&locator=app%40workspace%3Apackages%2Fapp"
+  languageName: node
+  linkType: hard
+
+"test-file@file:./dep.tgz::locator=wsroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "test-file@file:./dep.tgz#./dep.tgz::hash=717e91&locator=wsroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"wsroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "wsroot@workspace:."
+  dependencies:
+    test-file: "file:./dep.tgz"
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    let graph = parse(&lock_path, &manifest).unwrap();
+    let tarball = |importer: &str| {
+        let dep = graph.importers[importer]
+            .iter()
+            .find(|d| d.name == "test-file")
+            .unwrap_or_else(|| panic!("{importer} must depend on test-file: {graph:#?}"));
+        graph.packages[&dep.dep_path].local_source.clone()
+    };
+    assert_eq!(
+        tarball("."),
+        Some(LocalSource::Tarball(PathBuf::from("./dep.tgz")))
+    );
+    assert_eq!(
+        tarball("packages/app"),
+        Some(LocalSource::Tarball(PathBuf::from(
+            "./packages/app/dep.tgz"
+        )))
+    );
+}
+
+#[test]
+fn berry_reads_a_file_resolution_for_root_member_and_transitive_edges() {
+    // Yarn 4.9.2's lockfile for root `resolutions` that redirect `leaf` and
+    // `is-number` to `file:./replacement`: both blocks carry the root's
+    // locator, but a member and `is-odd` reach them too.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(
+        root.join("package.json"),
+        r#"{"name":"wsroot","private":true,"workspaces":["packages/*"],"dependencies":{"leaf":"^1.0.0","is-odd":"3.0.1"},"resolutions":{"leaf":"file:./replacement","is-number":"file:./replacement"}}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("packages/app")).unwrap();
+    std::fs::write(
+        root.join("packages/app/package.json"),
+        r#"{"name":"app","version":"1.0.0","dependencies":{"leaf":"^1.0.0"}}"#,
+    )
+    .unwrap();
+    let lock_path = root.join("yarn.lock");
+    std::fs::write(
+        &lock_path,
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"app@workspace:packages/app":
+  version: 0.0.0-use.local
+  resolution: "app@workspace:packages/app"
+  dependencies:
+    leaf: "npm:^1.0.0"
+  languageName: unknown
+  linkType: soft
+
+"is-number@file:./replacement::locator=wsroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "is-number@file:./replacement#./replacement::hash=38d0df&locator=wsroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"is-odd@npm:3.0.1":
+  version: 3.0.1
+  resolution: "is-odd@npm:3.0.1"
+  dependencies:
+    is-number: "npm:^6.0.0"
+  languageName: node
+  linkType: hard
+
+"leaf@file:./replacement::locator=wsroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./replacement#./replacement::hash=eb2872&locator=wsroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"wsroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "wsroot@workspace:."
+  dependencies:
+    is-odd: "npm:3.0.1"
+    leaf: "npm:^1.0.0"
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let manifest = aube_manifest::PackageJson::from_path(&root.join("package.json")).unwrap();
+    let graph = parse(&lock_path, &manifest).unwrap();
+    let replacement = Some(LocalSource::Directory(PathBuf::from("./replacement")));
+    for importer in [".", "packages/app"] {
+        let dep = graph.importers[importer]
+            .iter()
+            .find(|d| d.name == "leaf")
+            .unwrap_or_else(|| panic!("{importer} must depend on leaf: {graph:#?}"));
+        assert_eq!(
+            graph.packages[&dep.dep_path].local_source, replacement,
+            "{importer}"
+        );
+    }
+    let is_odd = &graph.packages["is-odd@3.0.1"];
+    let edge = is_odd
+        .dependencies
+        .get("is-number")
+        .unwrap_or_else(|| panic!("is-odd must keep its is-number edge: {is_odd:#?}"));
+    let target = crate::resolve_dep_edge("is-number", edge, |k| graph.packages.contains_key(k))
+        .unwrap_or_else(|| panic!("is-number edge {edge} must name a package"));
+    assert_eq!(graph.packages[&target].local_source, replacement);
+}
+
+#[test]
+fn berry_reads_a_nested_file_dependency_relative_to_its_parent() {
+    // Yarn 4.9.2's lockfile for `parent: file:./parent`, whose own
+    // `child: file:./child` is `./parent/child`, beside an unrelated
+    // root-level `./child` yarn never reads.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"child@file:./child::locator=parent%40file%3A.%2Fparent%23.%2Fparent%3A%3Ahash%3D9783e1%26locator%3Dnroot%2540workspace%253A.":
+  version: 1.0.0
+  resolution: "child@file:./child#./child::hash=70f376&locator=parent%40file%3A.%2Fparent%23.%2Fparent%3A%3Ahash%3D9783e1%26locator%3Dnroot%2540workspace%253A."
+  languageName: node
+  linkType: hard
+
+"nroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "nroot@workspace:."
+  dependencies:
+    parent: "file:./parent"
+  languageName: unknown
+  linkType: soft
+
+"parent@file:./parent::locator=nroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "parent@file:./parent#./parent::hash=9783e1&locator=nroot%40workspace%3A."
+  dependencies:
+    child: "file:./child"
+  languageName: node
+  linkType: hard
+"#,
+    )
+    .unwrap();
+    let manifest = make_manifest(&[("parent", "file:./parent")], &[]);
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    let dep = &graph.importers["."][0];
+    let parent = &graph.packages[&dep.dep_path];
+    assert_eq!(
+        parent.local_source,
+        Some(LocalSource::Directory(PathBuf::from("./parent")))
+    );
+    let edge = parent
+        .dependencies
+        .get("child")
+        .expect("parent must keep its child edge");
+    let target = crate::resolve_dep_edge("child", edge, |k| graph.packages.contains_key(k))
+        .unwrap_or_else(|| panic!("child edge {edge} must name a package"));
+    assert_eq!(
+        graph.packages[&target].local_source,
+        Some(LocalSource::Directory(PathBuf::from("./parent/child")))
+    );
+}
+
+#[test]
+fn berry_reads_each_parents_own_bare_relative_child() {
+    // Yarn 4.9.2's lockfile for two local parents that each declare
+    // `child: ./child`, a bare path yarn binds as `file:./child` in each.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"broot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "broot@workspace:."
+  dependencies:
+    parent-a: "file:./parent-a"
+    parent-b: "file:./parent-b"
+  languageName: unknown
+  linkType: soft
+
+"child@file:./child::locator=parent-a%40file%3A.%2Fparent-a%23.%2Fparent-a%3A%3Ahash%3Dab5a81%26locator%3Dbroot%2540workspace%253A.":
+  version: 1.0.0
+  resolution: "child@file:./child#./child::hash=45f604&locator=parent-a%40file%3A.%2Fparent-a%23.%2Fparent-a%3A%3Ahash%3Dab5a81%26locator%3Dbroot%2540workspace%253A."
+  languageName: node
+  linkType: hard
+
+"child@file:./child::locator=parent-b%40file%3A.%2Fparent-b%23.%2Fparent-b%3A%3Ahash%3D920e51%26locator%3Dbroot%2540workspace%253A.":
+  version: 1.0.0
+  resolution: "child@file:./child#./child::hash=f00c62&locator=parent-b%40file%3A.%2Fparent-b%23.%2Fparent-b%3A%3Ahash%3D920e51%26locator%3Dbroot%2540workspace%253A."
+  languageName: node
+  linkType: hard
+
+"parent-a@file:./parent-a::locator=broot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "parent-a@file:./parent-a#./parent-a::hash=ab5a81&locator=broot%40workspace%3A."
+  dependencies:
+    child: ./child
+  languageName: node
+  linkType: hard
+
+"parent-b@file:./parent-b::locator=broot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "parent-b@file:./parent-b#./parent-b::hash=920e51&locator=broot%40workspace%3A."
+  dependencies:
+    child: ./child
+  languageName: node
+  linkType: hard
+"#,
+    )
+    .unwrap();
+    let manifest = make_manifest(
+        &[
+            ("parent-a", "file:./parent-a"),
+            ("parent-b", "file:./parent-b"),
+        ],
+        &[],
+    );
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    for parent_name in ["parent-a", "parent-b"] {
+        let dep = graph.importers["."]
+            .iter()
+            .find(|d| d.name == parent_name)
+            .unwrap();
+        let parent = &graph.packages[&dep.dep_path];
+        let edge = parent
+            .dependencies
+            .get("child")
+            .unwrap_or_else(|| panic!("{parent_name} must keep its child edge"));
+        let target = crate::resolve_dep_edge("child", edge, |k| graph.packages.contains_key(k))
+            .unwrap_or_else(|| panic!("{parent_name}'s child edge {edge} must name a package"));
+        assert_eq!(
+            graph.packages[&target].local_source,
+            Some(LocalSource::Directory(PathBuf::from(format!(
+                "./{parent_name}/child"
+            ))))
+        );
+    }
+}
+
+#[test]
+fn berry_rebases_a_relative_path_without_climbing_past_a_root() {
+    use super::berry::rebase_on_workspace;
+    use std::path::Path;
+    assert_eq!(
+        rebase_on_workspace("packages/app", Path::new("../../shared/x.tgz")),
+        PathBuf::from("./shared/x.tgz")
+    );
+    assert_eq!(
+        rebase_on_workspace("packages", Path::new("../../outside")),
+        PathBuf::from("./../outside")
+    );
+    assert_eq!(
+        rebase_on_workspace("/abs/parent", Path::new("../../../child")),
+        PathBuf::from("/child")
+    );
+}
+
+#[test]
+fn berry_prefers_a_file_resolution_over_the_declared_bare_path() {
+    // Yarn 4.9.2's lockfile for a root `leaf: ./direct` that `resolutions`
+    // replaces with `file:./replacement`, while `consumer/leaf` keeps
+    // `file:./direct`: yarn installs the replacement at the root.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"consumer@file:./consumer::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "consumer@file:./consumer#./consumer::hash=d959f4&locator=rroot%40workspace%3A."
+  dependencies:
+    leaf: "file:./direct"
+  languageName: node
+  linkType: hard
+
+"leaf@file:./direct::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./direct#./direct::hash=375bb7&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"leaf@file:./replacement::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./replacement#./replacement::hash=eb2872&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"rroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "rroot@workspace:."
+  dependencies:
+    consumer: "file:./consumer"
+    leaf: ./direct
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let mut manifest = make_manifest(
+        &[("leaf", "./direct"), ("consumer", "file:./consumer")],
+        &[],
+    );
+    manifest.extra.insert(
+        "resolutions".to_string(),
+        serde_json::json!({ "consumer/leaf": "file:./direct", "leaf": "file:./replacement" }),
+    );
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    let source = |dep_path: &str| graph.packages[dep_path].local_source.clone();
+    let root_leaf = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "leaf")
+        .unwrap();
+    assert_eq!(
+        source(&root_leaf.dep_path),
+        Some(LocalSource::Directory(PathBuf::from("./replacement")))
+    );
+    let consumer = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "consumer")
+        .unwrap();
+    let edge = &graph.packages[&consumer.dep_path].dependencies["leaf"];
+    let target = crate::resolve_dep_edge("leaf", edge, |k| graph.packages.contains_key(k)).unwrap();
+    assert_eq!(
+        source(&target),
+        Some(LocalSource::Directory(PathBuf::from("./direct")))
+    );
+}
+
+#[test]
+fn berry_yarn_resolution_takes_the_first_rule_that_applies_to_the_declarer() {
+    use super::berry::yarn_resolution;
+    let rules: Vec<(String, String)> = [
+        ("**/leaf", "file:./glob"),
+        ("rroot/leaf", "file:./direct"),
+        ("lib@1.0.0/leaf", "file:./pinned"),
+        ("consumer/leaf", "file:./replacement"),
+        ("leaf", "file:./replacement"),
+        ("@s/parent/@s/dep", "2.0.0"),
+        ("lodash@^4.0.0", "4.17.21"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let get = |from, name, range| yarn_resolution(&rules, from, name, range);
+    let root = Some(("rroot", "workspace:."));
+    assert_eq!(
+        get(root, "leaf", "./direct").as_deref(),
+        Some("file:./direct")
+    );
+    assert_eq!(
+        get(Some(("consumer", "file:./consumer")), "leaf", "^1.0.0").as_deref(),
+        Some("file:./replacement")
+    );
+    // A version-qualified parent matches only that version of it.
+    assert_eq!(
+        get(Some(("lib", "npm:1.0.0")), "leaf", "^1.0.0").as_deref(),
+        Some("file:./pinned")
+    );
+    assert_eq!(
+        get(Some(("lib", "npm:2.0.0")), "leaf", "^1.0.0").as_deref(),
+        Some("file:./replacement")
+    );
+    // `npm:` is the default protocol, never one to strip from another.
+    assert_eq!(
+        get(Some(("lib", "npm:1.0.0")), "leaf", "npm:^1.0.0").as_deref(),
+        Some("file:./pinned")
+    );
+    assert_eq!(
+        get(Some(("@s/parent", "npm:1.0.0")), "@s/dep", "^1.0.0").as_deref(),
+        Some("2.0.0")
+    );
+    assert_eq!(
+        get(Some(("@s/other", "npm:1.0.0")), "@s/dep", "^1.0.0"),
+        None
+    );
+    assert_eq!(
+        get(None, "lodash", "npm:^4.0.0").as_deref(),
+        Some("4.17.21")
+    );
+    assert_eq!(get(None, "lodash", "^3.0.0"), None);
+    // An explicit `npm:` range is compared whole, comparators and all.
+    let rules = vec![(
+        "rroot/leaf@>=1.0.0 <2.0.0".to_string(),
+        "file:./direct".to_string(),
+    )];
+    assert_eq!(
+        yarn_resolution(&rules, root, "leaf", "npm:>=1.0.0 <2.0.0").as_deref(),
+        Some("file:./direct")
+    );
+}
+
+#[test]
+fn berry_honors_a_parent_scoped_resolution_for_the_root() {
+    // Yarn 4.9.2's lockfile where `rroot/leaf` precedes a bare `leaf` rule:
+    // yarn installs `./direct` at the root and `./replacement` in consumer.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"consumer@file:./consumer::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "consumer@file:./consumer#./consumer::hash=f78707&locator=rroot%40workspace%3A."
+  dependencies:
+    leaf: "file:./replacement"
+  languageName: node
+  linkType: hard
+
+"leaf@file:./direct::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./direct#./direct::hash=375bb7&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"leaf@file:./replacement::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./replacement#./replacement::hash=eb2872&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"rroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "rroot@workspace:."
+  dependencies:
+    consumer: "file:./consumer"
+    leaf: ./direct
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    let mut manifest = make_manifest(
+        &[("leaf", "./direct"), ("consumer", "file:./consumer")],
+        &[],
+    );
+    manifest.name = Some("rroot".to_string());
+    manifest.extra.insert(
+        "resolutions".to_string(),
+        serde_json::json!({
+            "rroot/leaf": "file:./direct",
+            "consumer/leaf": "file:./replacement",
+            "leaf": "file:./replacement"
+        }),
+    );
+    let graph = parse(tmp.path(), &manifest).unwrap();
+    let source = |dep_path: &str| graph.packages[dep_path].local_source.clone();
+    let root_leaf = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "leaf")
+        .unwrap();
+    assert_eq!(
+        source(&root_leaf.dep_path),
+        Some(LocalSource::Directory(PathBuf::from("./direct")))
+    );
+    let consumer = graph.importers["."]
+        .iter()
+        .find(|d| d.name == "consumer")
+        .unwrap();
+    let edge = &graph.packages[&consumer.dep_path].dependencies["leaf"];
+    let target = crate::resolve_dep_edge("leaf", edge, |k| graph.packages.contains_key(k)).unwrap();
+    assert_eq!(
+        source(&target),
+        Some(LocalSource::Directory(PathBuf::from("./replacement")))
+    );
+}
+
+#[test]
+fn berry_skips_resolutions_that_do_not_apply_to_the_root_workspace() {
+    // Yarn 4.9.2 writes this lockfile for both rule sets: a version-qualified
+    // parent never matches a workspace, whose reference is `workspace:.`,
+    // and yarn ignores a `**/` rule with a warning. Either way the bare
+    // `leaf` rule gives the root `./replacement`; consumer keeps `./direct`.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tmp.path(),
+        r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"consumer@file:./consumer::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "consumer@file:./consumer#./consumer::hash=472864&locator=rroot%40workspace%3A."
+  dependencies:
+    leaf: "file:./direct"
+  languageName: node
+  linkType: hard
+
+"leaf@file:./direct::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./direct#./direct::hash=375bb7&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"leaf@file:./replacement::locator=rroot%40workspace%3A.":
+  version: 1.0.0
+  resolution: "leaf@file:./replacement#./replacement::hash=eb2872&locator=rroot%40workspace%3A."
+  languageName: node
+  linkType: hard
+
+"rroot@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "rroot@workspace:."
+  dependencies:
+    consumer: "file:./consumer"
+    leaf: ./direct
+  languageName: unknown
+  linkType: soft
+"#,
+    )
+    .unwrap();
+    for skipped in [
+        "rroot@npm:1.0.0/leaf",
+        "rroot@npm:workspace:./leaf",
+        "**/leaf",
+    ] {
+        let mut manifest = make_manifest(
+            &[("leaf", "./direct"), ("consumer", "file:./consumer")],
+            &[],
+        );
+        manifest.name = Some("rroot".to_string());
+        manifest.version = Some("1.0.0".to_string());
+        let mut resolutions = serde_json::Map::new();
+        for (rule, reference) in [
+            (skipped, "file:./direct"),
+            ("consumer/leaf", "file:./direct"),
+            ("leaf", "file:./replacement"),
+        ] {
+            resolutions.insert(rule.to_string(), reference.into());
+        }
+        manifest
+            .extra
+            .insert("resolutions".to_string(), resolutions.into());
+        let graph = parse(tmp.path(), &manifest).unwrap();
+        let source = |dep_path: &str| graph.packages[dep_path].local_source.clone();
+        let direct = |name: &str| {
+            graph.importers["."]
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap()
+                .dep_path
+                .clone()
+        };
+        assert_eq!(
+            source(&direct("leaf")),
+            Some(LocalSource::Directory(PathBuf::from("./replacement"))),
+            "{skipped}"
+        );
+        let edge = &graph.packages[&direct("consumer")].dependencies["leaf"];
+        let target =
+            crate::resolve_dep_edge("leaf", edge, |k| graph.packages.contains_key(k)).unwrap();
+        assert_eq!(
+            source(&target),
+            Some(LocalSource::Directory(PathBuf::from("./direct"))),
+            "{skipped}"
+        );
+    }
+}
+
+#[test]
+fn berry_writer_keeps_an_alias_apart_from_a_same_version_local_package() {
+    // A fresh resolve of `choice: npm:is-odd@1.0.0` beside `is-odd:
+    // file:./local.tgz`, both 1.0.0: the alias must keep its own registry
+    // block rather than fold into the local tarball's.
+    let alias = LockedPackage {
+        name: "choice".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: "choice@1.0.0".to_string(),
+        alias_of: Some("is-odd".to_string()),
+        ..Default::default()
+    };
+    let source = LocalSource::Tarball(PathBuf::from("./local.tgz"));
+    let local = LockedPackage {
+        name: "is-odd".to_string(),
+        version: "1.0.0".to_string(),
+        dep_path: source.dep_path("is-odd"),
+        local_source: Some(source),
+        ..Default::default()
+    };
+    let direct = |name: &str, dep_path: &str| crate::DirectDep {
+        name: name.to_string(),
+        dep_path: dep_path.to_string(),
+        dep_type: DepType::Production,
+        specifier: None,
+    };
+    let graph = LockfileGraph {
+        importers: BTreeMap::from([(
+            ".".to_string(),
+            vec![
+                direct("choice", &alias.dep_path),
+                direct("is-odd", &local.dep_path),
+            ],
+        )]),
+        packages: BTreeMap::from([
+            (alias.dep_path.clone(), alias.clone()),
+            (local.dep_path.clone(), local.clone()),
+        ]),
+        ..Default::default()
+    };
+    let manifest = make_manifest(
+        &[
+            ("choice", "npm:is-odd@1.0.0"),
+            ("is-odd", "file:./local.tgz"),
+        ],
+        &[],
+    );
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        written.contains(
+            "\"choice@npm:is-odd@1.0.0\":\n  version: 1.0.0\n  resolution: \"is-odd@npm:1.0.0\"\n"
+        ),
+        "the alias must keep a registry block:\n{written}"
+    );
+    let reparsed = parse(out.path(), &manifest).unwrap();
+    let dep = reparsed.importers["."]
+        .iter()
+        .find(|d| d.name == "choice")
+        .unwrap_or_else(|| panic!("choice must survive a readback:\n{written}"));
+    assert_eq!(
+        reparsed.packages[&dep.dep_path].local_source, None,
+        "{written}"
+    );
+}
+
+#[test]
+fn berry_npm_alias_edge_reaches_the_aliased_package() {
+    // `@isaacs/cliui` depends on both `string-width@^5.1.2` and
+    // `string-width-cjs: npm:string-width@^4.2.0`; yarn merges the alias
+    // descriptor into the real package's block.
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let content = r#"__metadata:
+  version: 8
+  cacheKey: 10c0
+
+"@isaacs/cliui@npm:8.0.2":
+  version: 8.0.2
+  resolution: "@isaacs/cliui@npm:8.0.2"
+  dependencies:
+    string-width: "npm:^5.1.2"
+    string-width-cjs: "npm:string-width@^4.2.0"
+  languageName: node
+  linkType: hard
+
+"string-width-cjs@npm:string-width@^4.2.0, string-width@npm:^4.1.0":
+  version: 4.2.3
+  resolution: "string-width@npm:4.2.3"
+  languageName: node
+  linkType: hard
+
+"string-width@npm:^5.1.2":
+  version: 5.1.2
+  resolution: "string-width@npm:5.1.2"
+  languageName: node
+  linkType: hard
+"#;
+    std::fs::write(tmp.path(), content).unwrap();
+    let manifest = make_manifest(&[("@isaacs/cliui", "8.0.2")], &[]);
+    let graph = parse(tmp.path(), &manifest).unwrap();
+
+    let cliui = &graph.packages["@isaacs/cliui@8.0.2"];
+    assert_eq!(
+        cliui.dependencies.get("string-width").map(String::as_str),
+        Some("5.1.2")
+    );
+    assert_eq!(
+        cliui
+            .dependencies
+            .get("string-width-cjs")
+            .map(String::as_str),
+        Some("4.2.3")
+    );
+    let alias = &graph.packages["string-width-cjs@4.2.3"];
+    assert_eq!(alias.name, "string-width-cjs");
+    assert_eq!(alias.registry_name(), "string-width");
+    assert_eq!(alias.version, "4.2.3");
+
+    let out = tempfile::NamedTempFile::new().unwrap();
+    write_berry(out.path(), &graph, &manifest).unwrap();
+    let written = std::fs::read_to_string(out.path()).unwrap();
+    assert!(
+        !written.contains("resolution: \"string-width-cjs@"),
+        "the alias must not get a block of its own:\n{written}"
+    );
+    let reparsed = parse(out.path(), &manifest).unwrap();
+    assert_eq!(
+        reparsed.packages["@isaacs/cliui@8.0.2"]
+            .dependencies
+            .get("string-width-cjs")
+            .map(String::as_str),
+        Some("4.2.3"),
+        "the alias edge must survive a round trip:\n{written}"
+    );
+}
+
+#[test]
 fn test_parse_berry_simple() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let content = r#"# This file is generated by running "yarn install" inside your project.
@@ -622,7 +1637,7 @@ __metadata:
     assert_eq!(foo.yarn_checksum.as_deref(), Some("10c0/abcdef"));
     assert_eq!(
         foo.dependencies.get("bar").map(String::as_str),
-        Some("bar@2.5.0")
+        Some("2.5.0")
     );
 
     let root = graph.importers.get(".").unwrap();
@@ -925,7 +1940,7 @@ fn test_parse_berry_builtin_skip_keeps_transitive_npm_edge() {
             .dependencies
             .get("resolve")
             .map(String::as_str),
-        Some("resolve@1.22.2")
+        Some("1.22.2")
     );
 }
 
@@ -1152,7 +2167,7 @@ fn test_parse_berry_applies_root_resolution_to_transitive_edge() {
     let micromatch = &graph.packages["micromatch@4.0.8"];
     assert_eq!(
         micromatch.dependencies.get("picomatch").map(String::as_str),
-        Some("picomatch@2.3.2"),
+        Some("2.3.2"),
         "resolutions-pinned transitive edge must resolve to the rewritten block key"
     );
 }
@@ -1556,7 +2571,7 @@ fn test_parse_berry_portal_and_exec_protocols() {
     ));
     assert_eq!(
         portal.dependencies.get("left-pad").map(String::as_str),
-        Some("left-pad@1.3.0")
+        Some("1.3.0")
     );
 
     let exec_key =
@@ -1621,7 +2636,7 @@ fn test_write_berry_roundtrip() {
             .dependencies
             .get("bar")
             .map(String::as_str),
-        Some("bar@2.5.0")
+        Some("2.5.0")
     );
     // The manifest spec `foo@^1.0.0` appears verbatim (with `npm:`
     // prepended) in the block header, so direct-dep lookup

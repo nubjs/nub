@@ -1046,6 +1046,93 @@ fn frozen_yarn_berry_installs_reject_a_drifted_workspace_member() {
     }
 }
 
+/// A Yarn Berry lockfile lists optional platform bindings under
+/// `dependencies:`, flags them in `dependenciesMeta`, and records each
+/// binding's platform as `conditions:`. The isolated layout must link
+/// transitive deps by version and install only the host's binding.
+#[test]
+fn yarn_berry_lockfile_links_transitive_deps_and_only_the_host_binding() {
+    if test_registry().is_none() {
+        eprintln!("skipping: NUB_TEST_REGISTRY not set — run: source tests/registry/start.bash");
+        return;
+    }
+    let bindings = [
+        ("darwin-arm64", "os=darwin & cpu=arm64"),
+        ("darwin-x64", "os=darwin & cpu=x64"),
+        ("linux-arm64", "os=linux & cpu=arm64"),
+        ("linux-x64", "os=linux & cpu=x64"),
+        ("win32-x64", "os=win32 & cpu=x64"),
+    ];
+    // The offline registry stores tarballs only for the suite's hosts
+    // (`tests/registry/seed.mts`); the other bindings are packument-only and
+    // must be pruned without a fetch.
+    let seeded_hosts = [
+        ("darwin-arm64", "macos", "aarch64"),
+        ("linux-arm64", "linux", "aarch64"),
+        ("linux-x64", "linux", "x86_64"),
+    ];
+    let Some(host) = seeded_hosts
+        .iter()
+        .find(|(_, os, arch)| *os == std::env::consts::OS && *arch == std::env::consts::ARCH)
+        .map(|(name, ..)| *name)
+    else {
+        eprintln!("skipping: the offline registry has no esbuild binding for this host");
+        return;
+    };
+
+    let dir = pm_tmpdir("yarn-berry-optional-binding");
+    std::fs::write(
+        dir.join("package.json"),
+        r#"{"name":"berry-optional","private":true,"packageManager":"yarn@4.9.2","dependencies":{"esbuild":"0.21.5","is-odd":"3.0.1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(dir.join(".yarnrc.yml"), "nodeLinker: node-modules\n").unwrap();
+    let mut lock = String::from("__metadata:\n  version: 8\n  cacheKey: 10c0\n\n");
+    for (name, conditions) in bindings {
+        lock.push_str(&format!(
+            "\"@esbuild/{name}@npm:0.21.5\":\n  version: 0.21.5\n  resolution: \"@esbuild/{name}@npm:0.21.5\"\n  conditions: {conditions}\n  languageName: node\n  linkType: hard\n\n"
+        ));
+    }
+    lock.push_str("\"esbuild@npm:0.21.5\":\n  version: 0.21.5\n  resolution: \"esbuild@npm:0.21.5\"\n  dependencies:\n");
+    for (name, ..) in bindings {
+        lock.push_str(&format!("    \"@esbuild/{name}\": \"npm:0.21.5\"\n"));
+    }
+    lock.push_str("  dependenciesMeta:\n");
+    for (name, ..) in bindings {
+        lock.push_str(&format!("    \"@esbuild/{name}\":\n      optional: true\n"));
+    }
+    lock.push_str("  languageName: node\n  linkType: hard\n\n");
+    lock.push_str(
+        "\"is-number@npm:^6.0.0\":\n  version: 6.0.0\n  resolution: \"is-number@npm:6.0.0\"\n  languageName: node\n  linkType: hard\n\n\
+\"is-odd@npm:3.0.1\":\n  version: 3.0.1\n  resolution: \"is-odd@npm:3.0.1\"\n  dependencies:\n    is-number: \"npm:^6.0.0\"\n  languageName: node\n  linkType: hard\n\n\
+\"berry-optional@workspace:.\":\n  version: 0.0.0-use.local\n  resolution: \"berry-optional@workspace:.\"\n  dependencies:\n    esbuild: \"npm:0.21.5\"\n    is-odd: \"npm:3.0.1\"\n  languageName: unknown\n  linkType: soft\n",
+    );
+    std::fs::write(dir.join("yarn.lock"), &lock).unwrap();
+
+    let (_, stderr, code) = run_install(&dir, &["install", "--ignore-scripts"]);
+    assert_eq!(code, 0, "install from a berry yarn.lock failed: {stderr}");
+    let store = dir.join("node_modules/.store");
+    for (name, ..) in bindings {
+        let installed = store.join(format!("@esbuild+{name}@0.21.5")).exists();
+        assert_eq!(
+            installed,
+            name == host,
+            "@esbuild/{name} installed={installed} on host binding {host}"
+        );
+    }
+    let is_number = dir.join("node_modules/is-odd/../is-number/package.json");
+    assert!(
+        std::fs::canonicalize(&is_number).is_ok(),
+        "is-odd's sibling link to is-number must resolve: {}",
+        is_number.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("yarn.lock")).unwrap(),
+        lock,
+        "a matching install must leave yarn.lock byte-identical"
+    );
+}
+
 /// pnpm parity (`opts.ci && !opts.lockfileOnly`): under `CI=true` nub
 /// auto-selects frozen mode for a plain install, but a `--lockfile-only`
 /// run is exempt — it exists to regenerate the lock, so it re-resolves a
