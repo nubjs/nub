@@ -959,7 +959,19 @@ pub(super) fn yarn_resolution(
             None => (s.to_string(), None),
         }
     };
-    let bare = |r: &str| r.strip_prefix("npm:").unwrap_or(r).to_string();
+    // `Configuration#normalizeLocator`: a bare semver range or tag takes the
+    // default `npm:` protocol; anything else keeps its own.
+    let bare = |r: &str| {
+        let tag = !r.starts_with('v')
+            && !r.is_empty()
+            && r.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+        if tag || aube_semver::parse_range(r).is_ok() {
+            format!("npm:{r}")
+        } else {
+            r.to_string()
+        }
+    };
     rules.iter().find_map(|(pattern, reference)| {
         let pattern = pattern.as_str();
         if pattern.starts_with("*/") || pattern.starts_with("**/") {

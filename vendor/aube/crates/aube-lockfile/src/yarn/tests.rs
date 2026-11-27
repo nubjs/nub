@@ -1163,7 +1163,7 @@ fn berry_yarn_resolution_takes_the_first_rule_that_applies_to_the_declarer() {
     let rules: Vec<(String, String)> = [
         ("**/leaf", "file:./glob"),
         ("rroot/leaf", "file:./direct"),
-        ("lib@npm:1.0.0/leaf", "file:./pinned"),
+        ("lib@1.0.0/leaf", "file:./pinned"),
         ("consumer/leaf", "file:./replacement"),
         ("leaf", "file:./replacement"),
         ("@s/parent/@s/dep", "2.0.0"),
@@ -1190,6 +1190,11 @@ fn berry_yarn_resolution_takes_the_first_rule_that_applies_to_the_declarer() {
     assert_eq!(
         get(Some(("lib", "npm:2.0.0")), "leaf", "^1.0.0").as_deref(),
         Some("file:./replacement")
+    );
+    // `npm:` is the default protocol, never one to strip from another.
+    assert_eq!(
+        get(Some(("lib", "npm:1.0.0")), "leaf", "npm:^1.0.0").as_deref(),
+        Some("file:./pinned")
     );
     assert_eq!(
         get(Some(("@s/parent", "npm:1.0.0")), "@s/dep", "^1.0.0").as_deref(),
@@ -1327,7 +1332,11 @@ fn berry_skips_resolutions_that_do_not_apply_to_the_root_workspace() {
 "#,
     )
     .unwrap();
-    for skipped in ["rroot@npm:1.0.0/leaf", "**/leaf"] {
+    for skipped in [
+        "rroot@npm:1.0.0/leaf",
+        "rroot@npm:workspace:./leaf",
+        "**/leaf",
+    ] {
         let mut manifest = make_manifest(
             &[("leaf", "./direct"), ("consumer", "file:./consumer")],
             &[],
