@@ -182,15 +182,18 @@ const IMPORT_DEFAULT: &str = r#"var __importDefault = (this && this.__importDefa
 /// builtin is required. Anything else is imported, and the namespace is unwrapped to
 /// the CommonJS `module.exports` only when it is Node's facade for the module
 /// `require.resolve` names. The facade is told from an ES module that default-exports
-/// the same object by its exports, never by a second `import()`, which would run
-/// whatever a hook makes of that request: from Node 23 the facade exports
-/// `module.exports`, and before that it exports nothing the CommonJS module lacks
-/// (Node's lexer misses some keys, so it may lack some), which an ES module exporting
-/// only that `default` matches too. When `import()` refuses JSON for want of an
-/// attribute, the file it names is required if `require.resolve` names it too, so a
-/// package's `import` target still wins. The cache is read off `node:module`, since
-/// the `require` Node hands an entry loaded with a hook's source has no `cache`.
-/// `WRAP` is `__importStar` under `esModuleInterop`, else nothing.
+/// the same object by which names it exports, never by their values, which Node copies
+/// once and a later write leaves behind, and never by a second `import()` of the file,
+/// which would run whatever a hook makes of that request. From Node 23 the facade
+/// exports `module.exports`; before that it exports no name the CommonJS module lacks,
+/// which an ES module exporting only that `default` matches too. When `import()`
+/// refuses JSON for want of an attribute, the file it names is required if
+/// `require.resolve` names it too and it is the import target itself: a JSON module
+/// imports nothing, so the target is that file only if it imports as JSON once given
+/// the attribute (as `assert` too, the only key Node 18 reads), and an ES module that imports the file is refused that attribute
+/// before it runs. The cache is read off `node:module`, since the `require` Node hands
+/// an entry loaded with a hook's source has no `cache`. `WRAP` is `__importStar` under
+/// `esModuleInterop`, else nothing.
 const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, options) {
     if (arguments.length > 1) return import(specifier, options);
     var id;
@@ -204,7 +207,7 @@ const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, optio
         var keys = Object.keys(ns);
         var object = exp !== null && (typeof exp === "object" || typeof exp === "function");
         for (var i = 0; i < keys.length; i++) {
-            if (keys[i] !== "default" && !(object && Object.is(ns[keys[i]], exp[keys[i]]))) return false;
+            if (keys[i] !== "default" && !(object && keys[i] in exp)) return false;
         }
         return true;
     };
@@ -212,12 +215,14 @@ const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, optio
         var m = id !== undefined && require("node:module")._cache[id];
         return m && facade(ns, m.exports) ? WRAP(m.exports) : ns;
     }, function (e) {
-        if (id !== undefined && /\.json$/i.test(id) && e &&
-            /^ERR_IMPORT_(ATTRIBUTE|ASSERTION_TYPE)_MISSING$/.test(e.code) &&
-            String(e.message).indexOf('"' + require("node:url").pathToFileURL(id).href + '"') !== -1) {
-            return WRAP(require(id));
+        if (id === undefined || !/\.json$/i.test(id) || !e ||
+            !/^ERR_IMPORT_(ATTRIBUTE|ASSERTION_TYPE)_MISSING$/.test(e.code) ||
+            String(e.message).indexOf('"' + require("node:url").pathToFileURL(id).href + '"') === -1) {
+            throw e;
         }
-        throw e;
+        return import(specifier, { with: { type: "json" }, assert: { type: "json" } }).then(function () {
+            return WRAP(require(id));
+        }, function () { throw e; });
     });
 };"#;
 

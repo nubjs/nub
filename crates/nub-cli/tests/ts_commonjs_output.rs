@@ -248,8 +248,8 @@ fn a_commonjs_entry_requires_an_es_module_on_the_compat_tier() {
 /// waits. A preload that awaits an `import()` of the entry runs it, as on plain Node:
 /// Node awaits that preload before it imports the entry, so holding the preload's import
 /// back left the run to exit 0 with neither module's output. A hook from the configured
-/// preload that holds Node's resolve of the entry after Nub's has answered it still
-/// leaves a CommonJS entry the main module.
+/// preload that holds Node's resolve of the entry for 1.5 seconds after Nub's has
+/// answered it still leaves a CommonJS entry the main module.
 #[test]
 fn an_early_import_of_the_entry_neither_stalls_startup_nor_takes_the_main_module() {
     let Some(node_dir) = std::env::var_os("TEST_NODE_BIN_22_13_0").map(PathBuf::from) else {
@@ -283,7 +283,7 @@ fn an_early_import_of_the_entry_neither_stalls_startup_nor_takes_the_main_module
         r#"require("node:module").register(
   "data:text/javascript," +
     encodeURIComponent(
-      "export async function resolve(s, c, next) { const r = await next(s, c); if (c.parentURL === undefined) await new Promise((r) => setTimeout(r, 50)); return r; }",
+      "export async function resolve(s, c, next) { const r = await next(s, c); if (c.parentURL === undefined) await new Promise((r) => setTimeout(r, 1500)); return r; }",
     ),
 );
 "#,
@@ -320,9 +320,12 @@ fn legs(path_node: bool) -> Vec<(String, Option<PathBuf>, bool)> {
 /// package's `import` target, and an ES module's own namespace, here one that
 /// default-exports the CommonJS module its package's `require` target names. JSON that
 /// both conditions name, through a package's `exports` or the project's `imports`,
-/// comes back as `require()` returns it. A CommonJS module comes back the same way
-/// without a second request a hook could send elsewhere: `redirect.cjs` points only
-/// `dep.cjs`'s absolute URL at a module that announces itself. Where it can, it uses
+/// comes back as `require()` returns it, but an ES module target that imports the
+/// `require` target's JSON without an attribute still fails as it does under Node. A
+/// CommonJS module comes back with the values it has now, not the ones Node copied on
+/// the first import, and without a second request a hook could send elsewhere:
+/// `redirect.cjs` points only `dep.cjs`'s absolute URL at a module that announces
+/// itself. Where it can, it uses
 /// `registerHooks`, and a file with `export` under one still compiles to CommonJS:
 /// where Node strips types by default it used to run nothing and exit 0. On the
 /// pinned Nodes only, since Node 18 reads no `with` attributes.
@@ -395,10 +398,34 @@ export const named = 'esm';
   const dual: any = await import("dual");
   const dataset: any = await import("dataset");
   const alias: any = await import("#data");
-  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a);
+  const counter: any = await import("./counter.cjs");
+  counter.bump();
+  const again: any = await import("./counter.cjs");
+  const jsondep = await import("jsondep").then(() => "loaded", (e: any) => e.code);
+  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, jsondep);
 }
 main();
 "##,
+    );
+    write(
+        root,
+        "node_modules/jsondep/package.json",
+        r#"{"name":"jsondep","exports":{"import":"./index.mjs","require":"./data.json"}}"#,
+    );
+    write(
+        root,
+        "node_modules/jsondep/index.mjs",
+        "import data from './data.json';\nexport default data;\n",
+    );
+    write(
+        root,
+        "node_modules/jsondep/data.json",
+        r#"{"from":"jsondep"}"#,
+    );
+    write(
+        root,
+        "counter.cjs",
+        "exports.value = 1;\nexports.bump = function () { exports.value = 2; };\n",
     );
     write(
         root,
@@ -434,7 +461,7 @@ if (mod.registerHooks) {
         let out = run(root, node_dir.as_deref(), standalone, "main.ts");
         assert_eq!(
             stdout(&out, &what),
-            "string index.mjs esm cjs dataset 1",
+            "string index.mjs esm cjs dataset 1 2 ERR_IMPORT_ATTRIBUTE_MISSING",
             "{what}"
         );
         // Under a user hook the standalone runner hands a TypeScript entry a `require`

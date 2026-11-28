@@ -105,8 +105,7 @@ let mainEntryUrl;
 // it. Only the pass's request waits: a preload's own `import()` of the entry carries
 // that preload as its parent and goes straight through, as under plain Node, and Node
 // awaits such a preload before it imports the entry, so holding it would hang startup.
-// A hook that loads the entry without calling Nub's, or points it at another file,
-// hides that request, so the wait ends after a second regardless.
+// Nothing but that request lets the pass through (`entryJobMade`).
 let entryInspect = null;
 const { resolveUtilRateFacade } = createRequire(import.meta.url)("./util/rate.cjs");
 
@@ -158,9 +157,20 @@ export async function resolve(specifier, context, nextResolve) {
   return result;
 }
 
+// Settles once Node asks to load the entry. A resolve still waiting after a second is
+// refused rather than answered, so a slow hook can hold the pass back but never hand it
+// the entry's job, and the main thread leaves the entry to its later triggers. The
+// timer is also what keeps this thread awake while it waits: Node answers every request
+// still open when the thread falls idle with a promise that never settles.
 function entryJobMade(inspect) {
   let timer;
-  const late = new Promise((r) => { timer = setTimeout(r, 1000); });
+  const late = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error("Node has not loaded the entry yet");
+      err.code = "ERR_NUB_ENTRY_NOT_LOADED";
+      reject(err);
+    }, 1000);
+  });
   return Promise.race([inspect.loaded, late]).finally(() => clearTimeout(timer));
 }
 

@@ -2598,7 +2598,13 @@ async function serveEntryIfHandler(entry, mayImport) {
   let ns;
   try {
     ns = await import(entry.loadUrl ?? pathToFileURL(entry.file).href);
-  } catch {
+  } catch (err) {
+    // The loader thread refused the import before Node had made the entry's module
+    // job (preload-async-hooks.mjs `entryJobMade`), so the later triggers take it.
+    if (err?.code === "ERR_NUB_ENTRY_NOT_LOADED") {
+      entry.taken = false;
+      return true;
+    }
     // The entry threw. Node has already reported that as an uncaught error, and this
     // is the same failure observed a second time, so it is dropped rather than
     // doubling the report.
