@@ -94,25 +94,36 @@ let utilRateShimsEnabled = true;
 let cjsEntryHandoff = false;
 let mainEntryUrl;
 
-// `{ entryUrls }` names the program entry whenever the main thread's fetch-handler
-// pass may `import()` it. That import can reach this worker while Node's own,
-// parentless resolve of the entry is still in flight, and Node hands the module job
-// to whichever resolve it hears back from first: the pass's would load the entry as
+// `{ entryInspect: { urls, parentURL } }` names the program entry and the module the
+// main thread's fetch-handler pass imports it from. That import can reach this worker
+// before Node's own import of the entry has made its module job, and Node hands the
+// job to whichever resolve it hears back from first: the pass's would make the entry
 // a module that is not the main, so a CommonJS entry would have no `require.main`.
-// Until Node's resolve is answered, a resolve of the entry from a parent waits for
-// it and then a turn more, so its answer leaves after Node's.
-let entryUrls = null;
-let entryResolved = null;
+// So the pass's resolve of the entry is answered only once Node asks to load it, which
+// Node does only after making the job. Nub's own resolve returning is not that point:
+// a hook registered after Nub's still holds the answer, and Node still has to receive
+// it. Only the pass's request waits: a preload's own `import()` of the entry carries
+// that preload as its parent and goes straight through, as under plain Node, and Node
+// awaits such a preload before it imports the entry, so holding it would hang startup.
+// A hook that loads the entry without calling Nub's, or points it at another file,
+// hides that request, so the wait ends after a second regardless.
+let entryInspect = null;
 const { resolveUtilRateFacade } = createRequire(import.meta.url)("./util/rate.cjs");
 
 export async function initialize(data) {
   if (data && data.standaloneLoader) CLOBBER_MAP.clear();
   if (data && data.standaloneLoader) utilRateShimsEnabled = false;
   if (data && data.classicCjs) cjsEntryHandoff = true;
-  if (data && data.entryUrls) {
-    entryUrls = new Set(data.entryUrls);
+  if (data && data.entryInspect) {
     let release;
-    entryResolved = { promise: new Promise((r) => { release = r; }), release };
+    const loaded = new Promise((r) => { release = r; });
+    entryInspect = {
+      urls: new Set(data.entryInspect.urls),
+      parentURL: data.entryInspect.parentURL,
+      mainResolved: false,
+      loaded,
+      release,
+    };
   }
   if (data && data.entryLoad) {
     entryLoad = {
@@ -135,23 +146,22 @@ function withoutQuery(url) {
 // ── Resolve hook ────────────────────────────────────────────────────
 export async function resolve(specifier, context, nextResolve) {
   const parentless = context.parentURL === undefined;
-  if (!parentless && entryResolved !== null && entryUrls.has(withoutQuery(String(specifier)))) {
-    await entryResolved.promise;
-    await new Promise((r) => setImmediate(r));
+  if (entryInspect !== null && (parentless || context.parentURL === entryInspect.parentURL) &&
+      entryInspect.urls.has(withoutQuery(String(specifier)))) {
+    if (parentless) entryInspect.mainResolved = true;
+    else await entryJobMade(entryInspect);
   }
-  let result;
-  try {
-    result = await resolveInner(specifier, context, nextResolve);
-  } finally {
-    if (parentless && entryResolved !== null) {
-      entryResolved.release();
-      entryResolved = null;
-    }
-  }
+  const result = await resolveInner(specifier, context, nextResolve);
   if (cjsEntryHandoff && mainEntryUrl === undefined && parentless) {
     mainEntryUrl = result?.url ?? null;
   }
   return result;
+}
+
+function entryJobMade(inspect) {
+  let timer;
+  const late = new Promise((r) => { timer = setTimeout(r, 1000); });
+  return Promise.race([inspect.loaded, late]).finally(() => clearTimeout(timer));
 }
 
 async function resolveInner(specifier, context, nextResolve) {
@@ -200,6 +210,10 @@ async function resolveInner(specifier, context, nextResolve) {
 // see transform-core `noteRuntimeV8FlagSource`. Awaited here because the
 // `nextLoad` branch of loadInner hands back a promise on this tier.
 export async function load(url, context, nextLoad) {
+  if (entryInspect !== null && entryInspect.mainResolved && entryInspect.urls.has(withoutQuery(url))) {
+    entryInspect.release();
+    entryInspect = null;
+  }
   if (entryLoad !== null && entryLoad.mainResolved && entryLoad.urls.has(withoutQuery(url))) {
     const { port } = entryLoad;
     entryLoad = null;

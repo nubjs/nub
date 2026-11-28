@@ -243,6 +243,57 @@ fn a_commonjs_entry_requires_an_es_module_on_the_compat_tier() {
     }
 }
 
+/// On the compat tier (22.13), Nub's fetch-handler pass waits in the loader thread for
+/// Node to load the entry before its own `import()` of it is answered, and nothing else
+/// waits. A preload that awaits an `import()` of the entry runs it, as on plain Node:
+/// Node awaits that preload before it imports the entry, so holding the preload's import
+/// back left the run to exit 0 with neither module's output. A hook from the configured
+/// preload that holds Node's resolve of the entry after Nub's has answered it still
+/// leaves a CommonJS entry the main module.
+#[test]
+fn an_early_import_of_the_entry_neither_stalls_startup_nor_takes_the_main_module() {
+    let Some(node_dir) = std::env::var_os("TEST_NODE_BIN_22_13_0").map(PathBuf::from) else {
+        eprintln!("skipping: TEST_NODE_BIN_22_13_0 is not set");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", "{}");
+    write(
+        root,
+        "pre.mjs",
+        "await import(new URL('./main.mjs', import.meta.url).href);\nconsole.log('preload');\n",
+    );
+    write(root, "main.mjs", "console.log('main');\n");
+    let out = run_with(
+        root,
+        Some(&node_dir),
+        false,
+        "main.mjs",
+        Some("--import=./pre.mjs"),
+    );
+    assert_eq!(
+        stdout(&out, "a preload awaiting the entry"),
+        "main\npreload"
+    );
+
+    write(
+        root,
+        "slow-answer.cjs",
+        r#"require("node:module").register(
+  "data:text/javascript," +
+    encodeURIComponent(
+      "export async function resolve(s, c, next) { const r = await next(s, c); if (c.parentURL === undefined) await new Promise((r) => setTimeout(r, 50)); return r; }",
+    ),
+);
+"#,
+    );
+    write(root, "nub.jsonc", r#"{ "preload": ["./slow-answer.cjs"] }"#);
+    write(root, "main.cjs", "console.log(require.main === module);\n");
+    let out = run(root, Some(&node_dir), false, "main.cjs");
+    assert_eq!(stdout(&out, "a configured preload's resolve hook"), "true");
+}
+
 /// `nub` and (on Unix) the standalone loader, on each pinned Node and, when
 /// `path_node` is set, the Node on `PATH`.
 fn legs(path_node: bool) -> Vec<(String, Option<PathBuf>, bool)> {
@@ -267,13 +318,23 @@ fn legs(path_node: bool) -> Vec<(String, Option<PathBuf>, bool)> {
 
 /// A dynamic `import()` takes what the real `import()` loads: its attributes, the
 /// package's `import` target, and an ES module's own namespace, here one that
-/// default-exports the CommonJS module its package's `require` target names. On the
+/// default-exports the CommonJS module its package's `require` target names. JSON that
+/// both conditions name, through a package's `exports` or the project's `imports`,
+/// comes back as `require()` returns it. A CommonJS module comes back the same way
+/// without a second request a hook could send elsewhere: `redirect.cjs` points only
+/// `dep.cjs`'s absolute URL at a module that announces itself. Where it can, it uses
+/// `registerHooks`, and a file with `export` under one still compiles to CommonJS:
+/// where Node strips types by default it used to run nothing and exit 0. On the
 /// pinned Nodes only, since Node 18 reads no `with` attributes.
 #[test]
 fn dynamic_import_follows_what_import_loads() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    write(root, "package.json", "{}");
+    write(
+        root,
+        "package.json",
+        r##"{"imports":{"#data":"./data.json"}}"##,
+    );
     write(
         root,
         "tsconfig.json",
@@ -317,19 +378,77 @@ export const named = 'esm';
     );
     write(
         root,
+        "node_modules/dataset/package.json",
+        r#"{"name":"dataset","exports":"./data.json"}"#,
+    );
+    write(
+        root,
+        "node_modules/dataset/data.json",
+        r#"{"from":"dataset"}"#,
+    );
+    write(
+        root,
         "main.ts",
-        r#"async function main() {
+        r##"async function main() {
   const text: any = await import("./data.json", { with: { type: "text" } });
   const split: any = await import("split");
   const dual: any = await import("dual");
-  console.log(typeof text.default, split.from, dual.named, dual.default.cjs);
+  const dataset: any = await import("dataset");
+  const alias: any = await import("#data");
+  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a);
 }
 main();
+"##,
+    );
+    write(
+        root,
+        "dep.cjs",
+        "module.exports = { extra: 1 };\nObject.defineProperty(module.exports, 'hidden', { value: 2 });\n",
+    );
+    write(
+        root,
+        "elsewhere.mjs",
+        "console.log('elsewhere ran');\nexport default 0;\n",
+    );
+    write(
+        root,
+        "redirect.cjs",
+        r#"const { pathToFileURL } = require("node:url");
+const mod = require("node:module");
+const from = pathToFileURL(require.resolve("./dep.cjs")).href;
+const to = pathToFileURL(require.resolve("./elsewhere.mjs")).href;
+if (mod.registerHooks) {
+  mod.registerHooks({ resolve: (s, c, next) => next(s === from ? to : s, c) });
+} else {
+  const hook = `export async function resolve(s, c, next) { return next(s === ${JSON.stringify(from)} ? ${JSON.stringify(to)} : s, c); }`;
+  mod.register("data:text/javascript," + encodeURIComponent(hook));
+}
 "#,
+    );
+    write(
+        root,
+        "hooked.ts",
+        "export async function main() {\n  const dep: any = await import(\"./dep.cjs\");\n  console.log(dep.extra, dep.hidden);\n}\nmain();\n",
     );
     for (what, node_dir, standalone) in legs(false) {
         let out = run(root, node_dir.as_deref(), standalone, "main.ts");
-        assert_eq!(stdout(&out, &what), "string index.mjs esm cjs", "{what}");
+        assert_eq!(
+            stdout(&out, &what),
+            "string index.mjs esm cjs dataset 1",
+            "{what}"
+        );
+        // Under a user hook the standalone runner hands a TypeScript entry a `require`
+        // with no cache on 22.15+, so there is no CommonJS module to unwrap there.
+        if !standalone {
+            let out = run_with(
+                root,
+                node_dir.as_deref(),
+                false,
+                "hooked.ts",
+                Some("--require=./redirect.cjs"),
+            );
+            assert_eq!(stdout(&out, &what), "1 2", "{what}");
+        }
     }
 }
 

@@ -31,8 +31,8 @@
 //!   copies it, as ESM's live binding would.
 //! - A dynamic `import()` stays a real `import()`, so an ES-module-only package
 //!   still loads below Node's `require(esm)`. `__importDynamic` hands back a module
-//!   that ran as CommonJS (found in `require.cache`), a builtin or JSON the way
-//!   `tsc`'s `require()` would, and an ES module as its namespace.
+//!   that ran as CommonJS (Node's facade for the `require.cache` entry), a builtin or
+//!   JSON the way `tsc`'s `require()` would, and an ES module as its namespace.
 //! - Top-level `await` and `import.meta`, which `tsc` emits verbatim into a file
 //!   Node then rejects, are errors that name the file.
 //! - A helper whose name the file already uses gets a fresh one (`tsc` rejects the
@@ -179,26 +179,45 @@ const IMPORT_DEFAULT: &str = r#"var __importDefault = (this && this.__importDefa
 
 /// `import(specifier)`, observed as `tsc`'s `require()` where the two load the same
 /// thing. With import attributes it is the real `import()`, untouched. Without, a
-/// builtin or a relative `.json` file is required, since `import()` of JSON needs an
-/// attribute; anything else is imported, and the namespace is unwrapped to the
-/// CommonJS `module.exports` only when it is that module's own: the one `import()`
-/// returns for the file `require.resolve` names. An ES module that default-exports
-/// a CommonJS module's exports keeps its namespace. The cache is read off
-/// `node:module`, since the `require` Node hands an entry loaded with a hook's source
-/// has no `cache`. `WRAP` is `__importStar` under `esModuleInterop`, else nothing.
+/// builtin is required. Anything else is imported, and the namespace is unwrapped to
+/// the CommonJS `module.exports` only when it is Node's facade for the module
+/// `require.resolve` names. The facade is told from an ES module that default-exports
+/// the same object by its exports, never by a second `import()`, which would run
+/// whatever a hook makes of that request: from Node 23 the facade exports
+/// `module.exports`, and before that it exports nothing the CommonJS module lacks
+/// (Node's lexer misses some keys, so it may lack some), which an ES module exporting
+/// only that `default` matches too. When `import()` refuses JSON for want of an
+/// attribute, the file it names is required if `require.resolve` names it too, so a
+/// package's `import` target still wins. The cache is read off `node:module`, since
+/// the `require` Node hands an entry loaded with a hook's source has no `cache`.
+/// `WRAP` is `__importStar` under `esModuleInterop`, else nothing.
 const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, options) {
     if (arguments.length > 1) return import(specifier, options);
     var id;
     try { id = require.resolve(specifier); } catch (e) {}
-    if (id !== undefined && (require("node:module").isBuiltin(id) || /^\.\.?\/.*\.json$/i.test(specifier))) {
+    if (id !== undefined && require("node:module").isBuiltin(id)) {
         return Promise.resolve().then(function () { return WRAP(require(id)); });
     }
+    var facade = function (ns, exp) {
+        if (ns.default !== exp) return false;
+        if (parseInt(require("node:process").versions.node, 10) >= 23) return ns["module.exports"] === exp;
+        var keys = Object.keys(ns);
+        var object = exp !== null && (typeof exp === "object" || typeof exp === "function");
+        for (var i = 0; i < keys.length; i++) {
+            if (keys[i] !== "default" && !(object && Object.is(ns[keys[i]], exp[keys[i]]))) return false;
+        }
+        return true;
+    };
     return import(specifier).then(function (ns) {
         var m = id !== undefined && require("node:module")._cache[id];
-        if (!m || ns.default !== m.exports) return ns;
-        return import(require("node:url").pathToFileURL(id).href).then(function (own) {
-            return own === ns ? WRAP(m.exports) : ns;
-        }, function () { return ns; });
+        return m && facade(ns, m.exports) ? WRAP(m.exports) : ns;
+    }, function (e) {
+        if (id !== undefined && /\.json$/i.test(id) && e &&
+            /^ERR_IMPORT_(ATTRIBUTE|ASSERTION_TYPE)_MISSING$/.test(e.code) &&
+            String(e.message).indexOf('"' + require("node:url").pathToFileURL(id).href + '"') !== -1) {
+            return WRAP(require(id));
+        }
+        throw e;
     });
 };"#;
 

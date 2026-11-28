@@ -1006,8 +1006,14 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // branch keeps its own narrower gate: a non-transpiling async loader (a
     // telemetry `--import`) must not turn a bare 'typescript' from Node's own
     // CJS loader into a step-aside.
+    //
+    // Nor does a file whose tsconfig says `"module": "commonjs"` step aside on a bare
+    // 'typescript': nub's output for it is already CommonJS, so the objection above
+    // does not apply, and Node, handed the raw source, strips it, finds `export`, and
+    // loads it again as an ES module, which nub then answers with CommonJS. On a Node
+    // that strips types by default, that second answer ran nothing and exited 0.
     if (context && (
-      (__userHooksRegistered && context.format === "typescript") ||
+      (__userHooksRegistered && context.format === "typescript" && !core.emitsCommonJs(url)) ||
       ((__userLoadHookRegistered || userAsyncLoaderActive(foreignLoaderFlagPresent)) &&
         core.outerHookOwnsFormat(context.format, ext) && !core.isDependency(url))
     )) {
@@ -2437,15 +2443,19 @@ function fireEntryLoad(entry) {
 // process carries until the entry loads and an ordinary run should carry nothing.
 // `data` is merged into what the worker's `initialize` receives.
 //
-// The entry's URLs go along either way. The first pass's `import()` of the entry can
-// reach the worker while Node's own import of it is still being resolved, and the
-// module job goes to whichever resolve is answered first: answered first, the pass's
-// would make the entry a module that is not the main, with no `require.main` for a
-// CommonJS one. The worker answers it only after Node's (preload-async-hooks.mjs).
+// The entry's URLs go along either way, with the URL the pass imports it from. The
+// first pass's `import()` of the entry can reach the worker before Node's own import
+// has made the entry's module job, and the job goes to whichever resolve is answered
+// first: the pass's would make the entry a module that is not the main, with no
+// `require.main` for a CommonJS one. The worker answers it only once Node asks to
+// load the entry (preload-async-hooks.mjs).
 function loaderWorkerOptions(data) {
   const entry = serveEntry;
   if (entry === null) return data ? { data } : undefined;
-  data = { ...data, entryUrls: [...entry.urls] };
+  data = {
+    ...data,
+    entryInspect: { urls: [...entry.urls], parentURL: pathToFileURL(__filename).href },
+  };
   if (!entry.mayFollow) return { data };
   const { MessageChannel } = getBuiltin("node:worker_threads");
   const channel = new MessageChannel();

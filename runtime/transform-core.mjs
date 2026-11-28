@@ -967,6 +967,14 @@ function tsconfigEmitsCommonJs(ext, pkgType, filePath) {
   return typeof module_ === "string" && module_.toLowerCase() === "commonjs";
 }
 
+// The same question for a load hook holding only a URL.
+export function emitsCommonJs(url) {
+  const ext = extname(url);
+  if (ext !== ".ts" && ext !== ".tsx") return false;
+  const filePath = fileURLToPath(url);
+  return tsconfigEmitsCommonJs(ext, getPackageType(dirname(filePath)), filePath);
+}
+
 // `esModuleInterop` as `tsc` applies it to this project. An explicit value wins.
 // Absent, its default depends on the compiler: TypeScript 6 turned it on, and 5
 // and earlier left it off, so the project's own `typescript` decides, read from
