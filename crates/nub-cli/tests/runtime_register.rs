@@ -4,8 +4,8 @@
 //! where they cannot compose with the loader, so the hook thread crashed: a `--require`
 //! preload exited 1 with no output, and a call from the program threw. Where Node's sync
 //! validator refuses a missing CommonJS source (through 22.22.2 and 24.11.0), an `import`
-//! of a CommonJS file then threw instead of loading it. A loader's missing source for a
-//! JSON file still fails as under Node.
+//! of a CommonJS file then threw instead of loading it, an extensionless one included. A
+//! loader's missing source for a JSON file still fails as under Node.
 //!
 //! Each leg runs on the Node on `PATH` and on every pinned Node CI provides.
 
@@ -139,6 +139,25 @@ require("node:module").register("data:text/javascript," + encodeURIComponent(hoo
 "#,
     );
     write(root, "data.json", "{}\n");
+    // Extensionless files Node loads as CommonJS, for their package's `type` and, with
+    // none, for their syntax.
+    for (dir, package, value) in [
+        ("cjs", r#"{"type":"commonjs"}"#, "typed"),
+        ("untyped", "{}", "untyped"),
+    ] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+        write(root, &format!("{dir}/package.json"), package);
+        write(
+            root,
+            &format!("{dir}/plain"),
+            &format!("module.exports = '{value}';\n"),
+        );
+    }
+    write(
+        root,
+        "extensionless.mjs",
+        "import typed from './cjs/plain';\nimport untyped from './untyped/plain';\nconsole.log(typed, untyped);\n",
+    );
     write(root, "hinted.cjs", "module.exports = 'hinted';\n");
     write(
         root,
@@ -153,11 +172,12 @@ fn a_runtime_register_runs_the_program_as_under_node() {
     let dir = fixture();
     let root = dir.path();
     let nub = PathBuf::from(env!("CARGO_BIN_EXE_nub"));
-    let cases: [(&str, Option<&str>); 4] = [
+    let cases: [(&str, Option<&str>); 5] = [
         ("main.cjs", Some("--require=./register.cjs")),
         ("main.mjs", Some("--require=./register.cjs")),
         ("self.cjs", None),
         ("nullish.mjs", Some("--require=./nullish.cjs")),
+        ("extensionless.mjs", Some("--require=./register.cjs")),
     ];
     for (name, node_dir) in nodes() {
         let node = node_dir
@@ -181,6 +201,7 @@ fn a_runtime_register_runs_the_program_as_under_node() {
                 ("main.cjs", "--require=./register.cjs"),
                 ("main.mjs", "--require=./register.cjs"),
                 ("nullish.mjs", "--require=./nullish.cjs"),
+                ("extensionless.mjs", "--require=./register.cjs"),
             ] {
                 let what = format!("{name}: the standalone runner on {entry}");
                 let expected = run(&node, None, root, &[preload, entry], None);

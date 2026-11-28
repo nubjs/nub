@@ -925,22 +925,6 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     }
   }
 
-  // Whether Node's default load gives this `file:` URL the `commonjs` format: a `.cjs`
-  // file, or a `.js` one by its package's `type` or, without one, by its syntax.
-  function loadsAsCommonJs(url) {
-    if (!core.isFileUrl(url)) return false;
-    try {
-      const path = fileURLToPath(url);
-      const ext = pathExtname(path);
-      if (ext === ".cjs") return true;
-      if (ext !== ".js") return false;
-      const source = getBuiltin("node:fs").readFileSync(path, "utf8");
-      return core.moduleFormatFor(ext, core.getPackageType(dirname(path)), path, source) === "commonjs";
-    } catch {
-      return false;
-    }
-  }
-
   // Every load result passes through the runtime-V8-flag scan BEFORE Node compiles
   // it, whichever branch of loadInner produced it — see transform-core
   // `noteRuntimeV8FlagSource`. A no-op (one null check) unless the spawn layer armed
@@ -1109,7 +1093,8 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
       // in for the one it declared: a JSON or ES module file keeps the error plain Node
       // raises for its missing source, whatever `resolve` hinted.
       if (nodeLoadValidatorStrict() && err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
-          RegExpPrototypeTest(ASYNC_TIER_NO_SOURCE, err.message) && loadsAsCommonJs(url)) {
+          RegExpPrototypeTest(ASYNC_TIER_NO_SOURCE, err.message) &&
+          core.nodeFileFormat(url) === "commonjs") {
         return {
           format: "commonjs-sync",
           source: getBuiltin("node:fs").readFileSync(fileURLToPath(url)),
