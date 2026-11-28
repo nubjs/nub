@@ -243,13 +243,14 @@ fn a_commonjs_entry_requires_an_es_module_on_the_compat_tier() {
     }
 }
 
-/// On the compat tier (22.13), Nub's fetch-handler pass waits in the loader thread for
-/// Node to load the entry before its own `import()` of it is answered, and nothing else
-/// waits. A preload that awaits an `import()` of the entry runs it, as on plain Node:
-/// Node awaits that preload before it imports the entry, so holding the preload's import
-/// back left the run to exit 0 with neither module's output. A hook from the configured
-/// preload that holds Node's resolve of the entry for 1.5 seconds after Nub's has
-/// answered it still leaves a CommonJS entry the main module.
+/// On the compat tier (22.13), Nub's fetch-handler pass imports the entry only once the
+/// loader thread has seen Node load it, and nothing else waits. A preload that awaits an
+/// `import()` of the entry runs it, as on plain Node: Node awaits that preload before it
+/// imports the entry, so holding the preload's import back left the run to exit 0 with
+/// neither module's output. A hook from the configured preload that holds Node's resolve
+/// of the entry for 1.5 seconds after Nub's has answered it still leaves a CommonJS
+/// entry the main module, and an ES module server whose timer keeps the loop busy still
+/// binds.
 #[test]
 fn an_early_import_of_the_entry_neither_stalls_startup_nor_takes_the_main_module() {
     let Some(node_dir) = std::env::var_os("TEST_NODE_BIN_22_13_0").map(PathBuf::from) else {
@@ -292,6 +293,67 @@ fn an_early_import_of_the_entry_neither_stalls_startup_nor_takes_the_main_module
     write(root, "main.cjs", "console.log(require.main === module);\n");
     let out = run(root, Some(&node_dir), false, "main.cjs");
     assert_eq!(stdout(&out, "a configured preload's resolve hook"), "true");
+
+    write(
+        root,
+        "server.mjs",
+        "setInterval(() => {}, 1000);\nexport default { fetch: () => new Response('served') };\n",
+    );
+    assert!(
+        binds(root, &node_dir, "server.mjs"),
+        "a server behind a configured preload's slow resolve hook never bound"
+    );
+}
+
+/// `nub <entry>` on `PORT=0` reports a listener within 30 seconds. The process is
+/// killed either way.
+fn binds(root: &Path, node_dir: &Path, entry: &str) -> bool {
+    use std::io::BufRead;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs = vec![node_dir.to_path_buf()];
+    dirs.extend(std::env::split_paths(&path));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_nub"))
+        .arg(entry)
+        .current_dir(root)
+        .env("PATH", std::env::join_paths(dirs).unwrap())
+        .env("PORT", "0")
+        .env("XDG_CACHE_HOME", root.join(".cache"))
+        .env_remove("HOST")
+        .env_remove("NODE_COMPAT")
+        .env_remove("NODE_OPTIONS")
+        .env_remove("__NUB_RUNTIME_CONFIG")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (send, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut bound = false;
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match lines.recv_timeout(left) {
+            Ok(line) if line.contains("Listening on") => {
+                bound = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    bound
 }
 
 /// `nub` and (on Unix) the standalone loader, on each pinned Node and, when
@@ -318,7 +380,8 @@ fn legs(path_node: bool) -> Vec<(String, Option<PathBuf>, bool)> {
 
 /// A dynamic `import()` takes what the real `import()` loads: its attributes, the
 /// package's `import` target, and an ES module's own namespace, here one that
-/// default-exports the CommonJS module its package's `require` target names. JSON that
+/// default-exports the CommonJS module its package's `require` target names, even
+/// beside an export of its own under a name that module also exports. JSON that
 /// both conditions name, through a package's `exports` or the project's `imports`,
 /// comes back as `require()` returns it, but an ES module target that imports the
 /// `require` target's JSON without an attribute still fails as it does under Node. A
@@ -401,11 +464,23 @@ export const named = 'esm';
   const counter: any = await import("./counter.cjs");
   counter.bump();
   const again: any = await import("./counter.cjs");
+  const clash: any = await import("clash");
   const jsondep = await import("jsondep").then(() => "loaded", (e: any) => e.code);
-  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, jsondep);
+  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, clash.value, jsondep);
 }
 main();
 "##,
+    );
+    write(
+        root,
+        "node_modules/clash/package.json",
+        r#"{"name":"clash","exports":{"import":"./wrapper.mjs","require":"./index.cjs"}}"#,
+    );
+    write(root, "node_modules/clash/index.cjs", "exports.value = 1;\n");
+    write(
+        root,
+        "node_modules/clash/wrapper.mjs",
+        "import cjs from './index.cjs';\nexport default cjs;\nexport const value = 42;\n",
     );
     write(
         root,
@@ -461,7 +536,7 @@ if (mod.registerHooks) {
         let out = run(root, node_dir.as_deref(), standalone, "main.ts");
         assert_eq!(
             stdout(&out, &what),
-            "string index.mjs esm cjs dataset 1 2 ERR_IMPORT_ATTRIBUTE_MISSING",
+            "string index.mjs esm cjs dataset 1 2 42 ERR_IMPORT_ATTRIBUTE_MISSING",
             "{what}"
         );
         // Under a user hook the standalone runner hands a TypeScript entry a `require`

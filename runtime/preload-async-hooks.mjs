@@ -31,6 +31,7 @@ import {
   TRANSPILE_EXTS, PLAIN_JS_EXTS, CLOBBER_MAP, dataExtsFor,
   extname, isFileUrl, resolveSpec, nextResolveContext, resolveRedirectAsync, outDirSourceURL, loadTranspile, maybeTranspilePlainJs, loadData, loadTextImport, isDependency,
   noteRuntimeV8FlagSource, outerHookOwnsFormat, explainMappedExtension,
+  importTargetQuestion, importTargetAnswer,
 } from "./transform-core.mjs";
 import { createRequire, isBuiltin } from "node:module";
 import { existsSync } from "node:fs";
@@ -77,9 +78,9 @@ const __pnp = (() => {
 //
 // `{ entryLoad: { port, urls } }` is the main thread waiting to learn that Node has
 // started loading the program entry (preload-common.cjs `noteEntryLoad`): its
-// fetch-handler pass may not `import()` the entry while a preload could still be
-// pending, and this worker is the only place that tier can see the entry go by.
-// Sent only when that wait is actually needed, and answered exactly once.
+// fetch-handler pass may not `import()` the entry before Node has made the entry's
+// module job, and this worker is the only place that tier can see the entry go by.
+// Answered exactly once.
 let entryLoad = null;
 let utilRateShimsEnabled = true;
 
@@ -94,36 +95,12 @@ let utilRateShimsEnabled = true;
 let cjsEntryHandoff = false;
 let mainEntryUrl;
 
-// `{ entryInspect: { urls, parentURL } }` names the program entry and the module the
-// main thread's fetch-handler pass imports it from. That import can reach this worker
-// before Node's own import of the entry has made its module job, and Node hands the
-// job to whichever resolve it hears back from first: the pass's would make the entry
-// a module that is not the main, so a CommonJS entry would have no `require.main`.
-// So the pass's resolve of the entry is answered only once Node asks to load it, which
-// Node does only after making the job. Nub's own resolve returning is not that point:
-// a hook registered after Nub's still holds the answer, and Node still has to receive
-// it. Only the pass's request waits: a preload's own `import()` of the entry carries
-// that preload as its parent and goes straight through, as under plain Node, and Node
-// awaits such a preload before it imports the entry, so holding it would hang startup.
-// Nothing but that request lets the pass through (`entryJobMade`).
-let entryInspect = null;
 const { resolveUtilRateFacade } = createRequire(import.meta.url)("./util/rate.cjs");
 
 export async function initialize(data) {
   if (data && data.standaloneLoader) CLOBBER_MAP.clear();
   if (data && data.standaloneLoader) utilRateShimsEnabled = false;
   if (data && data.classicCjs) cjsEntryHandoff = true;
-  if (data && data.entryInspect) {
-    let release;
-    const loaded = new Promise((r) => { release = r; });
-    entryInspect = {
-      urls: new Set(data.entryInspect.urls),
-      parentURL: data.entryInspect.parentURL,
-      mainResolved: false,
-      loaded,
-      release,
-    };
-  }
   if (data && data.entryLoad) {
     entryLoad = {
       port: data.entryLoad.port,
@@ -144,34 +121,16 @@ function withoutQuery(url) {
 
 // ── Resolve hook ────────────────────────────────────────────────────
 export async function resolve(specifier, context, nextResolve) {
-  const parentless = context.parentURL === undefined;
-  if (entryInspect !== null && (parentless || context.parentURL === entryInspect.parentURL) &&
-      entryInspect.urls.has(withoutQuery(String(specifier)))) {
-    if (parentless) entryInspect.mainResolved = true;
-    else await entryJobMade(entryInspect);
+  const asked = importTargetQuestion(specifier);
+  if (asked !== null) {
+    const target = await resolve(asked[0], { ...context, parentURL: asked[1] }, nextResolve);
+    return { url: importTargetAnswer(target.url), shortCircuit: true };
   }
   const result = await resolveInner(specifier, context, nextResolve);
-  if (cjsEntryHandoff && mainEntryUrl === undefined && parentless) {
+  if (cjsEntryHandoff && mainEntryUrl === undefined && context.parentURL === undefined) {
     mainEntryUrl = result?.url ?? null;
   }
   return result;
-}
-
-// Settles once Node asks to load the entry. A resolve still waiting after a second is
-// refused rather than answered, so a slow hook can hold the pass back but never hand it
-// the entry's job, and the main thread leaves the entry to its later triggers. The
-// timer is also what keeps this thread awake while it waits: Node answers every request
-// still open when the thread falls idle with a promise that never settles.
-function entryJobMade(inspect) {
-  let timer;
-  const late = new Promise((_, reject) => {
-    timer = setTimeout(() => {
-      const err = new Error("Node has not loaded the entry yet");
-      err.code = "ERR_NUB_ENTRY_NOT_LOADED";
-      reject(err);
-    }, 1000);
-  });
-  return Promise.race([inspect.loaded, late]).finally(() => clearTimeout(timer));
 }
 
 async function resolveInner(specifier, context, nextResolve) {
@@ -220,10 +179,6 @@ async function resolveInner(specifier, context, nextResolve) {
 // see transform-core `noteRuntimeV8FlagSource`. Awaited here because the
 // `nextLoad` branch of loadInner hands back a promise on this tier.
 export async function load(url, context, nextLoad) {
-  if (entryInspect !== null && entryInspect.mainResolved && entryInspect.urls.has(withoutQuery(url))) {
-    entryInspect.release();
-    entryInspect = null;
-  }
   if (entryLoad !== null && entryLoad.mainResolved && entryLoad.urls.has(withoutQuery(url))) {
     const { port } = entryLoad;
     entryLoad = null;

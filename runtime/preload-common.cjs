@@ -835,6 +835,11 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
   const { resolveUtilRateFacade } = require("./util/rate.cjs");
 
   function resolve(specifier, context, nextResolve) {
+    const asked = core.importTargetQuestion(specifier);
+    if (asked !== null) {
+      const target = resolve(asked[0], { ...context, parentURL: asked[1] }, nextResolve);
+      return { url: core.importTargetAnswer(target.url), shortCircuit: true };
+    }
     // The fetch-handler pass tells the entry's own load from a preload's import of
     // the same file by Node resolving it first as the main, with no parent.
     noteEntryResolve(specifier, context);
@@ -2239,7 +2244,8 @@ const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
 
 // The entry this process was marked to serve, from `claimServeEntry` on: the file as
 // Node resolved it, the URLs a load hook may see it under, whether a preload may
-// still follow nub's own, and the state the late pass waits on — whether a hook has
+// still follow nub's own, whether a loader worker will announce the entry's load,
+// and the state the late pass waits on — whether a hook has
 // seen Node resolve the entry as its main and then start loading it, the URL it saw
 // it loaded under, and what to run when one does. Null in every process that is not
 // the marked application.
@@ -2263,6 +2269,7 @@ function claimServeEntry() {
     file,
     urls: entryUrls(file),
     mayFollow: anotherPreloadMayFollow(),
+    loadWatched: false,
     taken: false,
     mainResolved: false,
     loadSeen: false,
@@ -2283,7 +2290,8 @@ function claimServeEntry() {
 //   1. The first pass, which reads a CommonJS entry straight off `process.mainModule`
 //      and imports NOTHING. It may only `import()` when no preload can still follow
 //      nub's own (`anotherPreloadMayFollow`), or when a hook has already seen Node
-//      start loading the entry. WHEN it runs differs by tier, and the difference is
+//      start loading the entry. Where the hooks run in a loader worker it always waits
+//      for the second (`loaderWorkerOptions`). WHEN it runs differs by tier, and the difference is
 //      what user code can see of it. A `--require` preload runs before Node calls
 //      `Module.runMain`, which loads a CommonJS entry synchronously, so the fast tier
 //      wraps that call once and runs the pass as it returns: a CommonJS entry is
@@ -2334,7 +2342,7 @@ function installServeEntry(beforeMain) {
     return serveEntryIfHandler(entry, true).then(() => closeEntryChannel(entry)).catch(report);
   };
   const pass = () =>
-    serveEntryIfHandler(entry, entry.loadSeen || !entry.mayFollow)
+    serveEntryIfHandler(entry, entry.loadSeen || !(entry.mayFollow || entry.loadWatched))
       .then((deferred) => {
         if (!deferred) {
           closeEntryChannel(entry);
@@ -2438,25 +2446,15 @@ function fireEntryLoad(entry) {
 }
 
 // For `registerLoaderWorker`, on the tiers whose hooks run in a loader worker: the
-// port that worker announces the entry's load on, or nothing. Created only when the
-// pass will have to wait for that announcement, because the port is a handle the
-// process carries until the entry loads and an ordinary run should carry nothing.
-// `data` is merged into what the worker's `initialize` receives.
-//
-// The entry's URLs go along either way, with the URL the pass imports it from. The
-// first pass's `import()` of the entry can reach the worker before Node's own import
-// has made the entry's module job, and the job goes to whichever resolve is answered
-// first: the pass's would make the entry a module that is not the main, with no
-// `require.main` for a CommonJS one. The worker answers it only once Node asks to
-// load the entry (preload-async-hooks.mjs).
+// port that worker announces the entry's load on, created whenever this process may
+// serve its entry. The pass waits for that announcement before it imports the entry:
+// an `import()` that reached the worker first could be answered before Node's own
+// import of the entry, and the module job goes to whichever answer Node gets first,
+// so the entry would load as a module that is not the main, with no `require.main`
+// for a CommonJS one. `data` is merged into what the worker's `initialize` receives.
 function loaderWorkerOptions(data) {
   const entry = serveEntry;
   if (entry === null) return data ? { data } : undefined;
-  data = {
-    ...data,
-    entryInspect: { urls: [...entry.urls], parentURL: pathToFileURL(__filename).href },
-  };
-  if (!entry.mayFollow) return { data };
   const { MessageChannel } = getBuiltin("node:worker_threads");
   const channel = new MessageChannel();
   // The worker keeps the main-resolve note itself and announces only a load after
@@ -2469,6 +2467,7 @@ function loaderWorkerOptions(data) {
   // open — see the triggers above `installServeEntry`.
   channel.port1.unref();
   entry.channel = channel;
+  entry.loadWatched = true;
   return {
     data: { ...data, entryLoad: { port: channel.port2, urls: [...entry.urls] } },
     transferList: [channel.port2],
@@ -2598,13 +2597,7 @@ async function serveEntryIfHandler(entry, mayImport) {
   let ns;
   try {
     ns = await import(entry.loadUrl ?? pathToFileURL(entry.file).href);
-  } catch (err) {
-    // The loader thread refused the import before Node had made the entry's module
-    // job (preload-async-hooks.mjs `entryJobMade`), so the later triggers take it.
-    if (err?.code === "ERR_NUB_ENTRY_NOT_LOADED") {
-      entry.taken = false;
-      return true;
-    }
+  } catch {
     // The entry threw. Node has already reported that as an uncaught error, and this
     // is the same failure observed a second time, so it is dropped rather than
     // doubling the report.

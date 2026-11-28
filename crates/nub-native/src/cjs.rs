@@ -178,51 +178,37 @@ const IMPORT_DEFAULT: &str = r#"var __importDefault = (this && this.__importDefa
 };"#;
 
 /// `import(specifier)`, observed as `tsc`'s `require()` where the two load the same
-/// thing. With import attributes it is the real `import()`, untouched. Without, a
-/// builtin is required. Anything else is imported, and the namespace is unwrapped to
-/// the CommonJS `module.exports` only when it is Node's facade for the module
-/// `require.resolve` names. The facade is told from an ES module that default-exports
-/// the same object by which names it exports, never by their values, which Node copies
-/// once and a later write leaves behind, and never by a second `import()` of the file,
-/// which would run whatever a hook makes of that request. From Node 23 the facade
-/// exports `module.exports`; before that it exports no name the CommonJS module lacks,
-/// which an ES module exporting only that `default` matches too. When `import()`
-/// refuses JSON for want of an attribute, the file it names is required if
-/// `require.resolve` names it too and it is the import target itself: a JSON module
-/// imports nothing, so the target is that file only if it imports as JSON once given
-/// the attribute (as `assert` too, the only key Node 18 reads), and an ES module that imports the file is refused that attribute
-/// before it runs. The cache is read off `node:module`, since the `require` Node hands
-/// an entry loaded with a hook's source has no `cache`. `WRAP` is `__importStar` under
+/// file. With import attributes it is the real `import()`, untouched. Without, a
+/// builtin is required. Otherwise the helper first asks the loader which URL the
+/// import loads, with a request both hook tiers answer (transform-core
+/// `importTargetQuestion`) and that without them is a module whose default is null.
+/// When that URL is the file `require.resolve` names, a JSON file is required, as
+/// `import()` would refuse it without an attribute, and a module that ran as CommonJS
+/// comes back as its live `module.exports`. Anything else comes back as the import's
+/// namespace: an ES module has no loaded cache entry (24.8 leaves an empty one), or
+/// one whose `exports` is that namespace once `require()` has loaded it. The cache is
+/// read off `node:module`, since the `require` Node hands an entry loaded with a
+/// hook's source has no `cache`. `WRAP` is `__importStar` under
 /// `esModuleInterop`, else nothing.
 const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, options) {
     if (arguments.length > 1) return import(specifier, options);
     var id;
     try { id = require.resolve(specifier); } catch (e) {}
-    if (id !== undefined && require("node:module").isBuiltin(id)) {
-        return Promise.resolve().then(function () { return WRAP(require(id)); });
-    }
-    var facade = function (ns, exp) {
-        if (ns.default !== exp) return false;
-        if (parseInt(require("node:process").versions.node, 10) >= 23) return ns["module.exports"] === exp;
-        var keys = Object.keys(ns);
-        var object = exp !== null && (typeof exp === "object" || typeof exp === "function");
-        for (var i = 0; i < keys.length; i++) {
-            if (keys[i] !== "default" && !(object && keys[i] in exp)) return false;
-        }
-        return true;
-    };
-    return import(specifier).then(function (ns) {
-        var m = id !== undefined && require("node:module")._cache[id];
-        return m && facade(ns, m.exports) ? WRAP(m.exports) : ns;
-    }, function (e) {
-        if (id === undefined || !/\.json$/i.test(id) || !e ||
-            !/^ERR_IMPORT_(ATTRIBUTE|ASSERTION_TYPE)_MISSING$/.test(e.code) ||
-            String(e.message).indexOf('"' + require("node:url").pathToFileURL(id).href + '"') === -1) {
-            throw e;
-        }
-        return import(specifier, { with: { type: "json" }, assert: { type: "json" } }).then(function () {
-            return WRAP(require(id));
-        }, function () { throw e; });
+    if (id === undefined) return import(specifier);
+    var mod = require("node:module"), url = require("node:url");
+    if (mod.isBuiltin(id)) return Promise.resolve().then(function () { return WRAP(require(id)); });
+    var question = JSON.stringify([specifier, url.pathToFileURL(__filename).href]);
+    return import("data:text/javascript,export default null//import-target:" + encodeURIComponent(question)).then(function (ns) {
+        return ns.default;
+    }, function () {
+        return null;
+    }).then(function (target) {
+        var same = typeof target === "string" && target === url.pathToFileURL(id).href;
+        if (same && /\.json$/i.test(id)) return WRAP(require(id));
+        return import(specifier).then(function (ns) {
+            var m = same && mod._cache[id];
+            return m && m.loaded && m.exports !== ns ? WRAP(m.exports) : ns;
+        });
     });
 };"#;
 

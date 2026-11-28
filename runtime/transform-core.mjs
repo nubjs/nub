@@ -975,6 +975,27 @@ export function emitsCommonJs(url) {
   return tsconfigEmitsCommonJs(ext, getPackageType(dirname(filePath)), filePath);
 }
 
+// The question CommonJS output's dynamic `import()` asks before it imports
+// (nub-native `cjs.rs` `IMPORT_DYNAMIC`): which URL does `import(specifier)` from
+// `parentURL` load? Both hook tiers answer it with a module whose default is that
+// URL, resolved the way the real import is. Without Nub's hooks the request is an
+// ordinary module whose default is null. Must match the prefix in `cjs.rs`.
+const IMPORT_TARGET = "data:text/javascript,export default null//import-target:";
+export function importTargetQuestion(specifier) {
+  if (typeof specifier !== "string" || !specifier.startsWith(IMPORT_TARGET)) return null;
+  try {
+    const asked = JSON.parse(decodeURIComponent(specifier.slice(IMPORT_TARGET.length)));
+    return Array.isArray(asked) && typeof asked[0] === "string" && typeof asked[1] === "string"
+      ? asked
+      : null;
+  } catch {
+    return null;
+  }
+}
+export function importTargetAnswer(url) {
+  return `data:text/javascript,export default ${encodeURIComponent(JSON.stringify(url))}`;
+}
+
 // `esModuleInterop` as `tsc` applies it to this project. An explicit value wins.
 // Absent, its default depends on the compiler: TypeScript 6 turned it on, and 5
 // and earlier left it off, so the project's own `typescript` decides, read from
