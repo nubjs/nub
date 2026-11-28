@@ -1129,6 +1129,23 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
           if (recovered) return recovered;
         }
       }
+      // A user `module.register` loader answers a CommonJS file with no source, and
+      // where the sync validator is strict that answer throws on its way back to this
+      // hook; plain Node, with no sync hook, loads the file through its CommonJS
+      // loader. `commonjs-sync` is that loader: it reads the file itself and keeps a
+      // real `require.cache`, and the source only names its exports. The rejected
+      // result never reaches this hook, so the file's own format by Node's rules stands
+      // in for the one it declared: a JSON or ES module file keeps the error plain Node
+      // raises for its missing source, whatever `resolve` hinted.
+      if (nodeLoadValidatorStrict() && err && err.code === "ERR_INVALID_RETURN_PROPERTY_VALUE" &&
+          RegExpPrototypeTest(ASYNC_TIER_NO_SOURCE, err.message) &&
+          core.nodeFileFormat(url) === "commonjs") {
+        return {
+          format: "commonjs-sync",
+          source: getBuiltin("node:fs").readFileSync(fileURLToPath(url)),
+          shortCircuit: true,
+        };
+      }
       core.explainMappedExtension(err, url);
       throw err;
     }
