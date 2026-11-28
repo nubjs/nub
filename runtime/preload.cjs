@@ -165,7 +165,15 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
   // process.features.typescript is still false) — so it must stay off here. On
   // 22.18+/24+ this was already the behavior (native-TS → false); now it's uniform.
   const { resolve, load } = common.makeHooks(core, watchReporting);
-  module_.registerHooks({ resolve, load });
+  // A user's `module.register` starts Node's hook thread, and Node runs the
+  // NODE_OPTIONS `--require` preloads there too. Through 22.23, 24.11 and 25.1
+  // (`nodeHookComposeBroken`), sync hooks registered in that thread throw on its first
+  // load, the thread dies, and the program exits 1 with no output; plain Node with one
+  // pass-through `registerHooks` there does the same. Nub registers none there, so the
+  // user's hook module loads as it does under plain Node.
+  if (!(require("node:worker_threads").isInternalThread && common.nodeHookComposeBroken())) {
+    module_.registerHooks({ resolve, load });
+  }
   common.installCjsRequireHooks(core, false);
   // NOTE: no Yarn `.pnp.loader.mjs` registration. nub's own `resolve` hook already
   // routes PnP specifiers through `pnpapi.resolveRequest` (see makeHooks /
