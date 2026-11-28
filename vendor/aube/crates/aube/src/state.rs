@@ -1294,9 +1294,11 @@ pub fn read_state_startup_snapshot(project_dir: &Path) -> Option<StartupStateSna
 /// Read the installed layout snapshot used by the install warm path.
 ///
 /// Missing layout state means the install predates layout tracking and
-/// should take the normal path once to refresh derived metadata.
+/// should take the normal path once to refresh derived metadata. Read-only:
+/// `store status` reads every registered project's layout and must not run
+/// another project's legacy-state cleanup.
 pub fn read_state_layout(project_dir: &Path) -> Option<InstallLayoutState> {
-    read_state(&state_dir(project_dir))?.layout
+    parse_state(&state_dir(project_dir))?.layout
 }
 
 /// Persist the exact hoisted tree produced by the linker. This is a separate
@@ -1629,6 +1631,10 @@ fn read_state(state_path: &Path) -> Option<InstallState> {
         let _ = std::fs::remove_file(state_path);
         return None;
     }
+    parse_state(state_path)
+}
+
+fn parse_state(state_path: &Path) -> Option<InstallState> {
     let content = std::fs::read_to_string(install_state_file(state_path)).ok()?;
     serde_json::from_str(&content).ok()
 }

@@ -1449,3 +1449,41 @@ fn stage_is_an_unknown_command_not_an_npm_only_fallback() {
         "stage must not be an npm-only fallback: {stderr}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn store_status_checks_bundled_dependencies_in_the_declaring_variant() {
+    let ctx = Ctx::new("store-status", MANIFEST);
+    let status = || ctx.run(&["store", "status"]);
+    assert_eq!(status().2, 0);
+    let root = ctx.home.join("xdg-cache/nub/pm/store/v1");
+    let modules = root.join("broken/node_modules");
+    let parent = modules.join("parent");
+    let child = parent.join("node_modules/child");
+    let target = root.join("other/node_modules/@scope/dep");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&child).unwrap();
+    std::fs::write(
+        parent.join("package.json"),
+        r#"{"dependencies":{"child":"1","removed":"1","platform":"1"},"optionalDependencies":{"platform":"1"}}"#,
+    )
+    .unwrap();
+    std::fs::write(child.join("package.json"), r#"{"dependencies":{"@scope/dep":"1","optional":"1"},"optionalDependencies":{"optional":"1"}}"#).unwrap();
+    std::fs::create_dir_all(modules.join("@scope")).unwrap();
+    let link = modules.join("@scope/dep");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    let (stdout, _, code) = status();
+    assert_ne!(code, 0);
+    assert!(
+        stdout.contains(
+            "broken/node_modules/parent/node_modules/child: missing dependency @scope/dep"
+        ),
+        "{stdout}"
+    );
+    std::os::unix::fs::symlink(target.join("missing"), &link).unwrap();
+    assert_ne!(status().2, 0);
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(target, link).unwrap();
+    assert_eq!(status().2, 0);
+}
