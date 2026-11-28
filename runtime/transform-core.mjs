@@ -977,9 +977,10 @@ export function emitsCommonJs(url) {
 
 // The question CommonJS output's dynamic `import()` asks before it imports
 // (nub-native `cjs.rs` `IMPORT_DYNAMIC`): which URL does `import(specifier)` from
-// `parentURL` load? Both hook tiers answer it with a module whose default is that
-// URL, resolved the way the real import is. Without Nub's hooks the request is an
-// ordinary module whose default is null. Must match the prefix in `cjs.rs`.
+// `parentURL` load, and in which format? Both hook tiers answer it with a module whose
+// default is `{ url, format }`, the URL resolved the way the real import is and the
+// format the load gives that file. Without Nub's hooks the request is an ordinary
+// module whose default is null. Must match the prefix in `cjs.rs`.
 const IMPORT_TARGET = "data:text/javascript,export default null//import-target:";
 export function importTargetQuestion(specifier) {
   if (typeof specifier !== "string" || !specifier.startsWith(IMPORT_TARGET)) return null;
@@ -993,7 +994,19 @@ export function importTargetQuestion(specifier) {
   }
 }
 export function importTargetAnswer(url) {
-  return `data:text/javascript,export default ${encodeURIComponent(JSON.stringify(url))}`;
+  let format = null;
+  if (isFileUrl(url)) {
+    const filePath = fileURLToPath(url);
+    const ext = extname(url);
+    if (ext === ".json") format = "json";
+    else if (TRANSPILE_EXTS.has(ext) || PLAIN_JS_EXTS.has(ext)) {
+      try {
+        const source = readFileSync(filePath, "utf8");
+        format = moduleFormatFor(ext, getPackageType(dirname(filePath)), filePath, source);
+      } catch { /* unreadable: the import reports it */ }
+    }
+  }
+  return `data:text/javascript,export default ${encodeURIComponent(JSON.stringify({ url, format }))}`;
 }
 
 // `esModuleInterop` as `tsc` applies it to this project. An explicit value wins.

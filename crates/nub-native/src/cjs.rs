@@ -180,15 +180,14 @@ const IMPORT_DEFAULT: &str = r#"var __importDefault = (this && this.__importDefa
 /// `import(specifier)`, observed as `tsc`'s `require()` where the two load the same
 /// file. With import attributes it is the real `import()`, untouched. Without, a
 /// builtin is required. Otherwise the helper first asks the loader which URL the
-/// import loads, with a request both hook tiers answer (transform-core
-/// `importTargetQuestion`) and that without them is a module whose default is null.
-/// When that URL is the file `require.resolve` names, a JSON file is required, as
-/// `import()` would refuse it without an attribute, and a module that ran as CommonJS
+/// import loads and in which format, with a request both hook tiers answer
+/// (transform-core `importTargetQuestion`) and that without them is a module whose
+/// default is null. When that URL is the file `require.resolve` names, a JSON file is
+/// required, as `import()` would refuse it without an attribute, and a CommonJS module
 /// comes back as its live `module.exports`. Anything else comes back as the import's
-/// namespace: an ES module has no loaded cache entry (24.8 leaves an empty one), or
-/// one whose `exports` is that namespace once `require()` has loaded it. The cache is
-/// read off `node:module`, since the `require` Node hands an entry loaded with a
-/// hook's source has no `cache`. `WRAP` is `__importStar` under
+/// namespace, an ES module that `require()` cached under its `module.exports` export
+/// included. The cache is read off `node:module`, since the `require` Node hands an
+/// entry loaded with a hook's source has no `cache`. `WRAP` is `__importStar` under
 /// `esModuleInterop`, else nothing.
 const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, options) {
     if (arguments.length > 1) return import(specifier, options);
@@ -203,11 +202,11 @@ const IMPORT_DYNAMIC: &str = r#"var __importDynamic = function (specifier, optio
     }, function () {
         return null;
     }).then(function (target) {
-        var same = typeof target === "string" && target === url.pathToFileURL(id).href;
-        if (same && /\.json$/i.test(id)) return WRAP(require(id));
+        var format = target && target.url === url.pathToFileURL(id).href ? target.format : null;
+        if (format === "json") return WRAP(require(id));
         return import(specifier).then(function (ns) {
-            var m = same && mod._cache[id];
-            return m && m.loaded && m.exports !== ns ? WRAP(m.exports) : ns;
+            var m = format === "commonjs" && mod._cache[id];
+            return m && m.loaded ? WRAP(m.exports) : ns;
         });
     });
 };"#;

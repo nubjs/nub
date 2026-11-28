@@ -381,7 +381,8 @@ fn legs(path_node: bool) -> Vec<(String, Option<PathBuf>, bool)> {
 /// A dynamic `import()` takes what the real `import()` loads: its attributes, the
 /// package's `import` target, and an ES module's own namespace, here one that
 /// default-exports the CommonJS module its package's `require` target names, even
-/// beside an export of its own under a name that module also exports. JSON that
+/// beside an export of its own under a name that module also exports, and an ES module
+/// that `require()` has already loaded under its `module.exports` export. JSON that
 /// both conditions name, through a package's `exports` or the project's `imports`,
 /// comes back as `require()` returns it, but an ES module target that imports the
 /// `require` target's JSON without an attribute still fails as it does under Node. A
@@ -465,8 +466,10 @@ export const named = 'esm';
   counter.bump();
   const again: any = await import("./counter.cjs");
   const clash: any = await import("clash");
+  require("./override.mjs");
+  const override: any = await import("./override.mjs");
   const jsondep = await import("jsondep").then(() => "loaded", (e: any) => e.code);
-  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, clash.value, jsondep);
+  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, clash.value, override.named, jsondep);
 }
 main();
 "##,
@@ -481,6 +484,11 @@ main();
         root,
         "node_modules/clash/wrapper.mjs",
         "import cjs from './index.cjs';\nexport default cjs;\nexport const value = 42;\n",
+    );
+    write(
+        root,
+        "override.mjs",
+        "const x = { named: 'require override' };\nexport default x;\nexport const named = 'namespace';\nexport { x as 'module.exports' };\n",
     );
     write(
         root,
@@ -536,7 +544,7 @@ if (mod.registerHooks) {
         let out = run(root, node_dir.as_deref(), standalone, "main.ts");
         assert_eq!(
             stdout(&out, &what),
-            "string index.mjs esm cjs dataset 1 2 42 ERR_IMPORT_ATTRIBUTE_MISSING",
+            "string index.mjs esm cjs dataset 1 2 42 namespace ERR_IMPORT_ATTRIBUTE_MISSING",
             "{what}"
         );
         // Under a user hook the standalone runner hands a TypeScript entry a `require`
