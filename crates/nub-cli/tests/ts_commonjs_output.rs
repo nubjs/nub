@@ -471,8 +471,10 @@ export const named = 'esm';
   const clash: any = await import("clash");
   require("./override.mjs");
   const override: any = await import("./override.mjs");
+  require("./cjs/node_modules/loose/entry");
+  const loose: any = await import("./cjs/node_modules/loose/entry");
   const jsondep = await import("jsondep").then(() => "loaded", (e: any) => e.code);
-  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, typelessAgain.value, clash.value, override.named, jsondep);
+  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, typelessAgain.value, clash.value, override.named, loose.named, jsondep);
 }
 main();
 "##,
@@ -509,6 +511,13 @@ main();
         r#"{"from":"jsondep"}"#,
     );
     write(root, "cjs/package.json", r#"{"type":"commonjs"}"#);
+    // No package.json of its own, and Node's package scope stops at `node_modules`, so
+    // the `cjs` package's type does not reach it and its syntax makes it an ES module.
+    write(
+        root,
+        "cjs/node_modules/loose/entry",
+        "const x = { named: 'override' };\nexport const named = 'namespace';\nexport { x as 'module.exports' };\n",
+    );
     write(
         root,
         "cjs/counter",
@@ -553,7 +562,7 @@ if (mod.registerHooks) {
         let out = run(root, node_dir.as_deref(), standalone, "main.ts");
         assert_eq!(
             stdout(&out, &what),
-            "string index.mjs esm cjs dataset 1 2 2 42 namespace ERR_IMPORT_ATTRIBUTE_MISSING",
+            "string index.mjs esm cjs dataset 1 2 2 42 namespace namespace ERR_IMPORT_ATTRIBUTE_MISSING",
             "{what}"
         );
         // Under a user hook the standalone runner hands a TypeScript entry a `require`
