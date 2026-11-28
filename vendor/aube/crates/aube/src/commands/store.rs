@@ -1458,6 +1458,129 @@ fn json_path(path: std::path::PathBuf) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn physical_dir(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(md) => Ok(md.is_dir()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn installed_name(name: &str) -> bool {
+    let valid =
+        |s: &str| !s.is_empty() && !s.starts_with('.') && !s.contains(['/', '\\', ':', '\0']);
+    match name.strip_prefix('@') {
+        Some(scoped) => scoped
+            .split_once('/')
+            .is_some_and(|(scope, pkg)| valid(scope) && valid(pkg)),
+        None => valid(name),
+    }
+}
+
+fn dependency_visible(pkg: &Path, variant: &Path, dep: &str) -> std::io::Result<bool> {
+    for ancestor in pkg.ancestors().take_while(|p| Some(*p) != variant.parent()) {
+        if ancestor.ends_with("node_modules") {
+            continue;
+        }
+        match std::fs::metadata(ancestor.join("node_modules").join(dep)) {
+            Ok(md) if md.is_dir() => {
+                return Ok(true);
+            }
+            Ok(_) => (),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                ()
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
+fn read_store_manifest(path: &Path) -> std::io::Result<serde_json::Value> {
+    use std::io::{BufReader, Error, ErrorKind};
+
+    if !std::fs::symlink_metadata(path)?.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "expected a regular file",
+        ));
+    }
+    let mut options = std::fs::File::options();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "expected a regular file",
+        ));
+    }
+    Ok(serde_json::from_reader(BufReader::new(file))?)
+}
+
+fn check_modules(
+    dir: &Path,
+    variant: &Path,
+    scope: bool,
+    bundled: bool,
+    broken: &mut Vec<String>,
+) -> miette::Result<()> {
+    if !physical_dir(dir).into_diagnostic()? {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir).into_diagnostic()? {
+        let entry = entry.into_diagnostic()?;
+        let pkg = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || !physical_dir(&pkg).into_diagnostic()? {
+            continue;
+        }
+        if !scope && name.starts_with('@') {
+            check_modules(&pkg, variant, true, bundled, broken)?;
+            continue;
+        }
+        let path = pkg.join("package.json");
+        let manifest = match read_store_manifest(&path) {
+            Ok(manifest) => manifest,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                broken.push(format!("{}: {e}", path.display()));
+                check_modules(&pkg.join("node_modules"), variant, false, true, broken)?;
+                continue;
+            }
+        };
+        // Bundled packages ship inside the tarball. The installer resolves the
+        // outer package separately and records its selected links in install state.
+        if bundled && let Some(deps) = manifest["dependencies"].as_object() {
+            for dep in deps.keys() {
+                if !installed_name(dep) || manifest["optionalDependencies"].get(dep).is_some() {
+                    continue;
+                }
+                if !dependency_visible(&pkg, variant, dep).into_diagnostic()? {
+                    broken.push(format!(
+                        "{}: missing dependency {dep}",
+                        pkg.strip_prefix(variant.parent().unwrap())
+                            .unwrap()
+                            .display()
+                    ));
+                }
+            }
+        }
+        check_modules(&pkg.join("node_modules"), variant, false, true, broken)?;
+    }
+    Ok(())
+}
+
 fn status() -> miette::Result<()> {
     let store = open_store()?;
     let mut checked = 0usize;
@@ -1480,7 +1603,48 @@ fn status() -> miette::Result<()> {
         }
     })?;
 
-    if checked == 0 {
+    let root = store.virtual_store_dir();
+    if root.try_exists().into_diagnostic()? {
+        let store_root = root.canonicalize().into_diagnostic()?;
+        for project in super::gvs_registry::read_registry(&root)?.live {
+            let Some(links) = crate::state::read_state_layout(&project.project_dir)
+                .and_then(|layout| layout.gvs_nested_links)
+            else {
+                continue;
+            };
+            for link in links.keys() {
+                let path = project.project_dir.join(link);
+                let Ok(relative) = path.strip_prefix(&project.aube_dir) else {
+                    continue;
+                };
+                let Some(entry) = relative.components().next() else {
+                    continue;
+                };
+                // A project link may have been removed since state was written.
+                // Only diagnose missing dependencies inside an existing store entry.
+                if !path.is_dir()
+                    && let Ok(variant) = project.aube_dir.join(entry).canonicalize()
+                    && variant.parent() == Some(store_root.as_path())
+                {
+                    broken.push(format!("{}: missing dependency link", path.display()));
+                }
+            }
+        }
+        for name in super::gvs_registry::graph_entries(&root)? {
+            let variant = root.join(name);
+            if physical_dir(&variant).into_diagnostic()? {
+                check_modules(
+                    &variant.join("node_modules"),
+                    &variant,
+                    false,
+                    false,
+                    &mut broken,
+                )?;
+            }
+        }
+    }
+
+    if checked == 0 && broken.is_empty() {
         eprintln!("Store is consistent (no cached indices found)");
         return Ok(());
     }

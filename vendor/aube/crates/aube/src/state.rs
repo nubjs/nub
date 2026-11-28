@@ -1296,7 +1296,8 @@ pub fn read_state_startup_snapshot(project_dir: &Path) -> Option<StartupStateSna
 /// Missing layout state means the install predates layout tracking and
 /// should take the normal path once to refresh derived metadata.
 pub fn read_state_layout(project_dir: &Path) -> Option<InstallLayoutState> {
-    read_state(&state_dir(project_dir))?.layout
+    let bytes = std::fs::read(install_state_file(&state_dir(project_dir))).ok()?;
+    serde_json::from_slice::<InstallState>(&bytes).ok()?.layout
 }
 
 /// Persist the exact hoisted tree produced by the linker. This is a separate

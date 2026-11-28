@@ -367,7 +367,7 @@ fn is_graph_entry_name(name: &std::ffi::OsStr) -> bool {
     !name.starts_with('.') && name != "node_modules"
 }
 
-fn graph_entries(global_virtual_store: &Path) -> miette::Result<Vec<OsString>> {
+pub(super) fn graph_entries(global_virtual_store: &Path) -> miette::Result<Vec<OsString>> {
     let mut entries = Vec::new();
     for entry in read_dir(global_virtual_store)? {
         let name = entry.file_name();
