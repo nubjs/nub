@@ -225,7 +225,8 @@ export function arm({ esm = true, cjs = true } = {}) {
       // transform-core instance — the clear() above only reaches this realm's.
       common.installAsyncTierCjsSource();
       common.registerLoaderWorker("./preload-async-hooks.mjs", import.meta.url, {
-        data: { standaloneLoader: true },
+        // `classicCjs` matches the shim `wantCjs` installs below.
+        data: { standaloneLoader: true, classicCjs: wantCjs && !process.features?.typescript },
       });
       armed.esmMode = "worker";
     }

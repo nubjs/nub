@@ -865,6 +865,11 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
   const { resolveUtilRateFacade } = require("./util/rate.cjs");
 
   function resolve(specifier, context, nextResolve) {
+    const asked = core.importTargetQuestion(specifier);
+    if (asked !== null) {
+      const target = resolve(asked[0], { ...context, parentURL: asked[1] }, nextResolve);
+      return { url: core.importTargetAnswer(target.url), shortCircuit: true };
+    }
     // The fetch-handler pass tells the entry's own load from a preload's import of
     // the same file by Node resolving it first as the main, with no parent.
     noteEntryResolve(specifier, context);
@@ -1040,8 +1045,14 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // branch keeps its own narrower gate: a non-transpiling async loader (a
     // telemetry `--import`) must not turn a bare 'typescript' from Node's own
     // CJS loader into a step-aside.
+    //
+    // Nor does a file whose tsconfig says `"module": "commonjs"` step aside on a bare
+    // 'typescript': nub's output for it is already CommonJS, so the objection above
+    // does not apply, and Node, handed the raw source, strips it, finds `export`, and
+    // loads it again as an ES module, which nub then answers with CommonJS. On a Node
+    // that strips types by default, that second answer ran nothing and exited 0.
     if (context && (
-      (__userHooksRegistered && context.format === "typescript") ||
+      (__userHooksRegistered && context.format === "typescript" && !core.emitsCommonJs(url)) ||
       ((__userLoadHookRegistered || userAsyncLoaderActive(foreignLoaderFlagPresent)) &&
         core.outerHookOwnsFormat(context.format, ext) && !core.isDependency(url))
     )) {
@@ -1489,6 +1500,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
   // no handler for falls back to `.js` via `findLongestRegisteredExtension`, so this
   // reproduces plain Node's own error instead of inventing one nub would have to own.
   const nativeJs = module_._extensions[".js"];
+  const COMPILE_AS_COMMONJS = /^v20\.1[78]\./.test(process.version) ? false : "commonjs";
   const transpileExtension = (mod, filename) => {
     if (core.isDependency(pathToFileURL(filename).href)) {
       return ReflectApply(nativeJs, module_._extensions, [mod, filename]);
@@ -1499,8 +1511,9 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     // 22.12–22.14 run their own ES-module syntax detection on a `.ts` it has no rule
     // for, and load `export` in a `"type": "commonjs"` package as an ES module —
     // where every other tier, and Node's own type stripping, follows the package
-    // type and throws. Node versions without the parameter ignore it.
-    mod._compile(source, filename, "commonjs");
+    // type and throws. Node versions without the parameter ignore it, and 20.17–20.18
+    // take a `loadAsESM` boolean there, which the string would set.
+    mod._compile(source, filename, COMPILE_AS_COMMONJS);
   };
   // Serve a data document the way the ESM load hook's `dataExtsFor` branch does.
   // Without any handler Node has none for `.yaml`/`.toml`/`.json5`/`.jsonc`/
@@ -2265,7 +2278,8 @@ const SERVE_ENTRY_ENV = "__NUB_SERVE_ENTRY";
 
 // The entry this process was marked to serve, from `claimServeEntry` on: the file as
 // Node resolved it, the URLs a load hook may see it under, whether a preload may
-// still follow nub's own, and the state the late pass waits on — whether a hook has
+// still follow nub's own, whether a loader worker will announce the entry's load,
+// and the state the late pass waits on — whether a hook has
 // seen Node resolve the entry as its main and then start loading it, the URL it saw
 // it loaded under, and what to run when one does. Null in every process that is not
 // the marked application.
@@ -2289,6 +2303,7 @@ function claimServeEntry() {
     file,
     urls: entryUrls(file),
     mayFollow: anotherPreloadMayFollow(),
+    loadWatched: false,
     taken: false,
     mainResolved: false,
     loadSeen: false,
@@ -2309,7 +2324,8 @@ function claimServeEntry() {
 //   1. The first pass, which reads a CommonJS entry straight off `process.mainModule`
 //      and imports NOTHING. It may only `import()` when no preload can still follow
 //      nub's own (`anotherPreloadMayFollow`), or when a hook has already seen Node
-//      start loading the entry. WHEN it runs differs by tier, and the difference is
+//      start loading the entry. Where the hooks run in a loader worker it always waits
+//      for the second (`loaderWorkerOptions`). WHEN it runs differs by tier, and the difference is
 //      what user code can see of it. A `--require` preload runs before Node calls
 //      `Module.runMain`, which loads a CommonJS entry synchronously, so the fast tier
 //      wraps that call once and runs the pass as it returns: a CommonJS entry is
@@ -2360,7 +2376,7 @@ function installServeEntry(beforeMain) {
     return serveEntryIfHandler(entry, true).then(() => closeEntryChannel(entry)).catch(report);
   };
   const pass = () =>
-    serveEntryIfHandler(entry, entry.loadSeen || !entry.mayFollow)
+    serveEntryIfHandler(entry, entry.loadSeen || !(entry.mayFollow || entry.loadWatched))
       .then((deferred) => {
         if (!deferred) {
           closeEntryChannel(entry);
@@ -2464,12 +2480,15 @@ function fireEntryLoad(entry) {
 }
 
 // For `registerLoaderWorker`, on the tiers whose hooks run in a loader worker: the
-// port that worker announces the entry's load on, or nothing. Created only when the
-// pass will have to wait for that announcement, because the port is a handle the
-// process carries until the entry loads and an ordinary run should carry nothing.
-function loaderWorkerOptions() {
+// port that worker announces the entry's load on, created whenever this process may
+// serve its entry. The pass waits for that announcement before it imports the entry:
+// an `import()` that reached the worker first could be answered before Node's own
+// import of the entry, and the module job goes to whichever answer Node gets first,
+// so the entry would load as a module that is not the main, with no `require.main`
+// for a CommonJS one. `data` is merged into what the worker's `initialize` receives.
+function loaderWorkerOptions(data) {
   const entry = serveEntry;
-  if (entry === null || !entry.mayFollow) return undefined;
+  if (entry === null) return data ? { data } : undefined;
   const { MessageChannel } = getBuiltin("node:worker_threads");
   const channel = new MessageChannel();
   // The worker keeps the main-resolve note itself and announces only a load after
@@ -2482,8 +2501,9 @@ function loaderWorkerOptions() {
   // open — see the triggers above `installServeEntry`.
   channel.port1.unref();
   entry.channel = channel;
+  entry.loadWatched = true;
   return {
-    data: { entryLoad: { port: channel.port2, urls: [...entry.urls] } },
+    data: { ...data, entryLoad: { port: channel.port2, urls: [...entry.urls] } },
     transferList: [channel.port2],
   };
 }

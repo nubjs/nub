@@ -107,7 +107,7 @@ if (__isFastTier) {
   common.registerLoaderWorker(
     "./preload-async-hooks.mjs",
     import.meta.url,
-    common.loaderWorkerOptions(),
+    common.loaderWorkerOptions({ classicCjs: !__hasNativeTs }),
   );
   // (The main-thread require() shim's module-format + decorator detection is a
   // synchronous native addon call now — no parser warm-up; the old

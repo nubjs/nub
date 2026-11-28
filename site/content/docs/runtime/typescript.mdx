@@ -93,6 +93,35 @@ const letters = /\p{Letter}/v;
 
 Files inside `node_modules` are never transpiled.
 
+## CommonJS output
+
+A tsconfig that sets `"module": "commonjs"` runs `.ts` and `.tsx` files as CommonJS, the way `tsc` compiles them.
+
+```jsonc title="tsconfig.json"
+{
+  "compilerOptions": {
+    "module": "commonjs"
+  }
+}
+```
+
+Imports become `require()` calls, so `__dirname` and `require` work beside them.
+
+```ts title="server.ts"
+import path from "node:path";
+
+const publicDir = path.join(__dirname, "public");
+```
+
+These files stay ES modules:
+
+- files under a package.json with `"type": "module"`
+- `.mts` files
+
+Top-level `await` and `import.meta` have no CommonJS form, so a file that uses either stops the run with an error naming it.
+
+Default imports follow `esModuleInterop`, as in `tsc`. When the tsconfig leaves it unset, Nub uses the installed TypeScript's default, which is off in TypeScript 5 and on from 6.
+
 ## Choosing a tsconfig
 
 Nub reads the nearest `tsconfig.json` for [module resolution](/docs/runtime/resolution) and transform defaults. To have the runtime read a different file, name it in [nub.jsonc](/docs/config#tsconfig).

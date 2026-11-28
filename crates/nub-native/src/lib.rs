@@ -39,6 +39,7 @@ compile_error!(
 // that attribute asks it to, and without it the unwind finds no handler on its way
 // out of the N-API callback and aborts the host process.
 mod cache;
+mod cjs;
 mod detect;
 mod resolve;
 mod threadpool;

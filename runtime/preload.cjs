@@ -229,7 +229,8 @@ if (hasRegisterHooks && !requireEsmDisabled && !forceAsyncTier) {
     common.registerLoaderWorker(
       "./preload-async-hooks.mjs",
       pathToFileURL(__filename).href,
-      common.loaderWorkerOptions(),
+      // The classic shim below installs on entry 3 only; see preload-async-hooks.mjs.
+      common.loaderWorkerOptions({ classicCjs: !hasRegisterHooks && !!core && !process.features?.typescript }),
     );
   }
 

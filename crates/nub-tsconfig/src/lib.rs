@@ -80,6 +80,12 @@ pub struct TsCompilerOptions {
     pub jsx_fragment_factory: Option<String>,
     pub experimental_decorators: Option<bool>,
     pub emit_decorator_metadata: Option<bool>,
+    /// `module`, lower-cased by the normalization pass. `commonjs` makes Nub compile
+    /// a `.ts`/`.tsx` file's `import`/`export` to CommonJS, as `tsc` emits it.
+    pub module: Option<String>,
+    /// `esModuleInterop` as written; absent stays `None`, because its default moved
+    /// between TypeScript 5 and 6 and the runtime resolves it per project.
+    pub es_module_interop: Option<bool>,
 }
 
 /// Result of [`load_tsconfig`]. `path`/`compiler_options` are `None` when no
@@ -1504,6 +1510,11 @@ fn extract_compiler_options(map: &Map<String, Value>) -> TsCompilerOptions {
             .map(str::to_string),
         experimental_decorators: map.get("experimentalDecorators").and_then(Value::as_bool),
         emit_decorator_metadata: map.get("emitDecoratorMetadata").and_then(Value::as_bool),
+        module: map
+            .get("module")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        es_module_interop: map.get("esModuleInterop").and_then(Value::as_bool),
     }
 }
 

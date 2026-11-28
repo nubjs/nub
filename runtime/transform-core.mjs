@@ -280,6 +280,12 @@ export function dataExtsFor(url) {
 // Packages resolved from Nub's distribution, not the user's.
 export const VENDORED_PACKAGES = new Set(["@oxc-project/runtime"]);
 
+// The name CommonJS output `require()`s Nub's transpile helpers by, in place of
+// `@oxc-project/runtime`, so the resolvers can tell the emit's request from a
+// project's own `require()` of that package, which keeps its installed copy as on
+// plain Node. Nothing publishes it; only resolveSpec and resolveCjsPath answer it.
+export const HELPERS_SPECIFIER = "@nubjs/oxc-runtime";
+
 // Package clobbering: specifiers that resolve to a synthetic module re-exporting
 // the native global instead of the userland package.
 export const CLOBBER_MAP = new Map([
@@ -437,6 +443,22 @@ function safeRequireResolve(specifier) {
 // that cost scaled with the number of decorated files instead of the handful of
 // distinct helpers (#795).
 const vendoredResolutions = new Map();
+
+function vendoredUrl(specifier) {
+  let url = vendoredResolutions.get(specifier);
+  if (url === undefined) {
+    const resolved = safeRequireResolve(specifier);
+    url = resolved ? pathToFileURL(resolved).href : null;
+    vendoredResolutions.set(specifier, url);
+  }
+  return url;
+}
+
+// The vendored file a HELPERS_SPECIFIER request names, as a file: URL, or null.
+function emittedHelperUrl(specifier) {
+  if (!specifier.startsWith(`${HELPERS_SPECIFIER}/`)) return null;
+  return vendoredUrl(`@oxc-project/runtime${specifier.slice(HELPERS_SPECIFIER.length)}`);
+}
 
 export function barePkg(specifier) {
   return specifier.startsWith("@")
@@ -602,15 +624,14 @@ export function resolveSpec(specifier, parentURL, fromRequire = false, skipAddit
   if (specifier.startsWith("node:") || specifier.startsWith("data:")) return null;
   if (module.isBuiltin(specifier)) return null;
 
-  // 1. Vendored packages (e.g. @oxc-project/runtime).
+  // 1. Vendored packages: the helpers CommonJS output requires, and the
+  // `@oxc-project/runtime` imports of ES module output. A `require()` of the package
+  // by name is a project's own and resolves as on plain Node.
+  const helperUrl = emittedHelperUrl(specifier);
+  if (helperUrl) return { url: helperUrl, shortCircuit: true };
   const bare = barePkg(specifier);
-  if (VENDORED_PACKAGES.has(bare)) {
-    let url = vendoredResolutions.get(specifier);
-    if (url === undefined) {
-      const resolved = safeRequireResolve(specifier);
-      url = resolved ? pathToFileURL(resolved).href : null;
-      vendoredResolutions.set(specifier, url);
-    }
+  if (VENDORED_PACKAGES.has(bare) && !fromRequire) {
+    const url = vendoredUrl(specifier);
     if (url) return { url, shortCircuit: true };
   }
 
@@ -742,10 +763,10 @@ export async function resolveRedirectAsync(redirect, context, next) {
 
 // CommonJS `require()` resolution for the compat-tier Module._resolveFilename
 // patch. Returns an absolute file path for a require specifier nub should
-// redirect (tsconfig `paths`, extensionless `.ts`, `.js`→`.ts` swap), or null to
-// defer to Node's resolver. Mirrors resolveSpec step 3 but returns a path (not
-// a URL) and never handles clobber/vendored/builtin — those are import-only, and
-// a clobber's data: URL can't be a require target. `parentPath` is the requiring
+// redirect (tsconfig `paths`, extensionless `.ts`, `.js`→`.ts` swap, Nub's
+// transpile helpers), or null to defer to Node's resolver. Mirrors resolveSpec
+// steps 1 and 3 but returns a path (not a URL) and never handles clobber/builtin
+// — those are import-only, and a clobber's data: URL can't be a require target. `parentPath` is the requiring
 // file's absolute path (from the CJS parent Module), or null for the entry.
 // A `{ packages, otherwise }` object is the native `paths` redirect: the caller asks
 // Node for each package's self-reference from inside it (see `resolveRedirect`).
@@ -754,9 +775,13 @@ export function resolveCjsPath(request, parentPath, lookupPaths) {
       module.isBuiltin(request)) {
     return null;
   }
+  // Nub's transpile helpers, which CommonJS output requires by HELPERS_SPECIFIER:
+  // from Nub's distribution, since the standalone runner puts nothing on NODE_PATH.
+  const helperUrl = emittedHelperUrl(request);
+  if (helperUrl) return fileURLToPath(helperUrl);
   // The SAME native additive resolver as resolveSpec, returning an absolute path
-  // (not a URL). Vendored/clobber/builtin are import-only and never reach here. A
-  // null result (node_modules / `exports` / a plain bare package) falls through to
+  // (not a URL). Clobber/builtin are import-only and never reach here. A null
+  // result (node_modules / `exports` / a plain bare package) falls through to
   // Node's CJS resolver — the compat boundary.
   return resolveTs(request, parentPath || "", lookupPaths);
 }
@@ -929,6 +954,55 @@ function detectModuleInfo(filePath, source, lang) {
   }
 }
 
+// The format Node's default load gives a `file:` URL, by the rules of its
+// `get_format.js`: `.cjs`, `.mjs` and `.json` by extension, and a `.js` or
+// extensionless file by its package's `type` or, with none, by its syntax. An
+// extensionless WebAssembly binary is `wasm`. Null for any other extension, which
+// Node gives a format only behind a flag or refuses.
+export function nodeFileFormat(url) {
+  if (!isFileUrl(url)) return null;
+  const filePath = fileURLToPath(url);
+  const base = filePath.slice(Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\")) + 1);
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot) : "";
+  if (ext === ".cjs") return "commonjs";
+  if (ext === ".mjs") return "module";
+  if (ext === ".json") return "json";
+  if (ext !== ".js" && ext !== "") return null;
+  const type = nodePackageType(dirname(filePath));
+  if (ext === ".js" && (type === "commonjs" || type === "module")) return type;
+  if (ext === "" && type === "commonjs") return "commonjs";
+  let source;
+  try { source = readFileSync(filePath); } catch { return null; }
+  if (ext === "" && source.length >= 4 && source[0] === 0 && source[1] === 0x61 &&
+      source[2] === 0x73 && source[3] === 0x6d) {
+    return "wasm";
+  }
+  if (ext === "" && type === "module") return "module";
+  return moduleFormatFor(".js", undefined, filePath, source.toString("utf8"));
+}
+
+// The `type` of the package.json Node's package scope lookup finds for `dir`: the
+// nearest one, never past a `node_modules` directory, so a file in `node_modules`
+// with no package.json of its own has no type.
+function nodePackageType(dir) {
+  for (let current = dir; ; ) {
+    const name = current.slice(Math.max(current.lastIndexOf("/"), current.lastIndexOf("\\")) + 1);
+    if (name === "node_modules") return undefined;
+    const pkgPath = join(current, "package.json");
+    if (fileExists(pkgPath)) {
+      try {
+        return JSON.parse(readFileSync(pkgPath, "utf8").replace(/^\uFEFF/, "")).type;
+      } catch {
+        return undefined;
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
 // Map a transpiled file's extension + nearest package.json "type" to the module
 // format Node's loader should use. `.mts`/`.cts` are explicit; an explicit
 // `type` is authoritative; otherwise (ambiguous) we detect from source syntax —
@@ -952,9 +1026,94 @@ function moduleFormatWithInfo(ext, pkgType, filePath, source) {
   if (ext === ".mts" || ext === ".mjs") return { format: "module", info: null };
   if (ext === ".cts" || ext === ".cjs") return { format: "commonjs", info: null };
   if (pkgType === "module") return { format: "module", info: null };
+  if (tsconfigEmitsCommonJs(ext, pkgType, filePath)) return { format: "commonjs", info: null };
   if (pkgType === "commonjs") return { format: "commonjs", info: null };
   const info = detectModuleInfo(filePath, source, langFor(ext));
   return { format: info.hasValueEsmSyntax ? "module" : "commonjs", info };
+}
+
+// ── CommonJS emit (`"module": "commonjs"`) ──────────────────────────
+// A `.ts`/`.tsx` file whose tsconfig says `"module": "commonjs"`, outside a
+// `"type": "module"` package, runs as the CommonJS `tsc` would emit for it: its
+// `import`/`export` compile to `require`/`exports` (nub-native `cjs.rs`), so
+// `__dirname`, `require` and `module` work, as they do under ts-node. This
+// overrides both Node's syntax detection (no `"type"`) and an explicit
+// `"type": "commonjs"`, where Node would refuse the `import` outright. `.mts` and
+// `.cts` keep their extension's format, and `node16`/`nodenext` keep Node's rules.
+function tsconfigEmitsCommonJs(ext, pkgType, filePath) {
+  if ((ext !== ".ts" && ext !== ".tsx") || pkgType === "module") return false;
+  const module_ = getTsconfigForDir(dirname(filePath)).compilerOptions?.module;
+  return typeof module_ === "string" && module_.toLowerCase() === "commonjs";
+}
+
+// The same question for a load hook holding only a URL.
+export function emitsCommonJs(url) {
+  const ext = extname(url);
+  if (ext !== ".ts" && ext !== ".tsx") return false;
+  const filePath = fileURLToPath(url);
+  return tsconfigEmitsCommonJs(ext, getPackageType(dirname(filePath)), filePath);
+}
+
+// The question CommonJS output's dynamic `import()` asks before it imports
+// (nub-native `cjs.rs` `IMPORT_DYNAMIC`): which URL does `import(specifier)` from
+// `parentURL` load, and in which format? Both hook tiers answer it with a module whose
+// default is `{ url, format }`, the URL resolved the way the real import is and the
+// format the load gives that file. Without Nub's hooks the request is an ordinary
+// module whose default is null. Must match the prefix in `cjs.rs`.
+const IMPORT_TARGET = "data:text/javascript,export default null//import-target:";
+export function importTargetQuestion(specifier) {
+  if (typeof specifier !== "string" || !specifier.startsWith(IMPORT_TARGET)) return null;
+  try {
+    const asked = JSON.parse(decodeURIComponent(specifier.slice(IMPORT_TARGET.length)));
+    return Array.isArray(asked) && typeof asked[0] === "string" && typeof asked[1] === "string"
+      ? asked
+      : null;
+  } catch {
+    return null;
+  }
+}
+export function importTargetAnswer(url) {
+  let format = nodeFileFormat(url);
+  const ext = extname(url);
+  if (format === null && TRANSPILE_EXTS.has(ext)) {
+    // Nub's own load gives TypeScript and JSX files their format.
+    try {
+      const filePath = fileURLToPath(url);
+      const source = readFileSync(filePath, "utf8");
+      format = moduleFormatFor(ext, getPackageType(dirname(filePath)), filePath, source);
+    } catch { /* unreadable: the import reports it */ }
+  }
+  return `data:text/javascript,export default ${encodeURIComponent(JSON.stringify({ url, format }))}`;
+}
+
+// `esModuleInterop` as `tsc` applies it to this project. An explicit value wins.
+// Absent, its default depends on the compiler: TypeScript 6 turned it on, and 5
+// and earlier left it off, so the project's own `typescript` decides, read from
+// the nearest `node_modules` above its tsconfig. With none found, on, which is
+// also how Node's own `import` of CommonJS behaves.
+const interopDefaultCache = new Map();
+function esModuleInteropFor(tsconfig) {
+  const explicit = tsconfig.compilerOptions?.esModuleInterop;
+  if (typeof explicit === "boolean") return explicit;
+  const key = tsconfig.path || "";
+  if (interopDefaultCache.has(key)) return interopDefaultCache.get(key);
+  let interop = true;
+  let dir = tsconfig.path ? dirname(tsconfig.path) : null;
+  while (dir) {
+    const manifest = join(dir, "node_modules", "typescript", "package.json");
+    if (fileExists(manifest)) {
+      try {
+        const major = Number.parseInt(JSON.parse(readFileSync(manifest, "utf8")).version, 10);
+        if (major < 6) interop = false;
+      } catch {}
+      break;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  interopDefaultCache.set(key, interop);
+  return interop;
 }
 
 // The Stage-3-decorator rejection diagnostic. oxc does not lower TC39 Stage 3
@@ -1253,6 +1412,9 @@ export function loadTranspile(url, ext, source) {
   const { format, info: moduleInfo } = moduleFormatWithInfo(ext, pkgType, filePath, source);
 
   const lang = langFor(ext);
+  const cjs = format === "commonjs" && tsconfigEmitsCommonJs(ext, pkgType, filePath)
+    ? { esModuleInterop: esModuleInteropFor(getTsconfigForDir(dir)) }
+    : undefined;
 
   const opts = {
     lang,
@@ -1261,8 +1423,8 @@ export function loadTranspile(url, ext, source) {
     // Lower syntax newer than the 22.15 floor. Critically this downlevels
     // `using`/`await using` (Explicit Resource Management) — unparseable on Node
     // 22's V8 — into the vendored `@oxc-project/runtime/helpers/usingCtx` shape,
-    // which resolves via VENDORED_PACKAGES. Without a target, oxc leaves `using`
-    // verbatim and Node 22 throws a SyntaxError. es2022 is the highest target
+    // which resolves from Nub's distribution (resolveSpec step 1). Without a
+    // target, oxc leaves `using` verbatim and Node 22 throws a SyntaxError. es2022 is the highest target
     // that still lowers `using` while leaving everything Node 22 already supports
     // (top-level await, class fields, private methods) untouched.
     target: "es2022",
@@ -1272,6 +1434,10 @@ export function loadTranspile(url, ext, source) {
     decorator: co?.experimentalDecorators === true
       ? { legacy: true, emitDecoratorMetadata: co?.emitDecoratorMetadata === true }
       : undefined,
+    cjs,
+    // CommonJS output `require()`s its helpers by a name of Nub's own (see
+    // HELPERS_SPECIFIER); ES module output imports `@oxc-project/runtime`.
+    helpers: format === "commonjs" ? { moduleName: HELPERS_SPECIFIER } : undefined,
   };
   if (lang === "tsx" || lang === "jsx") {
     opts.jsx = {
@@ -1305,10 +1471,13 @@ export function loadTranspile(url, ext, source) {
   const formatByte = format === "commonjs" ? "c" : "m";
   // The RAW configured loader, not `lang`: a non-TS/JSX loader (`text`, `json5`)
   // changes the output without changing `lang`, so the key must see it.
+  // `cjs` too: its interop default comes from the installed TypeScript, which the
+  // tsconfig hash cannot see.
   const runtimeHash = JSON.stringify({
     loader: RUNTIME_LOADER[ext] || null,
     tsconfig: RUNTIME_TSCONFIG || null,
     compilerOptions: RUNTIME_COMPILER_OPTIONS,
+    cjs: cjs || null,
   });
   // process.version decides how the appended `//# sourceURL` is percent-encoded:
   // it is spelled to match THIS host's pathToFileURL, whose escape set widened

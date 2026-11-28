@@ -584,6 +584,7 @@ dependencies = [
  "oxc",
  "oxc_napi",
  "oxc_sourcemap",
+ "oxc_traverse",
  "rustc-hash",
  "serde_json",
 ]

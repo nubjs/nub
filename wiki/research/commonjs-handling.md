@@ -126,7 +126,7 @@ The stance is the most opinionated possible: **your code is ESM, even when its d
 
 tsx uses `es-module-lexer` to detect ESM vs CJS for ambiguous files.
 
-It records the result as `module-typescript` vs `commonjs-typescript` format strings to Node's loader. In practice tsx is ESM-biased — if a `.ts` file lacks both `import` and `require()`, tsx defaults to ESM, which can break old-style CJS TS scripts. An empirical test confirms this: tsx mis-handles a CJS-syntax `.ts` file when `package.json` says ESM, while Bun and Deno get it right.
+It records the result as `module-typescript` vs `commonjs-typescript` format strings to Node's loader. In a package with no `"type"`, tsx 4.23 runs a `.ts` file as CommonJS and compiles its `import` statements to `require()`, so `__dirname` works whatever the tsconfig says. Under `"type": "module"`, a CommonJS-syntax `.ts` file fails under tsx, while Bun and Deno run it.
 
 ### ts-node
 
@@ -143,11 +143,11 @@ Six rows against three axes. Nub's syntax override is the only one scoped to the
 | Node 22.7+ | Syntax detection (default ESM only if ESM markers) | No | CJS (no detection for `.ts`) |
 | Bun 1.2+ | Syntax detection w/ richer heuristics | Yes | ESM unless syntax says CJS |
 | Deno 2+ | ESM only | N/A (user code is always ESM) | ESM |
-| tsx | ESM bias | Half — only when no explicit `"type"` | ESM (bias) |
+| tsx | ESM bias | Half — only when no explicit `"type"` | CJS, `import` compiled to `require()` |
 | ts-node | Defers to tsconfig + `"type"` | No | Per tsconfig (CJS by default) |
-| **Nub planned** | Node default for non-owned `.js`; syntax wins for owned files | **Yes** for owned files (`.ts`/`.tsx`/`.jsx`/transformed `.js`) | Syntax wins, ESM fallback |
+| **Nub planned** | Node default for non-owned `.js`; syntax wins for owned files | **Yes** for owned files (`.ts`/`.tsx`/`.jsx`/transformed `.js`) | CJS when the tsconfig sets `module: commonjs`; else syntax wins, ESM fallback |
 
-The TS-file column is the interesting one: Bun, Deno, and Nub all treat unbuilt TS as ESM-by-default, which is the right call because modern TS is written ESM-shaped 95%+ of the time. ts-node's CJS-default is a relic of the old "transpile to CJS, run on Node 12" world.
+The TS-file column is the interesting one. Bun, Deno, and Nub treat unbuilt TS as ESM by default, because modern TS is written ESM-shaped. A tsconfig that sets `"module": "commonjs"` is the exception Nub honors, as ts-node does: those files are written for `tsc`'s CommonJS output, so Nub compiles them the same way.
 
 ## Five candidate stances for Nub
 
@@ -212,6 +212,22 @@ Two cheap quality-of-life moves that hold regardless of the stance:
 
 Neither requires modifying Node, and neither is a behavioral change beyond "the runtime is more helpful when things go wrong."
 
+### Projects whose tsconfig asks for CommonJS
+
+A `.ts` or `.tsx` file whose tsconfig sets `"module": "commonjs"`, under a package.json without `"type": "module"`, compiles to CommonJS as `tsc` emits it. This wins over syntax detection and over `"type": "commonjs"`.
+
+Such a file is written against `tsc`'s CommonJS output, with `__dirname`, `require` and `module` beside `import`, and ts-node and tsx both run it that way. Run as an ES module, it fails at the first `__dirname`. The pass is [[crates/nub-native/src/cjs.rs#to_commonjs]], requested per file by the runtime's format decision.
+
+- **Emit:** one `require()` per import, `exports.<name>` per export, the `__esModule` marker, and `tsc` 5.9's own `__importDefault`, `__importStar` and `__exportStar` helpers, inline, chosen per import as `tsc` chooses them. A write to an exported binding reaches every name it is exported as, destructuring included. A `.mts` file stays an ES module, and a `.cts` file is left as it is.
+- **Interop:** an explicit `esModuleInterop` wins. When it is unset, the installed TypeScript's major decides: off for 5, on from 6, where `false` is deprecated. With no TypeScript installed it is on.
+- **Dynamic import:** `import()` stays a real dynamic import, so an ES-module-only package loads on every supported Node, where `tsc`'s `require()` form needs `require(esm)`. A builtin comes back as `tsc`'s `require()` returns it. For anything else the loader first answers which URL the import loads, resolved as the real import is and not loaded, and the format its load gives that file. When that URL is the file `require.resolve` names, a JSON file is required, since `import()` refuses JSON without an attribute, and a CommonJS file comes back as its live `module.exports`. Anything else comes back as the import's namespace, including an ES module that default-exports a CommonJS module's exports, and one that `require()` loaded under its `module.exports` export. With import attributes, the real `import()` answers alone.
+- **Entry:** on Node 20.19 to 22.14, where hooks run in a loader thread, Nub hands a CommonJS entry back to Node without its source, so Node's CommonJS loader runs it. Given the source, Node runs the entry in a wrapper whose `require()` of an ES module fails. Node makes the entry the main module only if its own import of it creates the module job, so the fetch-handler check imports the entry only after the loader thread reports that Node has started loading it, which Node does after creating the job. Nothing waits in the loader thread, so a preload's own `import()` of the entry runs as on plain Node.
+- **User hooks:** a file the emit owns still compiles to CommonJS under a user `registerHooks` hook. Handed its raw source instead, Node strips the types, finds `export`, and loads it again as an ES module.
+- **Helpers:** CommonJS output requires its transpile helpers by a name only Nub's resolvers answer, so a project's own `require()` of `@oxc-project/runtime` gets its installed copy.
+- **Checked against `tsc`:** [[crates/nub-cli/tests/ts_commonjs_corpus.rs#commonjs_output_observes_what_tsc_emit_observes]] compares what an importer observes for each import and export form with `tsc` 5.9.3's emit, `esModuleInterop` on and off. `tsc` leaves an export stale after a `for … in` or `for … of` head writes it, and Nub updates it, as an ES module would.
+- **Refused:** top-level `await` and `import.meta` have no CommonJS form, so either stops the run with an error naming the file.
+- **Not covered:** `"module": "node16"` and `"nodenext"`, whose files keep the syntax rule.
+
 ## Sources
 
 The Node issues and PRs, the npm ecosystem crawl, and the runtime documentation behind every claim above.
@@ -246,3 +262,4 @@ Every revision to this document, with the date and what changed.
 
 - 2026-07-30 — Initial publication.
 - 2026-08-28 — Trimmed to the measured findings and current behavior.
+- 2026-11-27 — Added the rule for a tsconfig that sets `"module": "commonjs"`. Corrected tsx's format choice in a package with no `"type"`, measured on tsx 4.23.15.
