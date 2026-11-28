@@ -4,7 +4,8 @@
 //! where they cannot compose with the loader, so the hook thread crashed: a `--require`
 //! preload exited 1 with no output, and a call from the program threw. Where Node's sync
 //! validator refuses a missing CommonJS source (through 22.22.2 and 24.11.0), an `import`
-//! of a CommonJS file then threw instead of loading it.
+//! of a CommonJS file then threw instead of loading it. A loader's missing source for a
+//! JSON file still fails as under Node.
 //!
 //! Each leg runs on the Node on `PATH` and on every pinned Node CI provides.
 
@@ -119,6 +120,31 @@ require("node:module").register("data:text/javascript," + encodeURIComponent(hoo
         "self.cjs",
         "require('./register.cjs');\nimport('./main.mjs');\n",
     );
+    // A loader that answers a JSON file and a CommonJS file with no source, the second
+    // after its resolve hinted `module`. Node refuses the first and loads the second.
+    write(
+        root,
+        "nullish.cjs",
+        r#"const hook = `
+export async function resolve(specifier, context, next) {
+  const result = await next(specifier, context);
+  return specifier.endsWith("hinted.cjs") ? { ...result, format: "module" } : result;
+}
+export async function load(url, context, next) {
+  if (url.endsWith("/data.json")) return { format: "json", source: null, shortCircuit: true };
+  if (url.endsWith("/hinted.cjs")) return { format: "commonjs", source: null, shortCircuit: true };
+  return next(url, context);
+}`;
+require("node:module").register("data:text/javascript," + encodeURIComponent(hook));
+"#,
+    );
+    write(root, "data.json", "{}\n");
+    write(root, "hinted.cjs", "module.exports = 'hinted';\n");
+    write(
+        root,
+        "nullish.mjs",
+        "const json = await import('./data.json', { with: { type: 'json' } }).then(() => 'loaded', (e) => e.code);\nconst hinted = await import('./hinted.cjs').then((m) => m.default, (e) => e.code);\nconsole.log(json, hinted);\n",
+    );
     dir
 }
 
@@ -127,10 +153,11 @@ fn a_runtime_register_runs_the_program_as_under_node() {
     let dir = fixture();
     let root = dir.path();
     let nub = PathBuf::from(env!("CARGO_BIN_EXE_nub"));
-    let cases: [(&str, Option<&str>); 3] = [
+    let cases: [(&str, Option<&str>); 4] = [
         ("main.cjs", Some("--require=./register.cjs")),
         ("main.mjs", Some("--require=./register.cjs")),
         ("self.cjs", None),
+        ("nullish.mjs", Some("--require=./nullish.cjs")),
     ];
     for (name, node_dir) in nodes() {
         let node = node_dir
@@ -150,22 +177,14 @@ fn a_runtime_register_runs_the_program_as_under_node() {
         {
             let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
             let runner = format!("--import={}/loader-register.mjs", runtime.display());
-            for entry in ["main.cjs", "main.mjs"] {
+            for (entry, preload) in [
+                ("main.cjs", "--require=./register.cjs"),
+                ("main.mjs", "--require=./register.cjs"),
+                ("nullish.mjs", "--require=./nullish.cjs"),
+            ] {
                 let what = format!("{name}: the standalone runner on {entry}");
-                let expected = run(
-                    &node,
-                    None,
-                    root,
-                    &["--require=./register.cjs", entry],
-                    None,
-                );
-                let actual = run(
-                    &node,
-                    None,
-                    root,
-                    &["--require=./register.cjs", &runner, entry],
-                    None,
-                );
+                let expected = run(&node, None, root, &[preload, entry], None);
+                let actual = run(&node, None, root, &[preload, &runner, entry], None);
                 assert_matches_node(&expected, &actual, &what);
             }
         }
