@@ -386,8 +386,8 @@ fn legs(path_node: bool) -> Vec<(String, Option<PathBuf>, bool)> {
 /// both conditions name, through a package's `exports` or the project's `imports`,
 /// comes back as `require()` returns it, but an ES module target that imports the
 /// `require` target's JSON without an attribute still fails as it does under Node. A
-/// CommonJS module comes back with the values it has now, not the ones Node copied on
-/// the first import, and without a second request a hook could send elsewhere:
+/// CommonJS module, an extensionless one in a `"type": "commonjs"` package included,
+/// comes back with the values it has now, not the ones Node copied on the first import, and without a second request a hook could send elsewhere:
 /// `redirect.cjs` points only `dep.cjs`'s absolute URL at a module that announces
 /// itself. Where it can, it uses
 /// `registerHooks`, and a file with `export` under one still compiles to CommonJS:
@@ -465,11 +465,14 @@ export const named = 'esm';
   const counter: any = await import("./counter.cjs");
   counter.bump();
   const again: any = await import("./counter.cjs");
+  const typeless: any = await import("./cjs/counter");
+  typeless.bump();
+  const typelessAgain: any = await import("./cjs/counter");
   const clash: any = await import("clash");
   require("./override.mjs");
   const override: any = await import("./override.mjs");
   const jsondep = await import("jsondep").then(() => "loaded", (e: any) => e.code);
-  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, clash.value, override.named, jsondep);
+  console.log(typeof text.default, split.from, dual.named, dual.default.cjs, dataset.from, alias.a, again.value, typelessAgain.value, clash.value, override.named, jsondep);
 }
 main();
 "##,
@@ -504,6 +507,12 @@ main();
         root,
         "node_modules/jsondep/data.json",
         r#"{"from":"jsondep"}"#,
+    );
+    write(root, "cjs/package.json", r#"{"type":"commonjs"}"#);
+    write(
+        root,
+        "cjs/counter",
+        "exports.value = 1;\nexports.bump = function () { exports.value = 2; };\n",
     );
     write(
         root,
@@ -544,7 +553,7 @@ if (mod.registerHooks) {
         let out = run(root, node_dir.as_deref(), standalone, "main.ts");
         assert_eq!(
             stdout(&out, &what),
-            "string index.mjs esm cjs dataset 1 2 42 namespace ERR_IMPORT_ATTRIBUTE_MISSING",
+            "string index.mjs esm cjs dataset 1 2 2 42 namespace ERR_IMPORT_ATTRIBUTE_MISSING",
             "{what}"
         );
         // Under a user hook the standalone runner hands a TypeScript entry a `require`

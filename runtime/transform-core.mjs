@@ -924,6 +924,34 @@ function detectModuleInfo(filePath, source, lang) {
   }
 }
 
+// The format Node's default load gives a `file:` URL, by the rules of its
+// `get_format.js`: `.cjs`, `.mjs` and `.json` by extension, and a `.js` or
+// extensionless file by its package's `type` or, with none, by its syntax. An
+// extensionless WebAssembly binary is `wasm`. Null for any other extension, which
+// Node gives a format only behind a flag or refuses.
+export function nodeFileFormat(url) {
+  if (!isFileUrl(url)) return null;
+  const filePath = fileURLToPath(url);
+  const base = filePath.slice(Math.max(filePath.lastIndexOf("/"), filePath.lastIndexOf("\\")) + 1);
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot) : "";
+  if (ext === ".cjs") return "commonjs";
+  if (ext === ".mjs") return "module";
+  if (ext === ".json") return "json";
+  if (ext !== ".js" && ext !== "") return null;
+  const type = getPackageType(dirname(filePath));
+  if (ext === ".js" && (type === "commonjs" || type === "module")) return type;
+  if (ext === "" && type === "commonjs") return "commonjs";
+  let source;
+  try { source = readFileSync(filePath); } catch { return null; }
+  if (ext === "" && source.length >= 4 && source[0] === 0 && source[1] === 0x61 &&
+      source[2] === 0x73 && source[3] === 0x6d) {
+    return "wasm";
+  }
+  if (ext === "" && type === "module") return "module";
+  return moduleFormatFor(".js", undefined, filePath, source.toString("utf8"));
+}
+
 // Map a transpiled file's extension + nearest package.json "type" to the module
 // format Node's loader should use. `.mts`/`.cts` are explicit; an explicit
 // `type` is authoritative; otherwise (ambiguous) we detect from source syntax —
@@ -994,17 +1022,15 @@ export function importTargetQuestion(specifier) {
   }
 }
 export function importTargetAnswer(url) {
-  let format = null;
-  if (isFileUrl(url)) {
-    const filePath = fileURLToPath(url);
-    const ext = extname(url);
-    if (ext === ".json") format = "json";
-    else if (TRANSPILE_EXTS.has(ext) || PLAIN_JS_EXTS.has(ext)) {
-      try {
-        const source = readFileSync(filePath, "utf8");
-        format = moduleFormatFor(ext, getPackageType(dirname(filePath)), filePath, source);
-      } catch { /* unreadable: the import reports it */ }
-    }
+  let format = nodeFileFormat(url);
+  const ext = extname(url);
+  if (format === null && TRANSPILE_EXTS.has(ext)) {
+    // Nub's own load gives TypeScript and JSX files their format.
+    try {
+      const filePath = fileURLToPath(url);
+      const source = readFileSync(filePath, "utf8");
+      format = moduleFormatFor(ext, getPackageType(dirname(filePath)), filePath, source);
+    } catch { /* unreadable: the import reports it */ }
   }
   return `data:text/javascript,export default ${encodeURIComponent(JSON.stringify({ url, format }))}`;
 }
