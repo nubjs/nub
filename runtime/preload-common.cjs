@@ -54,7 +54,7 @@ const getBuiltin = typeof compileBootstrap?.getBuiltin === "function"
 const module_ = getBuiltin("node:module");
 const { readdirSync, existsSync } = getBuiltin("node:fs");
 const { fileURLToPath, pathToFileURL } = getBuiltin("node:url");
-const { join, dirname, extname: pathExtname, resolve: pathResolve } = getBuiltin("node:path");
+const { join, dirname, basename, extname: pathExtname, resolve: pathResolve } = getBuiltin("node:path");
 
 // Hide nub's ARGV-only V8 flags from `process.execArgv`, FIRST — before any user
 // code, and before anything here can hand the array out.
@@ -672,6 +672,36 @@ function resolveViaParentRequire(specifier, parentURL) {
   }
 }
 
+// Nub's additive answer for a CommonJS request. A tsconfig alias belongs to the real
+// importer, whatever `paths` says. A bare subpath is probed in the directories Node
+// searches: the parent's `module.paths`, or the roots of a `paths` option. A relative
+// request under `paths` resolves in each root in turn, as Node resolves it, and stops
+// at the first root Node answers from itself, with a file or with an error that ends
+// its lookup. A caller inside `node_modules` gets Node's answer alone.
+function cjsAdditiveResolve(core, request, parent, parentPath, isMain, options) {
+  const roots = options != null && ArrayIsArray(options.paths) ? options.paths : null;
+  if (roots === null || !(request.startsWith("./") || request.startsWith("../"))) {
+    const lookup = core.isBareSubpath(request)
+      ? cjsLookupPaths(request, parent, options)
+      : undefined;
+    return core.resolveCjsPath(request, parentPath, lookup);
+  }
+  if (parentPath !== null && core.isNodeModules(parentPath)) return null;
+  const name = parentPath === null ? "index.js" : basename(parentPath);
+  for (let i = 0; i < roots.length; i++) {
+    if (typeof roots[i] !== "string") return null;
+    const root = pathResolve(roots[i]);
+    const hit = core.resolveCjsPath(request, join(root, name));
+    if (typeof hit === "string") return core.cjsRealPath(hit);
+    try {
+      if (module_._findPath(request, [root], isMain)) return null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 // The `node_modules` directories Node's CommonJS resolver searched for a bare
 // request, built the way `Module._resolveFilename` builds them: each root of a
 // `require.resolve` `paths` option expanded on its own, else the parent's.
@@ -845,7 +875,11 @@ function makeHooks(core, watchReporting, foreignLoaderFlagPresent = foreignAsync
     // and leaves it undefined for `require()` and `createRequire()`. The conditions
     // cannot tell the two apart: a user may add "require" as a custom condition.
     const fromRequire = context.importAttributes === undefined;
-    const r = core.resolveSpec(specifier, context.parentURL, fromRequire);
+    // A `require()` gets Nub's additive answer from the `_resolveFilename` patch inside
+    // Node's default step, with the parent module and any `require.resolve` options;
+    // this hook sees only the parent's URL. Under PnP the hook keeps it, as before.
+    const r = core.resolveSpec(specifier, context.parentURL, fromRequire,
+      fromRequire && !process.versions.pnp);
     if (r && !r.redirect) return r;
     const nextContext = core.nextResolveContext(context);
     // Yarn PnP (ESM): PnP doesn't patch the ESM loader, so `import` of a PnP dep must
@@ -1339,7 +1373,7 @@ function installCjsRequireHooks(core, withClassicTranspile) {
     let resolved = null;
     try {
       const parentPath = parent && typeof parent.filename === "string" ? parent.filename : null;
-      resolved = core.resolveCjsPath(request, parentPath);
+      resolved = cjsAdditiveResolve(core, request, parent, parentPath, isMain, options);
     } catch { /* fall through to Node */ }
     if (resolved !== null && typeof resolved === "object") {
       // A `paths` redirect (see transform-core `resolveRedirect`). Node's CommonJS
