@@ -13236,6 +13236,129 @@ fn pm_refuses_a_registry_answering_an_exact_pin_with_another_version() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `store status` fails on a dependency link missing from a shared store entry,
+/// which leaves the package unloadable from every project linked to that entry.
+#[cfg(unix)]
+#[test]
+fn store_status_reports_a_dependency_link_missing_from_a_store_entry() {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let dir = unique_test_cache();
+    let project = dir.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let packages = [("dep-a", r#"{"dep-b":"1.0.0"}"#), ("dep-b", "{}")];
+    let packed: Vec<_> = packages
+        .iter()
+        .map(|(name, deps)| {
+            let pkg = dir.join(format!("pack-{name}/package"));
+            std::fs::create_dir_all(&pkg).unwrap();
+            std::fs::write(
+                pkg.join("package.json"),
+                format!(r#"{{"name":"{name}","version":"1.0.0","dependencies":{deps}}}"#),
+            )
+            .unwrap();
+            let tgz = dir.join(format!("{name}.tgz"));
+            let status = Command::new("tar")
+                .arg("czf")
+                .arg(&tgz)
+                .arg("-C")
+                .arg(pkg.parent().unwrap())
+                .arg("package")
+                .status()
+                .expect("spawn tar");
+            assert!(status.success());
+            let bytes = std::fs::read(&tgz).unwrap();
+            let sri = format!(
+                "sha512-{}",
+                base64::engine::general_purpose::STANDARD.encode(sha2::Sha512::digest(&bytes))
+            );
+            (*name, *deps, bytes, sri)
+        })
+        .collect();
+    let registry = serve_registry_routes(|port| {
+        packed
+            .into_iter()
+            .flat_map(|(name, deps, tgz, sri)| {
+                let packument = format!(
+                    r#"{{"name":"{name}","dist-tags":{{"latest":"1.0.0"}},
+                        "time":{{"1.0.0":"2020-01-01T00:00:00.000Z"}},"versions":{{"1.0.0":
+                        {{"name":"{name}","version":"1.0.0","dependencies":{deps},
+                        "dist":{{"tarball":"http://127.0.0.1:{port}/{name}-1.0.0.tgz","integrity":"{sri}"}}}}}}}}"#
+                );
+                [
+                    (format!("/{name}"), packument.into_bytes()),
+                    (format!("/{name}-1.0.0.tgz"), tgz),
+                ]
+            })
+            .collect()
+    });
+    std::fs::write(
+        project.join("package.json"),
+        r#"{"dependencies":{"dep-a":"1.0.0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(project.join(".npmrc"), format!("registry={registry}\n")).unwrap();
+    let nub = |args: &[&str]| {
+        let mut cmd = Command::new(nub_binary());
+        cmd.args(args)
+            .current_dir(&project)
+            .env("HOME", &dir)
+            .env("XDG_CACHE_HOME", dir.join("cache"))
+            .env("NUB_SELF_SHIM", "0")
+            // CI turns the shared store off, and it is the store under test.
+            .env_remove("CI");
+        for (name, _) in std::env::vars_os() {
+            let lower = name.to_string_lossy().to_ascii_lowercase();
+            if lower.starts_with("npm_config_") || lower.starts_with("pnpm_config_") {
+                cmd.env_remove(&name);
+            }
+        }
+        cmd.output().expect("spawn nub")
+    };
+    let out = nub(&["install"]);
+    assert!(
+        out.status.success(),
+        "install: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = nub(&["store", "status"]);
+    assert!(
+        out.status.success(),
+        "a fresh install is consistent: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let store = dir.join("cache/nub/pm/store/v1");
+    let entry = std::fs::read_dir(&store)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("dep-a@1.0.0"))
+        })
+        .unwrap_or_else(|| panic!("no dep-a entry in the shared store at {}", store.display()));
+    let link = entry.join("node_modules/dep-b");
+    let target = std::fs::read_link(&link).expect("dep-a's entry links dep-b");
+    std::fs::remove_file(&link).unwrap();
+
+    let out = nub(&["store", "status"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(
+        stdout.contains(&format!("{}: missing dependency link", link.display())),
+        "the missing link is named by its store path: {stdout}"
+    );
+    assert!(
+        stderr.contains("1 broken dependency link"),
+        "summary counts the link: {stderr}"
+    );
+
+    std::os::unix::fs::symlink(target, &link).unwrap();
+    assert!(nub(&["store", "status"]).status.success());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A Yarn range spanning Classic and Berry takes the newest match across both
 /// packages, and provisions a Berry pick as Berry.
 #[cfg(unix)]

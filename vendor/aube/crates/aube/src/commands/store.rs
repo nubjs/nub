@@ -30,7 +30,7 @@
 use crate::commands::{make_client, packument_full_cache_dir, resolve_version, split_name_spec};
 use miette::{IntoDiagnostic, miette};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1486,15 +1486,12 @@ fn dependency_visible(pkg: &Path, variant: &Path, dep: &str) -> std::io::Result<
             Ok(md) if md.is_dir() => {
                 return Ok(true);
             }
-            Ok(_) => (),
+            Ok(_) => {}
             Err(e)
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                ()
-            }
+                ) => {}
             Err(e) => return Err(e),
         }
     }
@@ -1532,7 +1529,7 @@ fn check_modules(
     variant: &Path,
     scope: bool,
     bundled: bool,
-    broken: &mut Vec<String>,
+    problems: &mut BTreeSet<String>,
 ) -> miette::Result<()> {
     if !physical_dir(dir).into_diagnostic()? {
         return Ok(());
@@ -1546,7 +1543,7 @@ fn check_modules(
             continue;
         }
         if !scope && name.starts_with('@') {
-            check_modules(&pkg, variant, true, bundled, broken)?;
+            check_modules(&pkg, variant, true, bundled, problems)?;
             continue;
         }
         let path = pkg.join("package.json");
@@ -1554,8 +1551,8 @@ fn check_modules(
             Ok(manifest) => manifest,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                broken.push(format!("{}: {e}", path.display()));
-                check_modules(&pkg.join("node_modules"), variant, false, true, broken)?;
+                problems.insert(format!("{}: {e}", path.display()));
+                check_modules(&pkg.join("node_modules"), variant, false, true, problems)?;
                 continue;
             }
         };
@@ -1567,16 +1564,11 @@ fn check_modules(
                     continue;
                 }
                 if !dependency_visible(&pkg, variant, dep).into_diagnostic()? {
-                    broken.push(format!(
-                        "{}: missing dependency {dep}",
-                        pkg.strip_prefix(variant.parent().unwrap())
-                            .unwrap()
-                            .display()
-                    ));
+                    problems.insert(format!("{}: missing dependency {dep}", pkg.display()));
                 }
             }
         }
-        check_modules(&pkg.join("node_modules"), variant, false, true, broken)?;
+        check_modules(&pkg.join("node_modules"), variant, false, true, problems)?;
     }
     Ok(())
 }
@@ -1603,6 +1595,10 @@ fn status() -> miette::Result<()> {
         }
     })?;
 
+    // Dependency links live in the virtual store, a different tier from the
+    // CAS files above. Several projects can record the same link into one
+    // shared entry, so a set reports each defect once, by its store path.
+    let mut missing: BTreeSet<String> = BTreeSet::new();
     let root = store.virtual_store_dir();
     if root.try_exists().into_diagnostic()? {
         let store_root = root.canonicalize().into_diagnostic()?;
@@ -1625,8 +1621,13 @@ fn status() -> miette::Result<()> {
                 if !path.is_dir()
                     && let Ok(variant) = project.aube_dir.join(entry).canonicalize()
                     && variant.parent() == Some(store_root.as_path())
+                    && let (Some(name), Ok(link)) =
+                        (variant.file_name(), relative.strip_prefix(entry))
                 {
-                    broken.push(format!("{}: missing dependency link", path.display()));
+                    missing.insert(format!(
+                        "{}: missing dependency link",
+                        root.join(name).join(link).display()
+                    ));
                 }
             }
         }
@@ -1638,18 +1639,18 @@ fn status() -> miette::Result<()> {
                     &variant,
                     false,
                     false,
-                    &mut broken,
+                    &mut missing,
                 )?;
             }
         }
     }
 
-    if checked == 0 && broken.is_empty() {
+    if checked == 0 && broken.is_empty() && missing.is_empty() {
         eprintln!("Store is consistent (no cached indices found)");
         return Ok(());
     }
 
-    if broken.is_empty() {
+    if broken.is_empty() && missing.is_empty() {
         eprintln!(
             "Store is consistent: {} verified",
             pluralizer::pluralize("package", checked as isize, true)
@@ -1659,14 +1660,19 @@ fn status() -> miette::Result<()> {
         // Corruption lines go to stdout so operators can pipe them into
         // `wc -l`, `grep`, etc. while the summary/failure goes to stderr
         // via miette. Mirrors how `store add` emits data on stdout.
-        for line in &broken {
+        for line in broken.iter().chain(&missing) {
             println!("corrupt: {line}");
         }
-        Err(miette!(
-            "store contains {} corrupted {}",
-            broken.len(),
-            pluralizer::pluralize("file", broken.len() as isize, false)
-        ))
+        let mut found = Vec::new();
+        if !broken.is_empty() {
+            let noun = pluralizer::pluralize("file", broken.len() as isize, false);
+            found.push(format!("{} corrupted {noun}", broken.len()));
+        }
+        if !missing.is_empty() {
+            let noun = pluralizer::pluralize("link", missing.len() as isize, false);
+            found.push(format!("{} broken dependency {noun}", missing.len()));
+        }
+        Err(miette!("store contains {}", found.join(" and ")))
     }
 }
 
