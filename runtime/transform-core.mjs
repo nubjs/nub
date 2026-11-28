@@ -914,7 +914,7 @@ export function nodeFileFormat(url) {
   if (ext === ".mjs") return "module";
   if (ext === ".json") return "json";
   if (ext !== ".js" && ext !== "") return null;
-  const type = getPackageType(dirname(filePath));
+  const type = nodePackageType(dirname(filePath));
   if (ext === ".js" && (type === "commonjs" || type === "module")) return type;
   if (ext === "" && type === "commonjs") return "commonjs";
   let source;
@@ -925,6 +925,27 @@ export function nodeFileFormat(url) {
   }
   if (ext === "" && type === "module") return "module";
   return moduleFormatFor(".js", undefined, filePath, source.toString("utf8"));
+}
+
+// The `type` of the package.json Node's package scope lookup finds for `dir`: the
+// nearest one, never past a `node_modules` directory, so a file in `node_modules`
+// with no package.json of its own has no type.
+function nodePackageType(dir) {
+  for (let current = dir; ; ) {
+    const name = current.slice(Math.max(current.lastIndexOf("/"), current.lastIndexOf("\\")) + 1);
+    if (name === "node_modules") return undefined;
+    const pkgPath = join(current, "package.json");
+    if (fileExists(pkgPath)) {
+      try {
+        return JSON.parse(readFileSync(pkgPath, "utf8").replace(/^\uFEFF/, "")).type;
+      } catch {
+        return undefined;
+      }
+    }
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
 }
 
 // Map a transpiled file's extension + nearest package.json "type" to the module

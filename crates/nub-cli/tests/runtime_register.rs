@@ -120,8 +120,10 @@ require("node:module").register("data:text/javascript," + encodeURIComponent(hoo
         "self.cjs",
         "require('./register.cjs');\nimport('./main.mjs');\n",
     );
-    // A loader that answers a JSON file and a CommonJS file with no source, the second
-    // after its resolve hinted `module`. Node refuses the first and loads the second.
+    // A loader that answers a JSON file, a CommonJS file and an ES module with no
+    // source, the second after its resolve hinted `module`. Node loads only the second.
+    // The ES module sits in `node_modules` with no package.json of its own, where
+    // Node's package scope stops, so the `cjs` package's type does not reach it.
     write(
         root,
         "nullish.cjs",
@@ -133,6 +135,7 @@ export async function resolve(specifier, context, next) {
 export async function load(url, context, next) {
   if (url.endsWith("/data.json")) return { format: "json", source: null, shortCircuit: true };
   if (url.endsWith("/hinted.cjs")) return { format: "commonjs", source: null, shortCircuit: true };
+  if (url.endsWith("/loose/entry")) return { format: "module", source: null, shortCircuit: true };
   return next(url, context);
 }`;
 require("node:module").register("data:text/javascript," + encodeURIComponent(hook));
@@ -153,6 +156,12 @@ require("node:module").register("data:text/javascript," + encodeURIComponent(hoo
             &format!("module.exports = '{value}';\n"),
         );
     }
+    std::fs::create_dir_all(root.join("cjs/node_modules/loose")).unwrap();
+    write(
+        root,
+        "cjs/node_modules/loose/entry",
+        "export default 'loose';\n",
+    );
     write(
         root,
         "extensionless.mjs",
@@ -162,7 +171,7 @@ require("node:module").register("data:text/javascript," + encodeURIComponent(hoo
     write(
         root,
         "nullish.mjs",
-        "const json = await import('./data.json', { with: { type: 'json' } }).then(() => 'loaded', (e) => e.code);\nconst hinted = await import('./hinted.cjs').then((m) => m.default, (e) => e.code);\nconsole.log(json, hinted);\n",
+        "const json = await import('./data.json', { with: { type: 'json' } }).then(() => 'loaded', (e) => e.code);\nconst hinted = await import('./hinted.cjs').then((m) => m.default, (e) => e.code);\nconst loose = await import('./cjs/node_modules/loose/entry').then(() => 'loaded', (e) => e.code);\nconsole.log(json, hinted, loose);\n",
     );
     dir
 }
