@@ -1529,7 +1529,8 @@ fn check_modules(
     variant: &Path,
     scope: bool,
     bundled: bool,
-    problems: &mut BTreeSet<String>,
+    files: &mut Vec<String>,
+    missing: &mut BTreeSet<String>,
 ) -> miette::Result<()> {
     if !physical_dir(dir).into_diagnostic()? {
         return Ok(());
@@ -1543,7 +1544,7 @@ fn check_modules(
             continue;
         }
         if !scope && name.starts_with('@') {
-            check_modules(&pkg, variant, true, bundled, problems)?;
+            check_modules(&pkg, variant, true, bundled, files, missing)?;
             continue;
         }
         let path = pkg.join("package.json");
@@ -1551,8 +1552,15 @@ fn check_modules(
             Ok(manifest) => manifest,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                problems.insert(format!("{}: {e}", path.display()));
-                check_modules(&pkg.join("node_modules"), variant, false, true, problems)?;
+                files.push(format!("{}: {e}", path.display()));
+                check_modules(
+                    &pkg.join("node_modules"),
+                    variant,
+                    false,
+                    true,
+                    files,
+                    missing,
+                )?;
                 continue;
             }
         };
@@ -1564,11 +1572,18 @@ fn check_modules(
                     continue;
                 }
                 if !dependency_visible(&pkg, variant, dep).into_diagnostic()? {
-                    problems.insert(format!("{}: missing dependency {dep}", pkg.display()));
+                    missing.insert(format!("{}: missing dependency {dep}", pkg.display()));
                 }
             }
         }
-        check_modules(&pkg.join("node_modules"), variant, false, true, problems)?;
+        check_modules(
+            &pkg.join("node_modules"),
+            variant,
+            false,
+            true,
+            files,
+            missing,
+        )?;
     }
     Ok(())
 }
@@ -1639,6 +1654,7 @@ fn status() -> miette::Result<()> {
                     &variant,
                     false,
                     false,
+                    &mut broken,
                     &mut missing,
                 )?;
             }

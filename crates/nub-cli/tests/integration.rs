@@ -13304,6 +13304,7 @@ fn store_status_reports_a_dependency_link_missing_from_a_store_entry() {
             .current_dir(&project)
             .env("HOME", &dir)
             .env("XDG_CACHE_HOME", dir.join("cache"))
+            .env_remove("NUB_CACHE_DIR")
             .env("NUB_SELF_SHIM", "0")
             // CI turns the shared store off, and it is the store under test.
             .env_remove("CI");
